@@ -8,13 +8,15 @@ import { closeDatabase } from "./db/client.js";
 import { AppError, toAppError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
 import { type LoggerEnv, requestId } from "./middleware/request-id.js";
-import { accountsRoutes } from "./routes/accounts.js";
 import { adminNotificationRoutes } from "./routes/admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./routes/admin-notification-templates.js";
 import { adminStatsRoutes } from "./routes/admin-stats.js";
 import { adminEmailRoutes } from "./routes/admin-emails.js";
-import { examplesRoutes } from "./routes/examples.js";
+import { clubInfoRoutes } from "./routes/club-info.js";
+import { clubMemberRoutes } from "./routes/club-members.js";
+import { departmentRoutes } from "./routes/departments.js";
 import { healthRoutes } from "./routes/health.js";
+import { myClubRoutes } from "./routes/my-clubs.js";
 import { internalStatsRoutes } from "./routes/internal-stats.js";
 import { notificationRoutes } from "./routes/notifications.js";
 import { trustedOrigins } from "./lib/trusted-origins.js";
@@ -62,14 +64,16 @@ app.onError((err, c) => {
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
 app.route("/", healthRoutes);
-app.route("/accounts", accountsRoutes);
-app.route("/examples", examplesRoutes);
 app.route("/internal", internalStatsRoutes);
 app.route("/admin", adminStatsRoutes);
 app.route("/admin", adminEmailRoutes);
 app.route("/notifications", notificationRoutes);
 app.route("/admin/notifications", adminNotificationRoutes);
 app.route("/admin/notification-templates", adminNotificationTemplateRoutes);
+app.route("/my-clubs", myClubRoutes);
+app.route("/club-members", clubMemberRoutes);
+app.route("/departments", departmentRoutes);
+app.route("/club-info", clubInfoRoutes);
 
 const port = Number(process.env.PORT ?? 3000);
 // Loopback-only by default -- LAN testing (a browser hitting this machine's

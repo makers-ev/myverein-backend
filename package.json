@@ -1,5 +1,5 @@
 {
-  "name": "_template_better-auth-backend",
+  "name": "myverein-backend",
   "author": "Luca-Pascal Junge",
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:runtime": "tsx src/db/migrate.ts",
     "seed:admin": "tsx src/scripts/seed-admin.ts",
+    "seed:club": "tsx src/scripts/seed-club.ts",
     "auth:generate": "better-auth generate --config src/auth/auth.ts --output src/auth/auth-schema.ts -y",
     "lint": "eslint .",
     "test": "vitest run"

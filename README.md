@@ -1,8 +1,10 @@
-# Better Auth Backend Template
+# MyVerein Backend
 
-A production-shaped Hono API backing every other template in the suite (`_template_better-auth-website`, `_template_better-auth-mobile`). Better Auth owns identity end to end: sign-up, sign-in, sessions, two-factor, organizations, and admin roles. There is no second, hand-rolled auth path anywhere in this codebase — every client talks to the same session store through the same library.
+A Hono API for MyVerein, a club-management product for German-style Vereine (Mitgliederverwaltung, Kalender/Treffen, Lager/Material, Standort-Infocenter — see the [MyVerein Concept](../../lpj-its-vault/20_Products/MyVerein/01_Concept%20&%20Planning/Concept%20-%20MyVerein.md) in the company vault). Forked from the Better Auth Template Suite's `_template_better-auth-backend`; Better Auth still owns identity end to end (sign-up, sign-in, sessions, two-factor, organizations, admin roles) — nothing here re-implements auth.
 
-Clone it, set three environment variables, run `docker compose up`, and you have a working auth backend with an audit trail, rate limiting, and a real e-mail flow. The rest of this document explains what's actually in the box and why it's built the way it is.
+A club is a Better Auth `organization`; a club membership is Better Auth's `member` row, extended with an app-owned `club_memberships` sidecar (member number, category, join/leave date, emergency contact) plus a `club_roles` table for fine-grained board/department roles (Vorsitz, Kassenwart, Trainer, ...) layered on top of Better Auth's own coarse `member.role`. See [Data model](#data-model) for the full shape and [Key decisions](#key-decisions) for why the role model is split this way.
+
+Clone it, set three environment variables, run `docker compose up`, and you have a working backend with an audit trail, rate limiting, and a real e-mail flow. The rest of this document explains what's actually in the box and why it's built the way it is.
 
 ## Table of contents
 
@@ -58,6 +60,7 @@ curl http://localhost:3000/health
 | `npm run db:migrate` | Apply migrations via the `drizzle-kit` CLI (host mode) |
 | `npm run db:migrate:runtime` | Apply migrations via Drizzle's own migrator, no `drizzle-kit` dependency needed — what the Docker image runs |
 | `npm run seed:admin` | Create or promote the admin user from `ADMIN_EMAIL`/`ADMIN_PASSWORD` |
+| `npm run seed:club` | Bootstrap a demo club and make `ADMIN_EMAIL` its "vorsitz" — needed for local dev since there is no public "create club" route yet (Wave 1), see `src/scripts/seed-club.ts` |
 | `npm run auth:generate` | Regenerate `src/auth/auth-schema.ts` from the Better Auth config |
 | `npm run lint` | ESLint |
 | `npm test` | Vitest (unit + integration) |
@@ -69,21 +72,22 @@ Hono handles routing and middleware; Better Auth owns everything under `/api/aut
 ```mermaid
 flowchart TD
     subgraph Clients
-        Web["_template_better-auth-website\n(Next.js)"]
-        Mobile["_template_better-auth-mobile\n(Expo)"]
+        Web["myverein-website\n(Next.js)"]
+        Mobile["myverein-mobile\n(Expo)"]
     end
 
-    subgraph Backend["_template_better-auth-backend"]
+    subgraph Backend["myverein-backend"]
         CORS["CORS + secureHeaders + requestId\n(global middleware)"]
         Auth["/api/auth/*\nBetter Auth handler"]
-        Accounts["/accounts/*\nsessionGuard + rateLimit"]
-        Examples["/examples/*\nrateLimit (+ sessionGuard on /echo)"]
+        Members["/club-members/*\nsessionGuard + clubGuard"]
+        Departments["/departments/*\nsessionGuard + clubGuard"]
+        ClubInfo["/club-info/*\nsessionGuard + clubGuard"]
         Health["/health, /ready"]
         Stats["/internal/stats\nINTERNAL_STATS_TOKEN, no session"]
         AdminStats["/admin/activity-stats\nsession + adminGuard"]
     end
 
-    Admin["_template_better-auth-admin\n(Next.js)"]
+    Admin["myverein-admin\n(Next.js)"]
     Portal["fleet/portal tool\n(not an end-user client)"]
     DB[(Postgres)]
 
@@ -91,49 +95,55 @@ flowchart TD
     Mobile --> CORS
     Admin --> CORS
     CORS --> Auth
-    CORS --> Accounts
-    CORS --> Examples
+    CORS --> Members
+    CORS --> Departments
+    CORS --> ClubInfo
     CORS --> Health
     CORS --> AdminStats
     Portal -->|bearer token| Stats
     Auth --> DB
     AdminStats --> DB
-    Accounts --> DB
+    Members --> DB
+    Departments --> DB
+    ClubInfo --> DB
     Stats --> DB
     Health -.->|/ready only| DB
 ```
 
-Request flow for anything under `/accounts` or `/examples/echo`: `requestId` middleware stamps an `X-Request-Id` and attaches a request-scoped logger, `secureHeaders` sets response headers, `cors` checks the origin against `trustedOrigins`, `rateLimit` checks a per-IP bucket, `sessionGuard` calls `auth.api.getSession()` and attaches `user`/`session` to the Hono context, and only then does the route handler run. Any error thrown at any stage becomes an `AppError` via `toAppError()` in `app.onError` — nothing unhandled ever reaches a client as a raw stack trace.
+Request flow for anything under `/club-members`, `/departments`, or `/club-info`: `requestId` middleware stamps an `X-Request-Id` and attaches a request-scoped logger, `secureHeaders` sets response headers, `cors` checks the origin against `trustedOrigins`, `rateLimit` checks a per-IP bucket, `sessionGuard` calls `auth.api.getSession()` and attaches `user`/`session`, `clubGuard` resolves which club (`organization`) the request is for and attaches `clubId`/`membership`/`clubRoleTypes` — and only then does the route handler run. `POST /club-members/apply` is the one exception: it deliberately skips `clubGuard` (the applicant isn't a member yet), see [Key decisions](#key-decisions). Any error thrown at any stage becomes an `AppError` via `toAppError()` in `app.onError` — nothing unhandled ever reaches a client as a raw stack trace.
 
 Layout:
 
 ```
 src/
-├── auth/            # Better Auth instance, generated schema, RBAC statements
-├── db/               # Drizzle client, migrations, app-owned schema (accounts, audit_log)
-├── lib/              # errors, email, logger, activity-stats — cross-cutting, no HTTP awareness
-├── middleware/        # session-guard, rate-limit, request-id
-├── routes/           # health, accounts, examples, internal-stats, admin-stats
-└── scripts/          # seed-admin (CLI, not server runtime)
+├── auth/             # Better Auth instance, generated schema, RBAC statements
+├── db/                # Drizzle client, migrations, app-owned schema (club_memberships, departments,
+│                       #   club_roles, guardian_links, club_info_pages, audit_log)
+├── lib/               # errors, email, logger, activity-stats, club-permissions — cross-cutting, no HTTP awareness
+├── middleware/         # session-guard, club-guard, rate-limit, request-id
+├── routes/            # health, club-members, departments, club-info, internal-stats, admin-stats
+└── scripts/           # seed-admin, seed-club (CLI, not server runtime)
 ```
 
 ## Data model
 
-Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file). The app owns five more: `accounts` (an example domain resource), `audit_log`, and `notification`/`notification_state`/`notification_template`.
+Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns nine more: `club_memberships`, `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite). See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the planned Wave 2/3 tables (calendar/meetings/availability, locations/inventory) not yet built.
 
 ```mermaid
 erDiagram
     user ||--o{ session : "has"
     user ||--o{ account : "has"
-    user ||--o{ member : "belongs to orgs via"
+    user ||--o{ member : "belongs to clubs via"
     user ||--o{ two_factor : "has"
-    user ||--o{ accounts : "owns"
-    user ||--o{ notification : "targeted by (nullable = broadcast)"
-    user ||--o{ notification_state : "has per-user state on"
-    user ||--o{ notification_template : "last edited by"
-    notification ||--o{ notification_state : "has"
     organization ||--o{ member : "has"
     organization ||--o{ invitation : "has"
+    organization ||--o{ departments : "has"
+    organization ||--o{ club_info_pages : "has"
+    member ||--o| club_memberships : "extends"
+    member ||--o{ club_roles : "has"
+    member ||--o{ guardian_links : "guards (as guardian)"
+    member ||--o{ guardian_links : "is guarded (as ward)"
+    departments ||--o{ club_roles : "scopes (optional)"
 
     user {
         text id PK
@@ -141,19 +151,6 @@ erDiagram
         boolean email_verified
         text role
         boolean two_factor_enabled
-    }
-    session {
-        text id PK
-        text user_id FK
-        text token UK
-        timestamp expires_at
-        text active_organization_id
-    }
-    account {
-        text id PK
-        text user_id FK
-        text provider_id
-        text password "email/password hash lives here"
     }
     organization {
         text id PK
@@ -164,25 +161,44 @@ erDiagram
         text id PK
         text organization_id FK
         text user_id FK
-        text role
+        text role "Better Auth org role: owner | member, coarse"
     }
-    invitation {
-        text id PK
-        text organization_id FK
-        text inviter_id FK
-        text status
-    }
-    two_factor {
-        text id PK
-        text user_id FK
-        text secret
-        text backup_codes
-    }
-    accounts {
+    club_memberships {
         uuid id PK
-        text owner_id FK
+        text member_id FK "1:1"
+        text member_number
+        text category "aktiv | passiv | foerdernd | ehrenmitglied | jugend"
+        date joined_at
+        date left_at
+        date birth_date
+        text emergency_contact_name
+        text emergency_contact_phone
+    }
+    departments {
+        uuid id PK
+        text club_id FK
         text name
-        boolean archived
+        text lead_member_id FK
+    }
+    club_roles {
+        uuid id PK
+        text member_id FK
+        text role_type "vorsitz | kassenwart | trainer | ... see club-permissions.ts"
+        uuid department_id FK "only for department-bound roles"
+        date term_ends_at
+    }
+    guardian_links {
+        uuid id PK
+        text guardian_member_id FK
+        text ward_member_id FK
+    }
+    club_info_pages {
+        uuid id PK
+        text club_id FK
+        text slug "satzung | leitbild | geschichte | ..."
+        text title
+        text content_markdown
+        text external_url
     }
     audit_log {
         uuid id PK
@@ -190,33 +206,17 @@ erDiagram
         text subject_id
         jsonb payload
     }
-    notification {
-        uuid id PK
-        text kind "system | admin"
-        text target_user_id FK "null = broadcast"
-        text translation_key "system only"
-        jsonb params_json "system only"
-        jsonb translations "admin only, Record<langCode, {title, body}>"
-        boolean deletable
-        text created_by_admin_id FK
-    }
-    notification_state {
-        uuid id PK
-        uuid notification_id FK
-        text user_id FK
-        boolean read
-        boolean deleted
-    }
-    notification_template {
-        text translation_key PK
-        jsonb translations "Record<langCode, {title, body}>, not null"
-        text updated_by_admin_id FK
-    }
 ```
 
-Two tables are easy to confuse and mean completely different things: Better Auth's own `account` (singular) is per-provider credential storage — one row per sign-in method a user has, including the password hash for email/password login. The app's own `accounts` (plural, `src/db/schema/accounts.ts`) is an example CRUD resource, scoped to its owner via `owner_id`, that a real project deletes and replaces with its actual domain tables. If you're looking for where passwords live, it's `account.password`, not anything in `accounts`.
+`notification`/`notification_state`/`notification_template` are omitted from the diagram above for space — unchanged from [Data Model - Better Auth Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/Better%20Auth%20Template%20Suite/Data%20Model%20-%20Better%20Auth%20Backend.md), see there for the full shape.
 
-`audit_log` is written inside the same Postgres transaction as the domain mutation that triggered it (see `src/routes/accounts.ts`) and via a Better Auth `databaseHooks.session.create` hook (see `src/auth/auth.ts`) — session creation and every accounts mutation leave a row. This only works because auth and domain data share one database; a previous, Keycloak-based version of this stack could not do this since identity lived in a separate system.
+**Two role concepts, deliberately layered, not merged.** Better Auth's `member.role` is the org plugin's own coarse role (`owner`/`member` by default, unmodified) and only matters for Better-Auth-native organization actions. Everything MyVerein-specific — who can edit member data, assign roles, manage departments or club info — is decided by `club_roles.role_type` via `src/lib/club-permissions.ts`'s `hasClubPermission()`, independent of `member.role`. A membership can hold several `club_roles` rows at once (e.g. `kassenwart` + `trainer`). See [Key decisions](#key-decisions).
+
+`club_memberships` is a 1:1 sidecar on Better Auth's `member` row (not on `organization` — MyHome's `household_profiles` uses the org-level version of this pattern, this is the same idea one level down), the same way you'd extend a library-owned table you can't otherwise touch.
+
+`guardian_links` is the scoping boundary for the externe Rolle (Erziehungsberechtigte, see the Concept doc's persona of the same name): a many-to-many table linking a guardian membership to the youth member(s) they're responsible for. Any route exposing per-member data to a `guest`-tier caller must check this table before returning anything about a member who isn't the caller's own row.
+
+`audit_log` is written inside the same Postgres transaction as the domain mutation that triggered it (see `src/routes/club-members.ts`) and via a Better Auth `databaseHooks.session.create` hook (see `src/auth/auth.ts`) — session creation and every membership/role/department/info-page mutation leave a row. This only works because auth and domain data share one database.
 
 `notification`/`notification_state` use a lazy-state model: no `notification_state` row for a given `(notification_id, user_id)` pair means "unread, not deleted" for that user — read/unread/delete only ever upsert one row (unique index on that pair) instead of pre-seeding a row per recipient on every broadcast. A `system` notification (e.g. the post-signup welcome, written by the `databaseHooks.user.create` hook in `src/auth/auth.ts`) carries `translation_key`/`params_json` so every client renders it in the viewer's own language; an `admin` notification (created via `/admin/notifications`) is pre-translated into a `translations` JSONB blob instead (`Record<langCode, {title, body}>`, keyed by the shared `SUPPORTED_LANGUAGES` registry used by the website/mobile `t()` contexts — see [[ADR-009]]), since there is no machine translation here.
 
@@ -229,13 +229,20 @@ Two tables are easy to confuse and mean completely different things: Better Auth
 | `/api/auth/*` | GET, POST | varies | Better Auth's own routes: sign-up, sign-in, session, 2FA, organization, admin. See `/api/auth/reference` for the generated OpenAPI docs. |
 | `/health` | GET | none | Liveness — never touches the database, can't flap on a Postgres blip |
 | `/ready` | GET | none | Readiness — pings Postgres, returns 503 if unreachable |
-| `/accounts` | GET | session | List the caller's own accounts |
-| `/accounts/:id` | GET | session | Fetch one, 404 (not 403) if it belongs to someone else |
-| `/accounts` | POST | session | Create, writes an `audit_log` row in the same transaction |
-| `/accounts/:id` | PATCH | session | Update, same ownership scoping |
-| `/accounts/:id` | DELETE | session | Delete, same ownership scoping |
-| `/examples/ping` | GET | none | Rate-limited health-style example. Returns `{ status, timestamp }` |
-| `/examples/echo` | POST | session | Rate-limited, Zod-validated `{ message }` in, `{ message, userId, receivedAt }` out |
+| `/my-clubs` | GET | session | Clubs the caller already belongs to (`clubId`/`clubName`/`memberId`/`orgRole` per row) — how a client picks a `clubId` for every other club-scoped route below. No "browse public clubs" directory in Wave 1 |
+| `/club-members/apply` | POST | session | Aufnahmeantrag — self-service join. Body `{ clubId, category?, birthDate? }`. Deliberately grants membership immediately, no pending-approval queue (Wave 1 simplification, see [Key decisions](#key-decisions)). 409 if already a member |
+| `/club-members` | GET | session + `clubGuard` | List the club's members. Sensitive fields (`memberNumber`/`birthDate`/`emergencyContact*`) are included only for the caller's own row or a caller with `members:read_sensitive` |
+| `/club-members/me` | GET | session + `clubGuard` | Caller's own membership, always including sensitive fields |
+| `/club-members/me` | PATCH | session + `clubGuard` | Self-service update of `birthDate`/`emergencyContactName`/`emergencyContactPhone` |
+| `/club-members/:memberId` | GET | session + `clubGuard` | One member, sensitive fields gated same as the list |
+| `/club-members/:memberId` | PATCH | session + `clubGuard` (`members:write`) | Board-only: category, member number, `leftAt`, emergency contact |
+| `/club-members/:memberId/roles` | GET, POST, DELETE `/:roleId` | session + `clubGuard` (write needs `roles:write`) | `club_roles` assignment — `roleType` one of `CLUB_ROLE_TYPES` (`src/lib/club-permissions.ts`), optional `departmentId`/`termEndsAt` |
+| `/club-members/:memberId/guardians` | GET, POST, DELETE `/:guardianMemberId` | session + `clubGuard` (write needs `members:write`) | `guardian_links` for the externe Rolle — board-managed only, a guardian can never self-grant access to a member |
+| `/departments` | GET, POST, PATCH `/:id`, DELETE `/:id` | session + `clubGuard` (write needs `departments:write`) | Club sub-units (Fußball, Tennis, ...) |
+| `/club-info` | GET | session + `clubGuard` | Aggregate Vereinsinfo: current board (members holding a board `role_type`), departments, info pages — one request instead of three |
+| `/club-info/:slug` | GET | session + `clubGuard` | One info page (Satzung/Leitbild/...) |
+| `/club-info/:slug` | PUT | session + `clubGuard` (`club_info:write`) | Create-or-update by slug. Body `{ title, contentMarkdown?, externalUrl? }` |
+| `/club-info/:slug` | DELETE | session + `clubGuard` (`club_info:write`) | |
 | `/internal/stats` | GET | `INTERNAL_STATS_TOKEN` bearer token | Aggregate counts only (total users, new users last 7 days, active sessions, `audit_log` event-type breakdown) — never raw rows. Not gated by a Better Auth session; see [Security](#security) for why. Returns 503 if `INTERNAL_STATS_TOKEN` is unset (fails closed) |
 | `/admin/activity-stats` | GET | session + `adminGuard` | Query: `interval` (`day`\|`week`), `period` (`7d`\|`30d`\|`90d`). Per-bucket New/Active/Retained/Reactivated user counts plus period-over-period `changePercent`, for `_template_better-auth-admin`'s dashboard. "Active" = had a session created in the window (a login proxy, not request-level activity — this backend has none). Classification logic is a pure function in `src/lib/activity-stats.ts`, unit-tested separately from the DB query in `src/routes/admin-stats.ts` |
 | `/admin/send-verification-email` | POST | session + `adminGuard` | Body: `{ userId, callbackURL? }`. Re-enters Better Auth server-side (no session) to send a verification e-mail for a **different** user — the client-side `sendVerificationEmail` endpoint requires the signed-in session's email to match the target (`EMAIL_MISMATCH`), so an admin can never use it for anyone else; the server-side anonymous path has no such check. 404 if the user doesn't exist, 409 if already verified. Backs the admin dashboard's "Resend verification email" button (`src/routes/admin-emails.ts`, integration-tested in `src/routes/admin-emails.test.ts`) |
@@ -250,19 +257,21 @@ Two tables are easy to confuse and mean completely different things: Better Auth
 | `/admin/notification-templates/:key` | PATCH | session + `adminGuard` | Body: `{ translations }` (`Record<langCode, {title, body}>`, `de`/`en` required, other supported languages optional). Upserts the override. 404 if `key` isn't in `NOTIFICATION_TEMPLATE_KEYS` |
 | `/admin/notification-templates/:key` | DELETE | session + `adminGuard` | Reverts to no-override (deletes the row, idempotent). 404 if `key` isn't in `NOTIFICATION_TEMPLATE_KEYS` |
 
-`/accounts` and `/examples` are both deliberately thin — the first is a real, ownership-scoped resource meant as a pattern to copy for actual domain routes; the second is even thinner and exists mainly as the connectivity check the website and mobile templates call to confirm they can reach this backend at all. Delete `/examples` once a project has its own routes to model instead; keep or replace `/accounts` the same way.
+The scaffold's `/accounts` and `/examples` routes (ownership-scoped example resource / connectivity-check) were removed in Wave 1 (see [Key decisions](#key-decisions)) — `src/routes/club-members.ts` is now the reference implementation for "a real, club-scoped resource" that a new route should copy the pattern from, in place of the old `accounts.ts`.
 
 `/internal/stats` exists for a different kind of caller than everything else in this table: not an end user's browser/app, but another backend — a central fleet/portal tool aggregating KPIs across many deployed instances of this template (see `project-portal-backend` in the company's `project-portal` repo for a real consumer). That's why it's token-gated instead of session-gated: such a caller has no user account on this instance at all.
 
 ## Adding a new API route
 
-A checklist for a new dev adding an endpoint. `src/routes/accounts.ts` is the reference implementation — it's the "real, ownership-scoped resource" the [API reference](#api-reference) table already points at as the pattern to copy, and it uses every piece described below in one file. Keep it open while you read this.
+A checklist for a new dev adding an endpoint. `src/routes/club-members.ts` is the reference implementation for a club-scoped resource — it uses every piece described below in one file. Keep it open while you read this.
 
-**1. Pick or create a route file.** One file per resource under `src/routes/` — a new resource gets a new file (`workouts.ts`, `gyms.ts`, ...), a new action on an existing resource is a new handler in that file. Each file exports its own `Hono<SessionEnv>()` scoped to just that resource, not the whole app, plus a rate limit:
+**1. Pick or create a route file.** One file per resource under `src/routes/` — a new resource gets a new file (`events.ts`, `inventory-items.ts`, ...), a new action on an existing resource is a new handler in that file. A club-scoped resource exports its own `Hono<ClubEnv>()` and needs `sessionGuard` **and** `clubGuard`, in that order (`ClubEnv` extends `SessionEnv` — see `src/middleware/club-guard.ts`); a resource with no club concept (rare) uses plain `Hono<SessionEnv>()` with just `sessionGuard`, like `src/routes/notifications.ts`.
 
 ```ts
-export const widgetRoutes = new Hono<SessionEnv>();
+export const widgetRoutes = new Hono<ClubEnv>();
 widgetRoutes.use("*", rateLimit({ windowMs: 60_000, max: 60 }));
+widgetRoutes.use("*", sessionGuard);
+widgetRoutes.use("*", clubGuard);
 ```
 
 **2. Validate the input.** Define a Zod schema and wire it with `@hono/zod-validator`'s `zValidator`, throwing `ValidationError` — not a bare `c.json(..., 400)` — on failure, so bad input goes through the same error path as everything else:
@@ -284,7 +293,7 @@ widgetRoutes.post(
 
 `.strict()` isn't decoration — it's what stops an extra body field from silently reaching a query.
 
-**3. Guard it.** `sessionGuard` (`src/middleware/session-guard.ts`) for anything that needs a logged-in user, `adminGuard` for admin-only, nothing at all for a genuinely public read. If a handler touches one specific row, filter by *both* the row's id and the caller's id in the same query, and respond with `NotFoundError` — never `ForbiddenError` — when it belongs to someone else. A 403 confirms the row exists; a 404 doesn't. `accounts.ts`'s `GET /:id` is the example.
+**3. Guard it.** `sessionGuard` (`src/middleware/session-guard.ts`) for anything that needs a logged-in user, `clubGuard` (`src/middleware/club-guard.ts`) additionally for anything club-scoped, `adminGuard` for admin-only, nothing at all for a genuinely public read. If a handler touches one specific row, filter by *both* the row's id and `clubId`/the caller's id in the same query, and respond with `NotFoundError` — never `ForbiddenError` — when it belongs to a different club or a different person. A 403 confirms the row exists; a 404 doesn't. `club-members.ts`'s `GET /:memberId` is the example. For a permission check *within* a club a caller does belong to (board-only write, etc.), use `hasClubPermission(c.get("clubRoleTypes"), "...")` from `src/lib/club-permissions.ts` and throw `ForbiddenError` on failure — that one legitimately is a 403, since the caller already knows the club/row exists.
 
 **4. Throw errors, don't format them.** Every class in `src/lib/errors.ts` (`NotFoundError`, `ConflictError`, `TooManyRequestsError`, ...) maps to its HTTP status in exactly one place: `app.onError` in `src/index.ts`. Throw the typed error from inside the route and stop thinking about status codes there.
 
@@ -297,7 +306,7 @@ npm run db:migrate    # applies it locally
 
 Commit the generated migration file — it's what actually runs on deploy, the schema file alone changes nothing in a running database.
 
-**6. Mount the router.** One line in `src/index.ts`, alongside the existing `app.route("/accounts", accountsRoutes)`:
+**6. Mount the router.** One line in `src/index.ts`, alongside the existing `app.route("/club-members", clubMemberRoutes)`:
 
 ```ts
 app.route("/widgets", widgetRoutes);
@@ -305,9 +314,9 @@ app.route("/widgets", widgetRoutes);
 
 Ordering only matters *within* a single file: a static path (`/search`) has to be registered before a dynamic one (`/:id`) that would otherwise swallow it as a parameter value.
 
-**7. Test against a real session, not a mock.** Add `widgets.test.ts` next to the route file. Mount just that router plus `app.onError` in a throwaway `Hono` instance, create a real (verified) user through `auth.api.createUser`/`auth.api.signInEmail`, and reuse its session cookie — `accounts.test.ts`'s `createVerifiedUserWithCookie` helper is the one to copy. This needs a real `DATABASE_URL` (`docker compose up -d db` gives you one) and is deliberately not mocked: a broken `sessionGuard` never fails a test that mocks the session past it.
+**7. Test against a real session and a real second club, not a mock.** Add `widgets.test.ts` next to the route file. Mount just that router plus `app.onError` in a throwaway `Hono` instance, create real (verified) users and at least two clubs through `auth.api.createUser`/`signInEmail`/`createOrganization`, and reuse the session cookies — `club-members.test.ts`'s `signUpAndVerify` helper is the one to copy. Always include a cross-club case (a member of club A requesting club B's data gets 404) — that's the one class of bug a mocked session/club would never catch. This needs a real `DATABASE_URL` (`docker compose up -d db` gives you one).
 
-That's the whole loop — schema → route file → validate → guard → mount → test. None of it is a framework decision; it's copying `accounts.ts` and changing the domain-specific middle.
+That's the whole loop — schema → route file → validate → guard → mount → test. None of it is a framework decision; it's copying `club-members.ts` and changing the domain-specific middle.
 
 ## Configuration
 
@@ -359,7 +368,10 @@ Short version of decisions with real consequences if reversed. Full ADRs for the
 - **One shared Postgres for auth and domain data**, not a separate identity database. This is what makes the transactional `audit_log` writes possible, and it's the reason a project doesn't need a second database just to add its own tables next to Better Auth's.
 - **In-memory rate limiting**, not a Redis dependency, as the template default. Correct for a single instance, a real trade-off once you scale — see [Security](#security). Adding a new dependency for a template that might never need it would be the wrong default; the upgrade path is documented in the code, not built in advance.
 - **Resend with a console-log dev fallback for e-mail**, rather than requiring an e-mail provider account just to run the template locally. `requireEmailVerification: true` needs *some* way to actually send the verification link — logging it in development means the flow is fully testable with zero external accounts, and production just needs one API key.
-- **`/examples/*` as a disposable, intentionally trivial route pair.** It exists to be deleted. Its job is to be the smallest possible thing that proves a client can reach this backend and that a session-guarded route actually enforces a session — not to demonstrate anything more elaborate.
+- **`/accounts` and `/examples` removed in Wave 1**, not kept alongside the real domain (see [MyCouple's precedent](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyCouple/Data%20Model%20-%20MyCouple%20Backend.md) for the same call in a sister product) — dead scaffold routes are attack surface and reader confusion, not a feature.
+- **Two-tier role model: Better Auth `member.role` (coarse) + `club_roles.roleType` (fine), never merged into one.** `member.role` only gates Better-Auth-native org actions; every MyVerein-specific permission (`members:write`, `roles:write`, `departments:write`, `club_info:write`) is derived from `club_roles` via `src/lib/club-permissions.ts`'s config-code mapping, not a database rights-matrix table — the mapping changes per deployment, not per club at runtime, so a table would be complexity with no real flexibility payoff. See the company vault's Architecture Overview - MyVerein §7 for the full reasoning.
+- **`POST /club-members/apply` grants membership immediately, no pending-approval state.** The Concept doc's "digitaler Aufnahmeantrag" implies a review step, but `club_memberships` has no `status` column for one (see Data Model - MyVerein Backend §3) — building a full pending/approved/rejected workflow was judged out of Wave-1 scope. The board can still correct a wrong join via `PATCH /club-members/:memberId` (e.g. `leftAt`). A real approval queue is a documented gap for a later wave, not a silent omission.
+- **`guardian_links` is board-managed only, never self-service.** A guardian membership (externe Rolle) must never be able to grant itself visibility into an arbitrary member's data — only a caller with `members:write` can create or remove a guardian↔ward link.
 
 ## Deployment
 
@@ -446,7 +458,7 @@ Confirm `Domain=example.com` is present in the output. If it's missing, the *run
 
 ## Testing and CI
 
-`npm test` runs Vitest: unit tests for `permissions.ts`, `errors.ts`, and the rate-limit middleware need nothing running; the accounts ownership-scoping test in `src/routes/accounts.test.ts` and the `internal-stats.test.ts` token-gate tests both need a real `DATABASE_URL` (the same Postgres `docker compose up -d db` gives you) since they exercise actual sign-up/sign-in against Better Auth and real aggregate queries rather than mocking either. `.github/workflows/ci.yml` runs lint, `tsc --noEmit`, migrations, build, and the full test suite against a Postgres service container on every push and pull request.
+`npm test` runs Vitest: unit tests for `permissions.ts`, `club-permissions.ts`, `errors.ts`, and the rate-limit middleware need nothing running; the club-scoping/permission integration test in `src/routes/club-members.test.ts` and the `internal-stats.test.ts` token-gate tests both need a real `DATABASE_URL` (the same Postgres `docker compose up -d db` gives you) since they exercise actual sign-up/sign-in/organization-creation against Better Auth and real cross-club IDOR checks rather than mocking either. `.github/workflows/ci.yml` runs lint, `tsc --noEmit`, migrations, build, and the full test suite against a Postgres service container on every push and pull request.
 
 ## How this fits into the template suite
 
