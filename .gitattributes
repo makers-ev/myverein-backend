@@ -1,0 +1,6 @@
+# Normalize line endings to LF regardless of the checkout platform's git
+# config. Without this, a Windows clone with core.autocrlf=true checks out
+# docker-entrypoint.sh with CRLF endings, which crash-loops the container
+# ("exec ./docker-entrypoint.sh: no such file or directory" -- the shebang
+# `#!/bin/sh\r` is invalid inside Linux).
+* text=auto eol=lf

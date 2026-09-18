@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-auth_backend_template}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-auth_backend_template}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Overrides .env's DATABASE_URL (which points at localhost for host-mode
+      # `npm run dev`) -- inside the compose network the DB's hostname is the
+      # service name, not localhost.
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-auth_backend_template}
+      # Overrides .env's NODE_ENV, which is "development" in .env.example
+      # (correct default for host-mode `npm run dev`). The runner image only
+      # installs production deps (`npm ci --omit=dev`), so NODE_ENV=development
+      # here would make the logger reach for pino-pretty (a devDependency) and
+      # crash-loop the container. The Docker path always needs "production"
+      # regardless of what a developer's .env says.
+      NODE_ENV: production
+    env_file:
+      - .env
+    ports:
+      # Loopback-only by default -- secure by default, not just when
+      # deploy.sh happens to be the thing starting the container (e.g.
+      # someone running `docker compose up -d` directly on a server would
+      # otherwise expose this publicly with no reverse proxy in front of it
+      # yet). Set BIND_HOST=0.0.0.0 in .env for LAN-based mobile-device
+      # testing (a phone hitting the host's LAN IP directly) -- an explicit
+      # opt-in, not the default.
+      - "${BIND_HOST:-127.0.0.1}:${PORT:-3000}:${PORT:-3000}"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:${PORT:-3000}/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  pgdata:
