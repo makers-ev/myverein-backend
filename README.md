@@ -230,7 +230,7 @@ erDiagram
 | `/health` | GET | none | Liveness — never touches the database, can't flap on a Postgres blip |
 | `/ready` | GET | none | Readiness — pings Postgres, returns 503 if unreachable |
 | `/my-clubs` | GET | session | Clubs the caller already belongs to (`clubId`/`clubName`/`memberId`/`orgRole` per row) — how a client picks a `clubId` for every other club-scoped route below. No "browse public clubs" directory in Wave 1 |
-| `/club-members/apply` | POST | session | Aufnahmeantrag — self-service join. Body `{ clubId, category?, birthDate? }`. Deliberately grants membership immediately, no pending-approval queue (Wave 1 simplification, see [Key decisions](#key-decisions)). 409 if already a member |
+| `/club-members/apply` | POST | session | Aufnahmeantrag — self-service join. Body `{ clubId or clubSlug, category?, birthDate? }` (a client only ever has the slug; `clubId` is accepted too for server-to-server use). Deliberately grants membership immediately, no pending-approval queue (Wave 1 simplification, see [Key decisions](#key-decisions)). 404 for an unknown slug, 409 if already a member |
 | `/club-members` | GET | session + `clubGuard` | List the club's members. Sensitive fields (`memberNumber`/`birthDate`/`emergencyContact*`) are included only for the caller's own row or a caller with `members:read_sensitive` |
 | `/club-members/me` | GET | session + `clubGuard` | Caller's own membership, always including sensitive fields |
 | `/club-members/me` | PATCH | session + `clubGuard` | Self-service update of `birthDate`/`emergencyContactName`/`emergencyContactPhone` |

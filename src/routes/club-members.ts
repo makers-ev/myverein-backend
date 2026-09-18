@@ -4,7 +4,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 
 import { auth } from "../auth/auth.js";
-import { member, user } from "../auth/auth-schema.js";
+import { member, organization, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubMemberships } from "../db/schema/club-memberships.js";
@@ -66,11 +66,17 @@ async function shapeMember(memberRow: typeof member.$inferSelect, includeSensiti
 // PATCH /:memberId (e.g. setting `leftAt`). A real approval workflow is a
 // documented gap for a later wave, not silently dropped -- see README §
 // "Known Gaps".
-const applySchema = z.object({
-  clubId: z.string().min(1),
-  category: z.enum(["aktiv", "passiv", "foerdernd", "ehrenmitglied", "jugend"]).default("aktiv"),
-  birthDate: z.string().date().optional(),
-});
+const applySchema = z
+  .object({
+    // clubId (raw organization id) or clubSlug (human-shareable, e.g. a
+    // club posts "demo-sportverein" on its own website/flyer) -- a mobile
+    // join screen only ever has the slug, never the raw id.
+    clubId: z.string().min(1).optional(),
+    clubSlug: z.string().min(1).optional(),
+    category: z.enum(["aktiv", "passiv", "foerdernd", "ehrenmitglied", "jugend"]).default("aktiv"),
+    birthDate: z.string().date().optional(),
+  })
+  .refine((body) => body.clubId ?? body.clubSlug, { message: "clubId or clubSlug is required" });
 
 clubMemberRoutes.post(
   "/apply",
@@ -82,8 +88,11 @@ clubMemberRoutes.post(
     const currentUser = c.get("user");
     const body = c.req.valid("json");
 
+    const clubId = body.clubId ?? (await db.query.organization.findFirst({ where: eq(organization.slug, body.clubSlug!) }))?.id;
+    if (!clubId) throw new NotFoundError("Club not found");
+
     const existing = await db.query.member.findFirst({
-      where: and(eq(member.organizationId, body.clubId), eq(member.userId, currentUser.id)),
+      where: and(eq(member.organizationId, clubId), eq(member.userId, currentUser.id)),
     });
     if (existing) throw new ConflictError("Already a member of this club");
 
@@ -91,7 +100,7 @@ clubMemberRoutes.post(
     // see node_modules/better-auth/dist/plugins/organization/routes/
     // crud-members.mjs's `return ctx.json(createdMember)`.
     const createdMember = await auth.api.addMember({
-      body: { userId: currentUser.id, organizationId: body.clubId, role: "member" },
+      body: { userId: currentUser.id, organizationId: clubId, role: "member" },
     });
     if (!createdMember) throw new ConflictError("Could not create membership");
 
@@ -108,7 +117,7 @@ clubMemberRoutes.post(
     await db.insert(auditLog).values({
       eventType: "club_member.apply",
       subjectId: createdMember.id,
-      payload: { clubId: body.clubId, userId: currentUser.id, category: body.category },
+      payload: { clubId, userId: currentUser.id, category: body.category },
     });
 
     return c.json({ data: { member: createdMember, membership } }, 201);

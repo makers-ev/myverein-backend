@@ -122,6 +122,48 @@ describe("club-members scoping and permissions", () => {
     await db.delete(user).where(eq(user.id, applicant.userId));
   });
 
+  it("lets a member self-join via /apply using clubSlug instead of clubId", async () => {
+    const applicant = await signUpAndVerify(`club-members-slug-applicant-${suffix}@example.com`, "Slug Applicant");
+
+    const applyRes = await app.request("/club-members/apply", {
+      method: "POST",
+      headers: { cookie: applicant.cookie, "content-type": "application/json" },
+      body: JSON.stringify({ clubSlug: `club-a-${suffix}` }),
+    });
+    expect(applyRes.status).toBe(201);
+
+    const meRes = await app.request(`/club-members/me?clubId=${clubAId}`, { headers: { cookie: applicant.cookie } });
+    expect(meRes.status).toBe(200);
+
+    await db.delete(user).where(eq(user.id, applicant.userId));
+  });
+
+  it("returns 404 for an unknown clubSlug", async () => {
+    const applicant = await signUpAndVerify(`club-members-badslug-applicant-${suffix}@example.com`, "Bad Slug Applicant");
+
+    const res = await app.request("/club-members/apply", {
+      method: "POST",
+      headers: { cookie: applicant.cookie, "content-type": "application/json" },
+      body: JSON.stringify({ clubSlug: "does-not-exist" }),
+    });
+    expect(res.status).toBe(404);
+
+    await db.delete(user).where(eq(user.id, applicant.userId));
+  });
+
+  it("rejects /apply with neither clubId nor clubSlug", async () => {
+    const applicant = await signUpAndVerify(`club-members-noclub-applicant-${suffix}@example.com`, "No Club Applicant");
+
+    const res = await app.request("/club-members/apply", {
+      method: "POST",
+      headers: { cookie: applicant.cookie, "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(422);
+
+    await db.delete(user).where(eq(user.id, applicant.userId));
+  });
+
   it("rejects a duplicate /apply with 409", async () => {
     const res = await app.request("/club-members/apply", {
       method: "POST",
