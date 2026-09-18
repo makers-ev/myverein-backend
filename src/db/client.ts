@@ -5,11 +5,17 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import * as authSchema from "../auth/auth-schema.js";
 import { logger } from "../lib/logger.js";
 import * as auditLogSchema from "./schema/audit-log.js";
+import * as availabilitySchema from "./schema/availability.js";
+import * as calendarVisibilitySchema from "./schema/calendar-visibility.js";
+import * as calendarsSchema from "./schema/calendars.js";
 import * as clubInfoPagesSchema from "./schema/club-info-pages.js";
 import * as clubMembershipsSchema from "./schema/club-memberships.js";
 import * as clubRolesSchema from "./schema/club-roles.js";
 import * as departmentsSchema from "./schema/departments.js";
+import * as eventAttendeesSchema from "./schema/event-attendees.js";
+import * as eventsSchema from "./schema/events.js";
 import * as guardianLinksSchema from "./schema/guardian-links.js";
+import * as meetingsSchema from "./schema/meetings.js";
 import * as notificationsSchema from "./schema/notifications.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -48,6 +54,12 @@ export const schema = {
   ...clubRolesSchema,
   ...guardianLinksSchema,
   ...clubInfoPagesSchema,
+  ...calendarsSchema,
+  ...calendarVisibilitySchema,
+  ...eventsSchema,
+  ...eventAttendeesSchema,
+  ...availabilitySchema,
+  ...meetingsSchema,
 };
 
 export const db = drizzle(pool, { schema });

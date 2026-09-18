@@ -9,10 +9,11 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      # 5433, not 5432 -- avoids colliding with other products' Postgres
+      # 5434, not 5432 -- avoids colliding with other products' Postgres
       # containers already bound to the default host port during local dev
-      # (e.g. mycouple-backend-db-1).
-      - "5433:5432"
+      # (e.g. mycouple-backend-db-1 on 5432, an unrelated SHS-DB container
+      # on 5433).
+      - "5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-auth_backend_template}"]
       interval: 5s

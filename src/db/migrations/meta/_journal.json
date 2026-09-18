@@ -57,6 +57,13 @@
       "when": 1789716499033,
       "tag": "0007_kind_reavers",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789738221957,
+      "tag": "0008_hot_jack_murdock",
+      "breakpoints": true
     }
   ]
 }
