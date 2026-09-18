@@ -12,10 +12,14 @@ import { adminNotificationRoutes } from "./routes/admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./routes/admin-notification-templates.js";
 import { adminStatsRoutes } from "./routes/admin-stats.js";
 import { adminEmailRoutes } from "./routes/admin-emails.js";
+import { availabilityRoutes } from "./routes/availability.js";
+import { calendarRoutes } from "./routes/calendars.js";
 import { clubInfoRoutes } from "./routes/club-info.js";
 import { clubMemberRoutes } from "./routes/club-members.js";
 import { departmentRoutes } from "./routes/departments.js";
+import { eventRoutes, icsRoutes } from "./routes/events.js";
 import { healthRoutes } from "./routes/health.js";
+import { meetingRoutes } from "./routes/meetings.js";
 import { myClubRoutes } from "./routes/my-clubs.js";
 import { internalStatsRoutes } from "./routes/internal-stats.js";
 import { notificationRoutes } from "./routes/notifications.js";
@@ -74,6 +78,11 @@ app.route("/my-clubs", myClubRoutes);
 app.route("/club-members", clubMemberRoutes);
 app.route("/departments", departmentRoutes);
 app.route("/club-info", clubInfoRoutes);
+app.route("/calendars", calendarRoutes);
+app.route("/events", eventRoutes);
+app.route("/events.ics", icsRoutes);
+app.route("/availability", availabilityRoutes);
+app.route("/meetings", meetingRoutes);
 
 const port = Number(process.env.PORT ?? 3000);
 // Loopback-only by default -- LAN testing (a browser hitting this machine's
