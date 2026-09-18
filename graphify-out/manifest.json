@@ -323,5 +323,510 @@
     "mtime": 1788978255.862165,
     "ast_hash": "137ca3c151af533e4d1b09e27ab1f53e",
     "semantic_hash": "137ca3c151af533e4d1b09e27ab1f53e"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\deploy.sh": {
+    "mtime": 1789737346.4283032,
+    "ast_hash": "a7bb0d5b4e8e838c88ef8dc13e11e236",
+    "semantic_hash": "a7bb0d5b4e8e838c88ef8dc13e11e236"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\docker-entrypoint.sh": {
+    "mtime": 1789737346.4292676,
+    "ast_hash": "c0c5df7f835aba27a48fb2d572dc90b3",
+    "semantic_hash": "c0c5df7f835aba27a48fb2d572dc90b3"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\drizzle.config.ts": {
+    "mtime": 1789737346.430838,
+    "ast_hash": "e67c9d2540d12026910e208621ddf276",
+    "semantic_hash": "e67c9d2540d12026910e208621ddf276"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\eslint.config.mjs": {
+    "mtime": 1789737346.4313486,
+    "ast_hash": "3ecec703a6c56d4fc2c226d430d63411",
+    "semantic_hash": "3ecec703a6c56d4fc2c226d430d63411"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\package.json": {
+    "mtime": 1789737346.5544045,
+    "ast_hash": "64a9011c49948209c28dea34e63b2f42",
+    "semantic_hash": "64a9011c49948209c28dea34e63b2f42"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\tsconfig.json": {
+    "mtime": 1789737346.6745186,
+    "ast_hash": "12f882c9cb13df10d55a7ebc30b053c9",
+    "semantic_hash": "12f882c9cb13df10d55a7ebc30b053c9"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\index.ts": {
+    "mtime": 1789739308.4088705,
+    "ast_hash": "c620111fc1e519870ea033c54fc5c5b6",
+    "semantic_hash": "c620111fc1e519870ea033c54fc5c5b6"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\project.config.ts": {
+    "mtime": 1789737346.6463385,
+    "ast_hash": "5841eb9cedf307468286004f3d000919",
+    "semantic_hash": "5841eb9cedf307468286004f3d000919"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\auth\\auth-schema.ts": {
+    "mtime": 1789737346.5574634,
+    "ast_hash": "079663127436644a25a45ccac1f617fb",
+    "semantic_hash": "079663127436644a25a45ccac1f617fb"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\auth\\auth.ts": {
+    "mtime": 1789737346.5586264,
+    "ast_hash": "260b82e0fe34dc4e550e5d37c6320778",
+    "semantic_hash": "260b82e0fe34dc4e550e5d37c6320778"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\auth\\permissions.test.ts": {
+    "mtime": 1789737346.5597353,
+    "ast_hash": "83f2acafb2f583388d4d9a85aad07df3",
+    "semantic_hash": "83f2acafb2f583388d4d9a85aad07df3"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\auth\\permissions.ts": {
+    "mtime": 1789737346.560851,
+    "ast_hash": "61ce7fde403012b9d6f3d42580fbcac6",
+    "semantic_hash": "61ce7fde403012b9d6f3d42580fbcac6"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\client.ts": {
+    "mtime": 1789738145.3583312,
+    "ast_hash": "b439f54bbe8d3c3d500533e129b7588d",
+    "semantic_hash": "b439f54bbe8d3c3d500533e129b7588d"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrate.ts": {
+    "mtime": 1789737346.564503,
+    "ast_hash": "9c61e3b7075c9dda5e4d0753ec407f38",
+    "semantic_hash": "9c61e3b7075c9dda5e4d0753ec407f38"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\0000_init.sql": {
+    "mtime": 1789737346.565586,
+    "ast_hash": "624beb484765570b5c5f772aa2651e81",
+    "semantic_hash": "624beb484765570b5c5f772aa2651e81"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\0001_dapper_wraith.sql": {
+    "mtime": 1789737346.5666826,
+    "ast_hash": "dba1b024ba0417bb63e0df436a3e3c3c",
+    "semantic_hash": "dba1b024ba0417bb63e0df436a3e3c3c"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\0002_fast_franklin_storm.sql": {
+    "mtime": 1789737346.5678284,
+    "ast_hash": "736ea67827204b1c12602f20beac4a72",
+    "semantic_hash": "736ea67827204b1c12602f20beac4a72"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\0003_add-notification-translations-jsonb.sql": {
+    "mtime": 1789737346.5698974,
+    "ast_hash": "3b024c6aa08c314d8047431bba1463df",
+    "semantic_hash": "3b024c6aa08c314d8047431bba1463df"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\0004_backfill-notification-translations.sql": {
+    "mtime": 1789737346.5748334,
+    "ast_hash": "b88313cb6e677933c62891e56a51a95f",
+    "semantic_hash": "b88313cb6e677933c62891e56a51a95f"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\0005_drop-notification-legacy-de-en-columns.sql": {
+    "mtime": 1789737346.5760567,
+    "ast_hash": "39fb590b7f3fb6b49bd1562aac10ada5",
+    "semantic_hash": "39fb590b7f3fb6b49bd1562aac10ada5"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\0006_heavy_ogun.sql": {
+    "mtime": 1789737346.5766377,
+    "ast_hash": "b20c5b4ad1411b8e020b55b468318fbc",
+    "semantic_hash": "b20c5b4ad1411b8e020b55b468318fbc"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\0007_kind_reavers.sql": {
+    "mtime": 1789737346.5785375,
+    "ast_hash": "9bbcbe142628601925c1639f39dee6ea",
+    "semantic_hash": "9bbcbe142628601925c1639f39dee6ea"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\0008_hot_jack_murdock.sql": {
+    "mtime": 1789738221.9583094,
+    "ast_hash": "383403257b15f1b319accf64abdec180",
+    "semantic_hash": "383403257b15f1b319accf64abdec180"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\meta\\0000_snapshot.json": {
+    "mtime": 1789737346.5820136,
+    "ast_hash": "7bea32f77a92bae62fe7d3b38bf14778",
+    "semantic_hash": "7bea32f77a92bae62fe7d3b38bf14778"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\meta\\0001_snapshot.json": {
+    "mtime": 1789737346.5831041,
+    "ast_hash": "ea6454a16a44dd6d0e2e148fafaab18e",
+    "semantic_hash": "ea6454a16a44dd6d0e2e148fafaab18e"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\meta\\0002_snapshot.json": {
+    "mtime": 1789737346.5848603,
+    "ast_hash": "2bb097e72b3bd5483f8461619e3d919e",
+    "semantic_hash": "2bb097e72b3bd5483f8461619e3d919e"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\meta\\0003_snapshot.json": {
+    "mtime": 1789737346.5859892,
+    "ast_hash": "07377e13a4b9a7c502f6f617f41ad7ca",
+    "semantic_hash": "07377e13a4b9a7c502f6f617f41ad7ca"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\meta\\0004_snapshot.json": {
+    "mtime": 1789737346.588024,
+    "ast_hash": "641dcb08e129bb7e61226d78aabd9a48",
+    "semantic_hash": "641dcb08e129bb7e61226d78aabd9a48"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\meta\\0005_snapshot.json": {
+    "mtime": 1789737346.589083,
+    "ast_hash": "137ca3c151af533e4d1b09e27ab1f53e",
+    "semantic_hash": "137ca3c151af533e4d1b09e27ab1f53e"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\meta\\0006_snapshot.json": {
+    "mtime": 1789737346.5911367,
+    "ast_hash": "9270e1b89bd83e9d490f7b309b0eb907",
+    "semantic_hash": "9270e1b89bd83e9d490f7b309b0eb907"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\meta\\0007_snapshot.json": {
+    "mtime": 1789737346.5927062,
+    "ast_hash": "9644ec19dbb6e363a1e9408536b6500d",
+    "semantic_hash": "9644ec19dbb6e363a1e9408536b6500d"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\meta\\0008_snapshot.json": {
+    "mtime": 1789738221.9567332,
+    "ast_hash": "15b86443122af8ac9f254a9c95f570fb",
+    "semantic_hash": "15b86443122af8ac9f254a9c95f570fb"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\migrations\\meta\\_journal.json": {
+    "mtime": 1789738221.957788,
+    "ast_hash": "972dbad49499be4f3480f0a882c1a4c5",
+    "semantic_hash": "972dbad49499be4f3480f0a882c1a4c5"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\audit-log.ts": {
+    "mtime": 1789737346.5951266,
+    "ast_hash": "a46cd1d20fcac9d827321c1f78db2a93",
+    "semantic_hash": "a46cd1d20fcac9d827321c1f78db2a93"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\availability.ts": {
+    "mtime": 1789738123.3337798,
+    "ast_hash": "f70c5c5061ec3ff88e072f7d3e22c393",
+    "semantic_hash": "f70c5c5061ec3ff88e072f7d3e22c393"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\calendar-visibility.ts": {
+    "mtime": 1789738105.8316844,
+    "ast_hash": "35d1b1f27755271288e0cac23d2087b3",
+    "semantic_hash": "35d1b1f27755271288e0cac23d2087b3"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\calendars.ts": {
+    "mtime": 1789738099.6440701,
+    "ast_hash": "66ef88eb32918eb3e74c7f051ce7b9ec",
+    "semantic_hash": "66ef88eb32918eb3e74c7f051ce7b9ec"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\club-info-pages.ts": {
+    "mtime": 1789737346.5971465,
+    "ast_hash": "266321ba44fbf2db1b7d2d0cdf3c3d8d",
+    "semantic_hash": "266321ba44fbf2db1b7d2d0cdf3c3d8d"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\club-memberships.ts": {
+    "mtime": 1789737346.5981355,
+    "ast_hash": "359e3b7941d476d3702117aa5459e8a0",
+    "semantic_hash": "359e3b7941d476d3702117aa5459e8a0"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\club-roles.ts": {
+    "mtime": 1789737346.5991342,
+    "ast_hash": "d37e3a35229f7fb32c1c2326371d0a27",
+    "semantic_hash": "d37e3a35229f7fb32c1c2326371d0a27"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\departments.ts": {
+    "mtime": 1789737346.6006532,
+    "ast_hash": "ca6c2733438afe220c7e61e6a52cbab2",
+    "semantic_hash": "ca6c2733438afe220c7e61e6a52cbab2"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\event-attendees.ts": {
+    "mtime": 1789738116.2173517,
+    "ast_hash": "f190d6a0805dd1cabcce811b3260849f",
+    "semantic_hash": "f190d6a0805dd1cabcce811b3260849f"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\events.ts": {
+    "mtime": 1789738112.3126104,
+    "ast_hash": "ca68a829181d58687026dbe77d419b65",
+    "semantic_hash": "ca68a829181d58687026dbe77d419b65"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\guardian-links.ts": {
+    "mtime": 1789737346.6037974,
+    "ast_hash": "94d9a7a415ab960128377ff4b2be809e",
+    "semantic_hash": "94d9a7a415ab960128377ff4b2be809e"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\meetings.ts": {
+    "mtime": 1789738139.0274954,
+    "ast_hash": "01a32bf5712cd7df3947c80e6eef8d37",
+    "semantic_hash": "01a32bf5712cd7df3947c80e6eef8d37"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\db\\schema\\notifications.ts": {
+    "mtime": 1789737346.6062806,
+    "ast_hash": "e65989672db04fe12e5e34398149b50f",
+    "semantic_hash": "e65989672db04fe12e5e34398149b50f"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\activity-stats.test.ts": {
+    "mtime": 1789737346.6236396,
+    "ast_hash": "54802a992ef70efb9987503e501fd468",
+    "semantic_hash": "54802a992ef70efb9987503e501fd468"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\activity-stats.ts": {
+    "mtime": 1789737346.6251783,
+    "ast_hash": "b9d976628c63d23206b728fd8d61ce23",
+    "semantic_hash": "b9d976628c63d23206b728fd8d61ce23"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\availability-match.test.ts": {
+    "mtime": 1789738609.446136,
+    "ast_hash": "c421c81539cbadc70bdfd774fb87a97c",
+    "semantic_hash": "c421c81539cbadc70bdfd774fb87a97c"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\availability-match.ts": {
+    "mtime": 1789738595.9321709,
+    "ast_hash": "cec0749685629c461ba087bf30718824",
+    "semantic_hash": "cec0749685629c461ba087bf30718824"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\calendar-visibility.ts": {
+    "mtime": 1789738610.280042,
+    "ast_hash": "70b8386da3e35b5a1ff1c91f60e91de7",
+    "semantic_hash": "70b8386da3e35b5a1ff1c91f60e91de7"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\club-permissions.test.ts": {
+    "mtime": 1789738626.043239,
+    "ast_hash": "d789d6b5dcc3160249ff536cacc020ea",
+    "semantic_hash": "d789d6b5dcc3160249ff536cacc020ea"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\club-permissions.ts": {
+    "mtime": 1789739835.3065526,
+    "ast_hash": "982dbc22beb6ed4307f9abc8a9956e6f",
+    "semantic_hash": "982dbc22beb6ed4307f9abc8a9956e6f"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\email.test.ts": {
+    "mtime": 1789737346.6281097,
+    "ast_hash": "253613a030f1fec7cd999089579a5e4b",
+    "semantic_hash": "253613a030f1fec7cd999089579a5e4b"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\email.ts": {
+    "mtime": 1789737346.6303425,
+    "ast_hash": "13b2f1be957f2e9065a316f5a59c3cd5",
+    "semantic_hash": "13b2f1be957f2e9065a316f5a59c3cd5"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\emailTemplate.ts": {
+    "mtime": 1789737346.6313517,
+    "ast_hash": "d8c63d6858597d9088c935fee375f518",
+    "semantic_hash": "d8c63d6858597d9088c935fee375f518"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\errors.test.ts": {
+    "mtime": 1789737346.6323514,
+    "ast_hash": "0c4da7ba8ec544495f48f12988db6b48",
+    "semantic_hash": "0c4da7ba8ec544495f48f12988db6b48"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\errors.ts": {
+    "mtime": 1789737346.6333528,
+    "ast_hash": "b7ae8761d45894ee3c57ed1592d1dc9d",
+    "semantic_hash": "b7ae8761d45894ee3c57ed1592d1dc9d"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\ics.test.ts": {
+    "mtime": 1789738640.364254,
+    "ast_hash": "bf3f5273d88c05de7869a5cac0e2f4c7",
+    "semantic_hash": "bf3f5273d88c05de7869a5cac0e2f4c7"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\ics.ts": {
+    "mtime": 1789738632.6530104,
+    "ast_hash": "2ee739bba9817ae83d8769a36a437995",
+    "semantic_hash": "2ee739bba9817ae83d8769a36a437995"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\logger.ts": {
+    "mtime": 1789737346.6348605,
+    "ast_hash": "18a807d600fd3f6ad0b5dc455436a559",
+    "semantic_hash": "18a807d600fd3f6ad0b5dc455436a559"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\lib\\trusted-origins.ts": {
+    "mtime": 1789737346.635878,
+    "ast_hash": "ac7a45582812ae4ac51c77a769562226",
+    "semantic_hash": "ac7a45582812ae4ac51c77a769562226"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\middleware\\club-guard.ts": {
+    "mtime": 1789737346.6381125,
+    "ast_hash": "02dd3704265d553449591b48efb7e2b4",
+    "semantic_hash": "02dd3704265d553449591b48efb7e2b4"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\middleware\\rate-limit.test.ts": {
+    "mtime": 1789737346.6395013,
+    "ast_hash": "0eb008c832b8a9a87f921e1a5dd4a46d",
+    "semantic_hash": "0eb008c832b8a9a87f921e1a5dd4a46d"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\middleware\\rate-limit.ts": {
+    "mtime": 1789737346.6407237,
+    "ast_hash": "968cee72e28b2481197ec9a6aa7e32a5",
+    "semantic_hash": "968cee72e28b2481197ec9a6aa7e32a5"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\middleware\\request-id.ts": {
+    "mtime": 1789737346.6417973,
+    "ast_hash": "378c12ae5fe13e7daf46b5f46a0ee851",
+    "semantic_hash": "378c12ae5fe13e7daf46b5f46a0ee851"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\middleware\\session-guard.ts": {
+    "mtime": 1789737346.6428082,
+    "ast_hash": "99b1ece262f5832a6d912c08f9e197af",
+    "semantic_hash": "99b1ece262f5832a6d912c08f9e197af"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\admin-emails.test.ts": {
+    "mtime": 1789737346.6491857,
+    "ast_hash": "a00da0cb1461b4dce409738ccc7d8ca7",
+    "semantic_hash": "a00da0cb1461b4dce409738ccc7d8ca7"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\admin-emails.ts": {
+    "mtime": 1789737346.6502998,
+    "ast_hash": "a7280524ea0c43f0e52231f8b2d65b5b",
+    "semantic_hash": "a7280524ea0c43f0e52231f8b2d65b5b"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\admin-notification-templates.test.ts": {
+    "mtime": 1789737346.6513808,
+    "ast_hash": "e616e85fec61c81cf7fc93346380139b",
+    "semantic_hash": "e616e85fec61c81cf7fc93346380139b"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\admin-notification-templates.ts": {
+    "mtime": 1789737346.6521025,
+    "ast_hash": "058c099b028de6e0f360d8089b69a471",
+    "semantic_hash": "058c099b028de6e0f360d8089b69a471"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\admin-notifications.ts": {
+    "mtime": 1789737346.653283,
+    "ast_hash": "b59504f8fdf9aebf435f03e433399eeb",
+    "semantic_hash": "b59504f8fdf9aebf435f03e433399eeb"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\admin-stats.ts": {
+    "mtime": 1789737346.6544404,
+    "ast_hash": "9c827d67b7abf96eb909b98d22ae2932",
+    "semantic_hash": "9c827d67b7abf96eb909b98d22ae2932"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\availability.test.ts": {
+    "mtime": 1789738727.3049388,
+    "ast_hash": "9d396a1fe2f5c8fc23b647b3036a2d68",
+    "semantic_hash": "9d396a1fe2f5c8fc23b647b3036a2d68"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\availability.ts": {
+    "mtime": 1789738663.2049417,
+    "ast_hash": "48cc25b829814bfc65226af1b52c14a7",
+    "semantic_hash": "48cc25b829814bfc65226af1b52c14a7"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\calendars.test.ts": {
+    "mtime": 1789738886.14126,
+    "ast_hash": "477e04e9e236cdd6ac2f976c12497932",
+    "semantic_hash": "477e04e9e236cdd6ac2f976c12497932"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\calendars.ts": {
+    "mtime": 1789738702.9613824,
+    "ast_hash": "f2669dbf606be0cfc1fe5750153209ea",
+    "semantic_hash": "f2669dbf606be0cfc1fe5750153209ea"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\club-info.ts": {
+    "mtime": 1789737346.6559713,
+    "ast_hash": "aab9495e85a152ddd481dc2f97674a56",
+    "semantic_hash": "aab9495e85a152ddd481dc2f97674a56"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\club-members.test.ts": {
+    "mtime": 1789737346.6571424,
+    "ast_hash": "a0b9f98514e465e4a48c7e9e30fade39",
+    "semantic_hash": "a0b9f98514e465e4a48c7e9e30fade39"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\club-members.ts": {
+    "mtime": 1789737346.6587188,
+    "ast_hash": "e5b020b354d239fff04150058da5e3a7",
+    "semantic_hash": "e5b020b354d239fff04150058da5e3a7"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\departments.ts": {
+    "mtime": 1789737346.6602387,
+    "ast_hash": "d7ff8d7a8cd0767ffa20cd988d31af74",
+    "semantic_hash": "d7ff8d7a8cd0767ffa20cd988d31af74"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\events.test.ts": {
+    "mtime": 1789738966.9549134,
+    "ast_hash": "3d6ad41cb1cb7aa55cf6ffe2afc4375f",
+    "semantic_hash": "3d6ad41cb1cb7aa55cf6ffe2afc4375f"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\events.ts": {
+    "mtime": 1789739815.4210947,
+    "ast_hash": "7cc3e3c259597e3a6589a2045949bd5c",
+    "semantic_hash": "7cc3e3c259597e3a6589a2045949bd5c"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\health.ts": {
+    "mtime": 1789737346.6612654,
+    "ast_hash": "0983386ee00b24e7a6e01712c311b3ff",
+    "semantic_hash": "0983386ee00b24e7a6e01712c311b3ff"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\internal-stats.test.ts": {
+    "mtime": 1789737346.6625676,
+    "ast_hash": "c1fa2dd828839ee92df3e4194adc1863",
+    "semantic_hash": "c1fa2dd828839ee92df3e4194adc1863"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\internal-stats.ts": {
+    "mtime": 1789737346.663075,
+    "ast_hash": "142065d42a163ef8fb6bd4ca5d9446ed",
+    "semantic_hash": "142065d42a163ef8fb6bd4ca5d9446ed"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\meetings.test.ts": {
+    "mtime": 1789739428.2952168,
+    "ast_hash": "1e67832eee13a6414a099b0697d97329",
+    "semantic_hash": "1e67832eee13a6414a099b0697d97329"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\meetings.ts": {
+    "mtime": 1789739828.4778616,
+    "ast_hash": "b7a91c151329f794dc8fb4d0df363e3d",
+    "semantic_hash": "b7a91c151329f794dc8fb4d0df363e3d"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\my-clubs.test.ts": {
+    "mtime": 1789737346.665087,
+    "ast_hash": "49fd787618be8ed9b154a445dbf60a8f",
+    "semantic_hash": "49fd787618be8ed9b154a445dbf60a8f"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\my-clubs.ts": {
+    "mtime": 1789737346.6658957,
+    "ast_hash": "96e6bfb08d25fcc1bf926cd00f509592",
+    "semantic_hash": "96e6bfb08d25fcc1bf926cd00f509592"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\notifications.test.ts": {
+    "mtime": 1789737346.6684277,
+    "ast_hash": "1f52be290dc26e17f3171d5d04a6ada5",
+    "semantic_hash": "1f52be290dc26e17f3171d5d04a6ada5"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\routes\\notifications.ts": {
+    "mtime": 1789737346.6694286,
+    "ast_hash": "e7a0d182e7071df98d9a895302ffb22d",
+    "semantic_hash": "e7a0d182e7071df98d9a895302ffb22d"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\scripts\\seed-admin.ts": {
+    "mtime": 1789737346.6724315,
+    "ast_hash": "37f042c44c6a2d85613074d834f7cf1d",
+    "semantic_hash": "37f042c44c6a2d85613074d834f7cf1d"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\src\\scripts\\seed-club.ts": {
+    "mtime": 1789737346.6735525,
+    "ast_hash": "07311d629f24aeb039a82d4ab0417d05",
+    "semantic_hash": "07311d629f24aeb039a82d4ab0417d05"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\CLAUDE.md": {
+    "mtime": 1789737346.4127052,
+    "ast_hash": "315e2ef8a2ade6c6d061174f5265aed5",
+    "semantic_hash": "315e2ef8a2ade6c6d061174f5265aed5"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\compose.yml": {
+    "mtime": 1789738162.4110305,
+    "ast_hash": "f3e589b5243979d9280602d6ee0d2c80",
+    "semantic_hash": "f3e589b5243979d9280602d6ee0d2c80"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\README.md": {
+    "mtime": 1789740066.7736595,
+    "ast_hash": "777a341149c941ce4e11afa57f77cf30",
+    "semantic_hash": "777a341149c941ce4e11afa57f77cf30"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\.claude\\agents\\api-dev.md": {
+    "mtime": 1789737346.3981786,
+    "ast_hash": "c429bcf07eebc18cb0b99a3023686fe7",
+    "semantic_hash": "c429bcf07eebc18cb0b99a3023686fe7"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\.claude\\agents\\backend-reviewer.md": {
+    "mtime": 1789737346.4001899,
+    "ast_hash": "155291b94b3bdf8d506e6b445c370556",
+    "semantic_hash": "155291b94b3bdf8d506e6b445c370556"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\.github\\workflows\\ci.yml": {
+    "mtime": 1789737346.405756,
+    "ast_hash": "ccb6a40d0117b1da506db640f6c8a8bb",
+    "semantic_hash": "ccb6a40d0117b1da506db640f6c8a8bb"
+  },
+  "C:\\GitHub\\makers-ev\\myverein\\myverein-backend\\assets\\myverein-logo.png": {
+    "mtime": 1789737346.4261808,
+    "ast_hash": "0fc57dd5e2fdc8ffdd18605aac704934",
+    "semantic_hash": "0fc57dd5e2fdc8ffdd18605aac704934"
   }
 }
