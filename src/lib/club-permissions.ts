@@ -32,7 +32,9 @@ export type ClubPermission =
   | "members:read_sensitive" // read fields beyond name/department (birth date, emergency contact, membership status) for OTHER members
   | "roles:write" // assign/revoke club_roles
   | "departments:write"
-  | "club_info:write";
+  | "club_info:write"
+  | "calendars:write" // manage calendars/events + calendar_visibility grants
+  | "meetings:write"; // manage meetings/agenda/invitees/attendance/resolutions
 
 /**
  * Which permissions each role_type grants. A membership can hold several
@@ -45,12 +47,27 @@ export type ClubPermission =
  * beisitzer/abteilungsleitung/trainer do not get `members:read_sensitive`.
  */
 const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
-  vorsitz: ["members:write", "members:read_sensitive", "roles:write", "departments:write", "club_info:write"],
-  stellv_vorsitz: ["members:write", "members:read_sensitive", "roles:write", "departments:write", "club_info:write"],
+  vorsitz: ["members:write", "members:read_sensitive", "roles:write", "departments:write", "club_info:write", "calendars:write", "meetings:write"],
+  stellv_vorsitz: [
+    "members:write",
+    "members:read_sensitive",
+    "roles:write",
+    "departments:write",
+    "club_info:write",
+    "calendars:write",
+    "meetings:write",
+  ],
   kassenwart: ["members:read_sensitive"],
-  schriftfuehrer: ["members:write", "club_info:write"],
+  // A schriftfuehrer's real-world job in a German Verein is literally running
+  // meeting agendas/Protokolle, so meetings:write is a natural fit here.
+  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write"],
   beisitzer: [],
-  abteilungsleitung: ["departments:write"],
+  // Also calendars:write, on top of departments:write -- an Abteilungsleitung
+  // needs to manage calendars day to day, not just the board (same
+  // operational-need reasoning as members:read_sensitive above). Note this
+  // is club-wide, not scoped to just their own department -- same shape as
+  // their existing departments:write (Wave 1 precedent), not a new gap.
+  abteilungsleitung: ["departments:write", "calendars:write"],
   trainer: [],
   erziehungsberechtigt: [],
 };

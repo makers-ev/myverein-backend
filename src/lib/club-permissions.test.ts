@@ -34,4 +34,13 @@ describe("hasClubPermission", () => {
   it("ignores an unknown role_type instead of throwing", () => {
     expect(hasClubPermission(["some_future_role"], "members:write")).toBe(false);
   });
+
+  it("grants calendars:write to vorsitz/stellv_vorsitz/schriftfuehrer/abteilungsleitung but not kassenwart/trainer", () => {
+    for (const role of ["vorsitz", "stellv_vorsitz", "schriftfuehrer", "abteilungsleitung"] as const) {
+      expect(hasClubPermission([role], "calendars:write")).toBe(true);
+    }
+    for (const role of ["kassenwart", "beisitzer", "trainer", "erziehungsberechtigt"] as const) {
+      expect(hasClubPermission([role], "calendars:write")).toBe(false);
+    }
+  });
 });
