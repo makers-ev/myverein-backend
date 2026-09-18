@@ -4,9 +4,9 @@ import { appName, primaryColor } from "../project.config.js";
 // first entry of WEB_ORIGIN (same convention as auth.ts's password-reset
 // callbackURL fallback), since that's already this backend's one source of
 // truth for "where the web client lives".
-const SITE_URL = (process.env.WEB_ORIGIN ?? "").split(",")[0]?.trim() || "http://localhost:3001";
+const SITE_URL = (process.env.WEB_ORIGIN ?? "").split(",")[0]?.trim() || "http://localhost:3011";
 export const LOGO_CID = "app-logo";
-export const LOGO_PATH = "./assets/lpj-its-logo.png";
+export const LOGO_PATH = "./assets/myverein-logo.png";
 
 // Rest of the generic template palette (matches the website/admin templates'
 // default `--border`/etc tokens in globals.css) -- this backend has no theme
