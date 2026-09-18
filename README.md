@@ -82,6 +82,10 @@ flowchart TD
         Members["/club-members/*\nsessionGuard + clubGuard"]
         Departments["/departments/*\nsessionGuard + clubGuard"]
         ClubInfo["/club-info/*\nsessionGuard + clubGuard"]
+        Calendars["/calendars/*\nsessionGuard + clubGuard"]
+        Events["/events/*, /events.ics\nsessionGuard + clubGuard"]
+        Availability["/availability/*\nsessionGuard + clubGuard"]
+        Meetings["/meetings/*\nsessionGuard + clubGuard"]
         Health["/health, /ready"]
         Stats["/internal/stats\nINTERNAL_STATS_TOKEN, no session"]
         AdminStats["/admin/activity-stats\nsession + adminGuard"]
@@ -98,6 +102,10 @@ flowchart TD
     CORS --> Members
     CORS --> Departments
     CORS --> ClubInfo
+    CORS --> Calendars
+    CORS --> Events
+    CORS --> Availability
+    CORS --> Meetings
     CORS --> Health
     CORS --> AdminStats
     Portal -->|bearer token| Stats
@@ -106,11 +114,15 @@ flowchart TD
     Members --> DB
     Departments --> DB
     ClubInfo --> DB
+    Calendars --> DB
+    Events --> DB
+    Availability --> DB
+    Meetings --> DB
     Stats --> DB
     Health -.->|/ready only| DB
 ```
 
-Request flow for anything under `/club-members`, `/departments`, or `/club-info`: `requestId` middleware stamps an `X-Request-Id` and attaches a request-scoped logger, `secureHeaders` sets response headers, `cors` checks the origin against `trustedOrigins`, `rateLimit` checks a per-IP bucket, `sessionGuard` calls `auth.api.getSession()` and attaches `user`/`session`, `clubGuard` resolves which club (`organization`) the request is for and attaches `clubId`/`membership`/`clubRoleTypes` — and only then does the route handler run. `POST /club-members/apply` is the one exception: it deliberately skips `clubGuard` (the applicant isn't a member yet), see [Key decisions](#key-decisions). Any error thrown at any stage becomes an `AppError` via `toAppError()` in `app.onError` — nothing unhandled ever reaches a client as a raw stack trace.
+Request flow for anything under `/club-members`, `/departments`, `/club-info`, `/calendars`, `/events`, `/availability`, or `/meetings`: `requestId` middleware stamps an `X-Request-Id` and attaches a request-scoped logger, `secureHeaders` sets response headers, `cors` checks the origin against `trustedOrigins`, `rateLimit` checks a per-IP bucket, `sessionGuard` calls `auth.api.getSession()` and attaches `user`/`session`, `clubGuard` resolves which club (`organization`) the request is for and attaches `clubId`/`membership`/`clubRoleTypes` — and only then does the route handler run. `POST /club-members/apply` is the one exception: it deliberately skips `clubGuard` (the applicant isn't a member yet), see [Key decisions](#key-decisions). `GET /events.ics` is mounted separately at top level (see [Layout](#architecture) below) but runs the same `sessionGuard` + `clubGuard` chain — there is no unauthenticated calendar-feed link, see [Key decisions](#key-decisions). Any error thrown at any stage becomes an `AppError` via `toAppError()` in `app.onError` — nothing unhandled ever reaches a client as a raw stack trace.
 
 Layout:
 
@@ -118,16 +130,21 @@ Layout:
 src/
 ├── auth/             # Better Auth instance, generated schema, RBAC statements
 ├── db/                # Drizzle client, migrations, app-owned schema (club_memberships, departments,
-│                       #   club_roles, guardian_links, club_info_pages, audit_log)
-├── lib/               # errors, email, logger, activity-stats, club-permissions — cross-cutting, no HTTP awareness
+│                       #   club_roles, guardian_links, club_info_pages, audit_log, calendars,
+│                       #   calendar_visibility, events, event_attendees, availability_slots,
+│                       #   availability_exceptions, meetings, meeting_invitees, meeting_attendance,
+│                       #   meeting_resolutions)
+├── lib/               # errors, email, logger, activity-stats, club-permissions, calendar-visibility,
+│                       #   availability-match, ics — cross-cutting, no HTTP awareness
 ├── middleware/         # session-guard, club-guard, rate-limit, request-id
-├── routes/            # health, club-members, departments, club-info, internal-stats, admin-stats
+├── routes/            # health, club-members, departments, club-info, calendars, events, availability,
+│                       #   meetings, internal-stats, admin-stats
 └── scripts/           # seed-admin, seed-club (CLI, not server runtime)
 ```
 
 ## Data model
 
-Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns nine more: `club_memberships`, `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite). See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the planned Wave 2/3 tables (calendar/meetings/availability, locations/inventory) not yet built.
+Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns nineteen more: the Wave 1 set — `club_memberships`, `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — plus the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions`. See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the planned Wave 3 tables (locations/inventory) not yet built.
 
 ```mermaid
 erDiagram
@@ -144,6 +161,17 @@ erDiagram
     member ||--o{ guardian_links : "guards (as guardian)"
     member ||--o{ guardian_links : "is guarded (as ward)"
     departments ||--o{ club_roles : "scopes (optional)"
+    organization ||--o{ calendars : "has"
+    departments ||--o{ calendars : "scopes (optional)"
+    calendars ||--o{ calendar_visibility : "has"
+    calendars ||--o{ events : "has"
+    events ||--o{ event_attendees : "has"
+    member ||--o{ availability_slots : "has"
+    member ||--o{ availability_exceptions : "has"
+    organization ||--o{ meetings : "has"
+    meetings ||--o{ meeting_invitees : "has"
+    meetings ||--o{ meeting_attendance : "has"
+    meetings ||--o{ meeting_resolutions : "has"
 
     user {
         text id PK
@@ -206,6 +234,72 @@ erDiagram
         text subject_id
         jsonb payload
     }
+    calendars {
+        uuid id PK
+        text club_id FK
+        uuid department_id FK "null = club-wide"
+        text name
+        boolean is_default
+    }
+    calendar_visibility {
+        uuid id PK
+        uuid calendar_id FK
+        text member_id FK "exactly one of member/role/department set"
+        text role_type
+        uuid department_id FK
+    }
+    events {
+        uuid id PK
+        uuid calendar_id FK
+        text title
+        timestamp starts_at
+        integer capacity
+    }
+    event_attendees {
+        uuid id PK
+        uuid event_id FK
+        text member_id FK
+        text status "angemeldet | abgesagt | warteliste"
+    }
+    availability_slots {
+        uuid id PK
+        text member_id FK
+        integer weekday "0-6, Monday-Sunday"
+        time start_time
+        time end_time
+    }
+    availability_exceptions {
+        uuid id PK
+        text member_id FK
+        date date
+        boolean is_available
+    }
+    meetings {
+        uuid id PK
+        text club_id FK
+        text type
+        timestamp scheduled_at "null while Terminfindung"
+        text status
+    }
+    meeting_invitees {
+        uuid id PK
+        uuid meeting_id FK
+        text member_id FK
+        text response "ausstehend | zugesagt | abgesagt"
+    }
+    meeting_attendance {
+        uuid id PK
+        uuid meeting_id FK
+        text member_id FK
+        boolean present
+        boolean has_voting_right
+    }
+    meeting_resolutions {
+        uuid id PK
+        uuid meeting_id FK
+        text description
+        text result "angenommen | abgelehnt"
+    }
 ```
 
 `notification`/`notification_state`/`notification_template` are omitted from the diagram above for space — unchanged from [Data Model - Better Auth Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/Better%20Auth%20Template%20Suite/Data%20Model%20-%20Better%20Auth%20Backend.md), see there for the full shape.
@@ -221,6 +315,16 @@ erDiagram
 `notification`/`notification_state` use a lazy-state model: no `notification_state` row for a given `(notification_id, user_id)` pair means "unread, not deleted" for that user — read/unread/delete only ever upsert one row (unique index on that pair) instead of pre-seeding a row per recipient on every broadcast. A `system` notification (e.g. the post-signup welcome, written by the `databaseHooks.user.create` hook in `src/auth/auth.ts`) carries `translation_key`/`params_json` so every client renders it in the viewer's own language; an `admin` notification (created via `/admin/notifications`) is pre-translated into a `translations` JSONB blob instead (`Record<langCode, {title, body}>`, keyed by the shared `SUPPORTED_LANGUAGES` registry used by the website/mobile `t()` contexts — see [[ADR-009]]), since there is no machine translation here.
 
 `notification_template` lets an admin override a `system` notification's built-in translation-key text (see `/admin/notification-templates` below) — one row per known `translation_key` (the registry lives in `src/routes/admin-notification-templates.ts`'s `NOTIFICATION_TEMPLATE_KEYS`), holding a `translations` JSONB blob (`de`/`en` required, any other supported language optional) instead of a key clients resolve themselves. The `databaseHooks.user.create` hook looks this table up when it writes the welcome notification and bakes the override's `translations` into that row if one exists — so editing a template only affects *future* notifications of that kind, same as any other already-created row never retroactively changing. No override yet (the common case) means `translations` stays `null` and clients fall back to their local `translation_key` text, so this is not a breaking change. This table previously held fixed `title_de`/`title_en`/`body_de`/`body_en` columns — a JSONB blob replaced them so a new language is a registry entry, not a schema migration (see `src/db/migrations/0003_add-notification-translations-jsonb.sql` through `0005_drop-notification-legacy-de-en-columns.sql`).
+
+**`calendar_visibility` is a zero-rows-default allow list**, computed by `src/lib/calendar-visibility.ts`'s `isCalendarVisible()`/`getVisibleCalendarIds()`, shared by `calendars.ts` (visibility config) and `events.ts` (event filtering). A calendar with no `calendar_visibility` rows at all is club-wide visible — no explicit "everyone" row needed. Once at least one row exists, a caller needs a matching grant: their own `memberId`, a `roleType` they hold via `club_roles`, or a `departmentId` they're scoped to via a department-bound `club_roles` row (abteilungsleitung/trainer). That department check is the one documented limitation of the model: there is no generic department-membership table in this repo, so a rank-and-file department member with no department-scoped `club_roles` row can never match a department grant, only the member/role rules. A caller holding `calendars:write` bypasses the algorithm entirely and sees every club calendar (board oversight — they need to manage grants for calendars they aren't themselves granted to see).
+
+**RSVP capacity and waitlisting are enforced under a row lock, not just an application-level count.** `POST /events/:id/rsvp` and `DELETE /events/:id/rsvp` both open with `SELECT ... FOR UPDATE` on the event row before counting confirmed attendees. That lock was added after review: under Postgres's default READ COMMITTED isolation, two concurrent RSVPs at `capacity - 1` both read "count < capacity" before either commits, and both get seated — an overbooked event with no error anywhere. The lock serializes the two requests instead, so the second one re-reads the up-to-date count once the first has committed and released it. The same lock guards waitlist promotion on cancel, for the mirrored reason: without it, two concurrent cancellations can both pick the same waitlisted row as "next in line," leaving a freed slot unfilled even though two members were waiting.
+
+**Terminfindung (`GET /availability/overlap`, `GET /meetings/:id/overlap`) is pure precedence logic in `src/lib/availability-match.ts`, no DB access there.** For a given candidate timestamp, an `availability_exceptions` row for that date overrides the member's recurring `availability_slots` entirely, in both directions (an exception can mark someone unavailable on an otherwise-free weekday, or available on one they're normally not). With neither a matching slot nor an exception, a member is default-closed — "no data" is not treated as "free all the time." Both overlap endpoints deliberately return raw per-candidate, per-member availability for the board to eyeball rather than an auto-ranked "best slot" suggestion — an explicit Wave 2 product decision (see [Key decisions](#key-decisions)), not a missing feature.
+
+**`GET /events.ics` is session-gated only.** It runs the same `sessionGuard` + `clubGuard` chain as everything else and returns events from whatever calendars the visibility algorithm grants the caller, built by the dependency-free RFC 5545 writer in `src/lib/ics.ts`. A static/token-based public link — so a calendar app can subscribe without a login — is a real, still-open question this repo's Wave 2 plan explicitly flags and defers, not an oversight.
+
+**Meeting audit entries are per action, not per row, with one deliberate exception.** Create/update/delete on a meeting, adding/removing an invitee, and a member's own RSVP response each write their own `audit_log` row. Recording attendance (`PATCH /meetings/:id/attendance`) is the exception: it takes a batch of per-member entries but writes exactly one summarizing `meeting_attendance.record` audit row for the whole call, not one per attendee. Attendance and resolutions carry real legal weight (Mitgliederversammlung-Protokolle are judged by this data), but a per-row audit trail for a board recording forty members' presence in one sitting would be noise, not signal.
 
 ## API reference
 
@@ -243,6 +347,34 @@ erDiagram
 | `/club-info/:slug` | GET | session + `clubGuard` | One info page (Satzung/Leitbild/...) |
 | `/club-info/:slug` | PUT | session + `clubGuard` (`club_info:write`) | Create-or-update by slug. Body `{ title, contentMarkdown?, externalUrl? }` |
 | `/club-info/:slug` | DELETE | session + `clubGuard` (`club_info:write`) | |
+| `/calendars` | GET | session + `clubGuard` | Every club calendar for a `calendars:write` caller, else only what `src/lib/calendar-visibility.ts` grants |
+| `/calendars` | POST | session + `clubGuard` (`calendars:write`) | Body `{ name, departmentId?, isDefault?, icalImportUrl? }`. Setting `isDefault` unsets it on every other club calendar in the same transaction |
+| `/calendars/:id` | GET | session + `clubGuard` | 404 unless visible to the caller (write permission or a matching grant) |
+| `/calendars/:id` | PATCH, DELETE | session + `clubGuard` (`calendars:write`) | |
+| `/calendars/:id/visibility` | GET | session + `clubGuard` (`calendars:write`) | Raw `calendar_visibility` rows for the calendar (board-facing config, not a public list) |
+| `/calendars/:id/visibility` | POST | session + `clubGuard` (`calendars:write`) | Body: exactly one of `{ memberId }` \| `{ roleType }` \| `{ departmentId }` |
+| `/calendars/:id/visibility/:visibilityId` | DELETE | session + `clubGuard` (`calendars:write`) | |
+| `/events` | GET | session + `clubGuard` | Query `from?`/`to?` (ISO dates). Only events on calendars visible to the caller |
+| `/events` | POST, `/events/:id` PATCH, DELETE | session + `clubGuard` (`calendars:write`) | Body includes `calendarId`/`title`/`startsAt`/`endsAt?`/`category?`/`capacity?`; moving `calendarId` re-checks it belongs to the caller's club |
+| `/events/:id` | GET | session + `clubGuard` | 404 unless the event's calendar is visible to the caller |
+| `/events/:id/rsvp` | POST | session + `clubGuard` | Self-service RSVP. Row-locks the event (`SELECT ... FOR UPDATE`) before counting confirmed attendees; returns `"angemeldet"` or `"warteliste"` once over capacity |
+| `/events/:id/rsvp` | DELETE | session + `clubGuard` | Cancels the caller's own RSVP; same row lock, promotes the earliest-waitlisted member (FIFO) if the caller was confirmed |
+| `/events.ics` | GET | session + `clubGuard` | iCal feed (`text/calendar`) of events on calendars visible to the caller. Session-gated only — no public/token link yet, see [Key decisions](#key-decisions) |
+| `/availability/slots` | GET, POST | session + `clubGuard` | Caller's own recurring weekly `availability_slots`. Body `{ weekday, startTime, endTime, note? }` |
+| `/availability/slots/:id` | PATCH, DELETE | session + `clubGuard` | Own row only |
+| `/availability/exceptions` | GET, POST | session + `clubGuard` | Caller's own one-off `availability_exceptions`. Body `{ date, isAvailable, note? }` |
+| `/availability/exceptions/:id` | PATCH, DELETE | session + `clubGuard` | Own row only |
+| `/availability/overlap` | GET | session + `clubGuard` | Query `members`/`candidates` (comma-separated ids/ISO timestamps). Raw per-candidate, per-member availability — no auto-ranked suggestion, see [Key decisions](#key-decisions) |
+| `/meetings` | GET, POST | session + `clubGuard` (write needs `meetings:write`) | Body `{ type, title, scheduledAt?, agenda? }`. Omitting `scheduledAt` creates it in `"terminfindung"` status |
+| `/meetings/:id` | GET | session + `clubGuard` | |
+| `/meetings/:id` | PATCH, DELETE | session + `clubGuard` (`meetings:write`) | PATCH also accepts `status`/`minutes` |
+| `/meetings/:id/invitees` | GET | session + `clubGuard` | |
+| `/meetings/:id/invitees` | POST, DELETE `/:memberId` | session + `clubGuard` (`meetings:write`) | Same table serves the Terminfindung candidate list and post-scheduling zu-/absage tracking |
+| `/meetings/:id/invitees/me` | PATCH | session + `clubGuard` | Self-service RSVP for the caller's own invitee row. Body `{ response: "zugesagt" \| "abgesagt" }` |
+| `/meetings/:id/overlap` | GET | session + `clubGuard` | Query `candidates` only — auto-loads the meeting's own invitees instead of a caller-supplied `members` list |
+| `/meetings/:id/attendance` | GET | session + `clubGuard` | |
+| `/meetings/:id/attendance` | PATCH | session + `clubGuard` (`meetings:write`) | Body: array of `{ memberId, present, hasVotingRight?, proxyForMemberId? }`, upserted per member. One audit entry for the whole batch, not per row |
+| `/meetings/:id/resolutions` | GET, POST | session + `clubGuard` (write needs `meetings:write`) | Body `{ description, votesFor, votesAgainst, votesAbstain, result }` (Beschluss) |
 | `/internal/stats` | GET | `INTERNAL_STATS_TOKEN` bearer token | Aggregate counts only (total users, new users last 7 days, active sessions, `audit_log` event-type breakdown) — never raw rows. Not gated by a Better Auth session; see [Security](#security) for why. Returns 503 if `INTERNAL_STATS_TOKEN` is unset (fails closed) |
 | `/admin/activity-stats` | GET | session + `adminGuard` | Query: `interval` (`day`\|`week`), `period` (`7d`\|`30d`\|`90d`). Per-bucket New/Active/Retained/Reactivated user counts plus period-over-period `changePercent`, for `_template_better-auth-admin`'s dashboard. "Active" = had a session created in the window (a login proxy, not request-level activity — this backend has none). Classification logic is a pure function in `src/lib/activity-stats.ts`, unit-tested separately from the DB query in `src/routes/admin-stats.ts` |
 | `/admin/send-verification-email` | POST | session + `adminGuard` | Body: `{ userId, callbackURL? }`. Re-enters Better Auth server-side (no session) to send a verification e-mail for a **different** user — the client-side `sendVerificationEmail` endpoint requires the signed-in session's email to match the target (`EMAIL_MISMATCH`), so an admin can never use it for anyone else; the server-side anonymous path has no such check. 404 if the user doesn't exist, 409 if already verified. Backs the admin dashboard's "Resend verification email" button (`src/routes/admin-emails.ts`, integration-tested in `src/routes/admin-emails.test.ts`) |
@@ -372,6 +504,10 @@ Short version of decisions with real consequences if reversed. Full ADRs for the
 - **Two-tier role model: Better Auth `member.role` (coarse) + `club_roles.roleType` (fine), never merged into one.** `member.role` only gates Better-Auth-native org actions; every MyVerein-specific permission (`members:write`, `roles:write`, `departments:write`, `club_info:write`) is derived from `club_roles` via `src/lib/club-permissions.ts`'s config-code mapping, not a database rights-matrix table — the mapping changes per deployment, not per club at runtime, so a table would be complexity with no real flexibility payoff. See the company vault's Architecture Overview - MyVerein §7 for the full reasoning.
 - **`POST /club-members/apply` grants membership immediately, no pending-approval state.** The Concept doc's "digitaler Aufnahmeantrag" implies a review step, but `club_memberships` has no `status` column for one (see Data Model - MyVerein Backend §3) — building a full pending/approved/rejected workflow was judged out of Wave-1 scope. The board can still correct a wrong join via `PATCH /club-members/:memberId` (e.g. `leftAt`). A real approval queue is a documented gap for a later wave, not a silent omission.
 - **`guardian_links` is board-managed only, never self-service.** A guardian membership (externe Rolle) must never be able to grant itself visibility into an arbitrary member's data — only a caller with `members:write` can create or remove a guardian↔ward link.
+- **Calendars reuse the existing two-tier permission model, not a new rights system.** `calendars:write`/`meetings:write` are two more entries in `src/lib/club-permissions.ts`'s `ClubPermission` union and `ROLE_PERMISSIONS` map, same config-code pattern as `members:write`/`roles:write`/etc — no new database rights-matrix table for Wave 2. Reversing this (a bespoke calendar ACL system) would mean two different authorization models to reason about in one codebase for no real gain, since the existing mapping already handles "which roles can do X."
+- **Terminfindung shows raw overlap data, not an auto-ranked best-slot suggestion.** `GET /availability/overlap` and `GET /meetings/:id/overlap` return every candidate's per-member availability and stop there — the board picks manually. This is an explicit Wave 2 scope decision, not a missing feature; building a ranking/scoring algorithm on top would mean guessing at a board's real-world scheduling constraints (quorum, who's indispensable, etc.) that this data model doesn't capture.
+- **`GET /events.ics` is session-gated, not a public link.** Every other calendar-adjacent route requires a session; the iCal feed does too, which means a calendar app can't subscribe to it without embedding a user's credentials. A public/token-based feed URL is a real, still-open question flagged in the Wave 2 plan, deliberately deferred rather than shipped half-thought-through (e.g. a leaked link would expose event data indefinitely with no way to scope or revoke it without also breaking every legitimate subscriber).
+- **RSVP capacity is enforced with `SELECT ... FOR UPDATE`, added after review found a race.** The first cut counted confirmed attendees without locking the event row; under READ COMMITTED, two concurrent RSVPs at `capacity - 1` could both read "under capacity" and both get seated. The row lock serializes RSVP (and cancel/waitlist-promotion) requests against the same event instead of trusting an unlocked read-then-write. Removing the lock would silently reintroduce the overbooking race under real concurrent load, not just in theory.
 
 ## Deployment
 
@@ -458,7 +594,7 @@ Confirm `Domain=example.com` is present in the output. If it's missing, the *run
 
 ## Testing and CI
 
-`npm test` runs Vitest: unit tests for `permissions.ts`, `club-permissions.ts`, `errors.ts`, and the rate-limit middleware need nothing running; the club-scoping/permission integration test in `src/routes/club-members.test.ts` and the `internal-stats.test.ts` token-gate tests both need a real `DATABASE_URL` (the same Postgres `docker compose up -d db` gives you) since they exercise actual sign-up/sign-in/organization-creation against Better Auth and real cross-club IDOR checks rather than mocking either. `.github/workflows/ci.yml` runs lint, `tsc --noEmit`, migrations, build, and the full test suite against a Postgres service container on every push and pull request.
+`npm test` runs Vitest: 156 tests across 18 files as of this write. Unit tests for `permissions.ts`, `club-permissions.ts`, `errors.ts`, the rate-limit middleware, `availability-match.ts`'s Terminfindung precedence logic, and `ics.ts`'s RFC 5545 writer need nothing running; the club-scoping/permission integration tests — `club-members.test.ts`, `calendars.test.ts`, `events.test.ts`, `availability.test.ts`, `meetings.test.ts` — and the `internal-stats.test.ts` token-gate tests all need a real `DATABASE_URL` (the same Postgres `docker compose up -d db` gives you) since they exercise actual sign-up/sign-in/organization-creation against Better Auth and real cross-club IDOR checks rather than mocking either. `events.test.ts` covers the capacity-1 waitlist flow end to end (second RSVP gets `"warteliste"`, then gets promoted once the first cancels) sequentially — it doesn't fire concurrent requests, so the row lock itself is exercised by inspection/code review rather than a dedicated race test. `.github/workflows/ci.yml` runs lint, `tsc --noEmit`, migrations, build, and the full test suite against a Postgres service container on every push and pull request.
 
 ## How this fits into the template suite
 
