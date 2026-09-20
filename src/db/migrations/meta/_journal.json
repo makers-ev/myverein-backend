@@ -71,6 +71,13 @@
       "when": 1789922354515,
       "tag": "0009_sticky_ronan",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789931225770,
+      "tag": "0010_romantic_talos",
+      "breakpoints": true
     }
   ]
 }

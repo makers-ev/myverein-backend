@@ -3,6 +3,7 @@ import { pgTable, text, timestamp, uuid, integer, index } from "drizzle-orm/pg-c
 
 import { user } from "../../auth/auth-schema.js";
 import { calendars } from "./calendars.js";
+import { locations } from "./locations.js";
 
 /**
  * A single calendar entry (training, match, board meeting, ...). See Data
@@ -23,9 +24,7 @@ export const events = pgTable(
     // "Fest" | "Wartung".
     category: text("category"),
     capacity: integer("capacity"),
-    // No FK yet -- the locations table doesn't exist until Wave 3. Add the
-    // reference once it lands.
-    locationId: uuid("location_id"),
+    locationId: uuid("location_id").references(() => locations.id, { onDelete: "set null" }),
     createdBy: text("created_by")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
@@ -41,6 +40,7 @@ export const events = pgTable(
 export const eventsRelations = relations(events, ({ one }) => ({
   calendar: one(calendars, { fields: [events.calendarId], references: [calendars.id] }),
   creator: one(user, { fields: [events.createdBy], references: [user.id] }),
+  location: one(locations, { fields: [events.locationId], references: [locations.id] }),
 }));
 
 export type EventRow = typeof events.$inferSelect;
