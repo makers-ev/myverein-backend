@@ -9,6 +9,7 @@ import { inventoryDamageReports, inventoryItems, inventoryLoans } from "../db/sc
 import { locations } from "../db/schema/locations.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { effectiveLoanStatus, isMaintenanceDue, maintenanceDueDate } from "../lib/inventory-status.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -38,6 +39,18 @@ async function assertLocationInClub(locationId: string, clubId: string) {
   if (!location) throw new ValidationError("locationId is not a location of this club");
 }
 
+/** Adds the live-derived maintenance status -- never stored, see lib/inventory-status.ts. */
+function withMaintenanceStatus<T extends { maintenanceIntervalDays: number | null; lastMaintenanceAt: string | null; acquiredAt: string | null }>(
+  item: T,
+) {
+  return { ...item, maintenanceDue: isMaintenanceDue(item, new Date()), maintenanceDueAt: maintenanceDueDate(item) };
+}
+
+/** Adds the live-derived "ueberfaellig" override -- never stored, see lib/inventory-status.ts. */
+function withEffectiveLoanStatus<T extends { dueAt: Date | null; returnedAt: Date | null; status: string }>(loan: T) {
+  return { ...loan, status: effectiveLoanStatus(loan, new Date()) };
+}
+
 // --- Inventory item CRUD -----------------------------------------------------------
 
 inventoryItemRoutes.get("/", async (c) => {
@@ -53,7 +66,7 @@ inventoryItemRoutes.get("/", async (c) => {
     where: and(...conditions),
     orderBy: (i, { asc }) => [asc(i.name)],
   });
-  return c.json({ data: rows });
+  return c.json({ data: rows.map(withMaintenanceStatus) });
 });
 
 inventoryItemRoutes.get("/:id", async (c) => {
@@ -61,7 +74,7 @@ inventoryItemRoutes.get("/:id", async (c) => {
   const id = c.req.param("id");
 
   const row = await loadClubInventoryItem(id, clubId);
-  return c.json({ data: row });
+  return c.json({ data: withMaintenanceStatus(row) });
 });
 
 const createInventoryItemSchema = z.object({
@@ -105,7 +118,7 @@ inventoryItemRoutes.post(
 
     await db.insert(auditLog).values({ eventType: "inventory_item.create", subjectId: row.id, payload: { clubId, name: row.name } });
 
-    return c.json({ data: row }, 201);
+    return c.json({ data: withMaintenanceStatus(row) }, 201);
   },
 );
 
@@ -144,7 +157,7 @@ inventoryItemRoutes.patch(
 
     await db.insert(auditLog).values({ eventType: "inventory_item.update", subjectId: id, payload: { clubId, changes: body } });
 
-    return c.json({ data: row });
+    return c.json({ data: withMaintenanceStatus(row) });
   },
 );
 
@@ -174,7 +187,7 @@ inventoryItemRoutes.get("/:id/loans", async (c) => {
     where: eq(inventoryLoans.itemId, id),
     orderBy: (l, { desc }) => [desc(l.borrowedAt)],
   });
-  return c.json({ data: rows });
+  return c.json({ data: rows.map(withEffectiveLoanStatus) });
 });
 
 const createLoanSchema = z.object({
@@ -210,7 +223,7 @@ inventoryItemRoutes.post(
       payload: { clubId, itemId: id, memberId: membership.id },
     });
 
-    return c.json({ data: row }, 201);
+    return c.json({ data: withEffectiveLoanStatus(row) }, 201);
   },
 );
 
@@ -245,7 +258,7 @@ inventoryItemRoutes.patch("/:id/loans/:loanId", async (c) => {
     payload: { clubId, itemId: id, memberId: existing.memberId },
   });
 
-  return c.json({ data: row });
+  return c.json({ data: withEffectiveLoanStatus(row) });
 });
 
 // --- Damage reports -----------------------------------------------------------
