@@ -19,6 +19,7 @@ import { clubMemberRoutes } from "./routes/club-members.js";
 import { departmentRoutes } from "./routes/departments.js";
 import { eventRoutes, icsRoutes } from "./routes/events.js";
 import { healthRoutes } from "./routes/health.js";
+import { locationRoutes } from "./routes/locations.js";
 import { meetingRoutes } from "./routes/meetings.js";
 import { myClubRoutes } from "./routes/my-clubs.js";
 import { internalStatsRoutes } from "./routes/internal-stats.js";
@@ -83,6 +84,7 @@ app.route("/events", eventRoutes);
 app.route("/events.ics", icsRoutes);
 app.route("/availability", availabilityRoutes);
 app.route("/meetings", meetingRoutes);
+app.route("/locations", locationRoutes);
 
 const port = Number(process.env.PORT ?? 3000);
 // Loopback-only by default -- LAN testing (a browser hitting this machine's
