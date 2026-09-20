@@ -15,6 +15,10 @@ import * as departmentsSchema from "./schema/departments.js";
 import * as eventAttendeesSchema from "./schema/event-attendees.js";
 import * as eventsSchema from "./schema/events.js";
 import * as guardianLinksSchema from "./schema/guardian-links.js";
+import * as inventorySchema from "./schema/inventory.js";
+import * as locationLinksSchema from "./schema/location-links.js";
+import * as locationWifiSchema from "./schema/location-wifi.js";
+import * as locationsSchema from "./schema/locations.js";
 import * as meetingsSchema from "./schema/meetings.js";
 import * as notificationsSchema from "./schema/notifications.js";
 
@@ -60,6 +64,10 @@ export const schema = {
   ...eventAttendeesSchema,
   ...availabilitySchema,
   ...meetingsSchema,
+  ...locationsSchema,
+  ...locationWifiSchema,
+  ...locationLinksSchema,
+  ...inventorySchema,
 };
 
 export const db = drizzle(pool, { schema });

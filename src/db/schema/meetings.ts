@@ -2,6 +2,7 @@ import { relations } from "drizzle-orm";
 import { pgTable, text, timestamp, uuid, integer, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { member, user, organization } from "../../auth/auth-schema.js";
+import { locations } from "./locations.js";
 
 /**
  * A club meeting (board meeting, general assembly, committee session). See
@@ -20,8 +21,7 @@ export const meetings = pgTable(
     title: text("title").notNull(),
     // Null while still scheduling (Terminfindung).
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
-    // No FK yet -- the locations table doesn't exist until Wave 3.
-    locationId: uuid("location_id"),
+    locationId: uuid("location_id").references(() => locations.id, { onDelete: "set null" }),
     agenda: text("agenda"),
     minutes: text("minutes"),
     // Freitext-Beispiele: "terminfindung" | "geplant" | "abgehalten" |
@@ -93,6 +93,7 @@ export const meetingResolutions = pgTable(
 export const meetingsRelations = relations(meetings, ({ one, many }) => ({
   club: one(organization, { fields: [meetings.clubId], references: [organization.id] }),
   creator: one(user, { fields: [meetings.createdBy], references: [user.id] }),
+  location: one(locations, { fields: [meetings.locationId], references: [locations.id] }),
   invitees: many(meetingInvitees),
   attendance: many(meetingAttendance),
   resolutions: many(meetingResolutions),
