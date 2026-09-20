@@ -298,6 +298,14 @@ inventoryItemRoutes.post(
 
     await loadClubInventoryItem(id, clubId);
 
+    // Same club-prefix shape as a real /media key ("<clubId>/..."), mirroring
+    // the locationId check above -- GET /media/:key independently re-checks
+    // this at read time too, but rejecting an obviously-foreign key up front
+    // keeps a garbage/wrong-club value out of the row in the first place.
+    if (body.photoKey && !body.photoKey.startsWith(`${clubId}/`)) {
+      throw new ValidationError("photoKey is not a media key of this club");
+    }
+
     const [row] = await db
       .insert(inventoryDamageReports)
       .values({

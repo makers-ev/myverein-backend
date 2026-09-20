@@ -168,7 +168,13 @@ describe("media routes", () => {
   });
 
   it("404s (never a filesystem error) on a path-traversal key that still matches the caller's own club-id prefix", async () => {
-    const res = await app.request(`/media/${clubAId}/../../../../etc/passwd?clubId=${clubAId}`, { headers: { cookie: cookieA } });
+    // Literal "../" here would be collapsed by URL parsing before Hono's
+    // router ever sees it (testing nothing but URL normalization). Percent-
+    // encode the slashes so the raw ".." reaches storage.ts's own
+    // containment check in getObject() -- that's the guard actually under
+    // test, not an incidental 404 from routing.
+    const encodedTraversal = `${clubAId}%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd`;
+    const res = await app.request(`/media/${encodedTraversal}?clubId=${clubAId}`, { headers: { cookie: cookieA } });
     expect(res.status).toBe(404);
   });
 });
