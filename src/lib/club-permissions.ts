@@ -34,7 +34,9 @@ export type ClubPermission =
   | "departments:write"
   | "club_info:write"
   | "calendars:write" // manage calendars/events + calendar_visibility grants
-  | "meetings:write"; // manage meetings/agenda/invitees/attendance/resolutions
+  | "meetings:write" // manage meetings/agenda/invitees/attendance/resolutions
+  | "locations:write" // manage locations/key holders/wifi networks/links
+  | "inventory:write"; // manage inventory items/loans/damage reports
 
 /**
  * Which permissions each role_type grants. A membership can hold several
@@ -47,7 +49,17 @@ export type ClubPermission =
  * beisitzer/abteilungsleitung/trainer do not get `members:read_sensitive`.
  */
 const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
-  vorsitz: ["members:write", "members:read_sensitive", "roles:write", "departments:write", "club_info:write", "calendars:write", "meetings:write"],
+  vorsitz: [
+    "members:write",
+    "members:read_sensitive",
+    "roles:write",
+    "departments:write",
+    "club_info:write",
+    "calendars:write",
+    "meetings:write",
+    "locations:write",
+    "inventory:write",
+  ],
   stellv_vorsitz: [
     "members:write",
     "members:read_sensitive",
@@ -56,18 +68,21 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "club_info:write",
     "calendars:write",
     "meetings:write",
+    "locations:write",
+    "inventory:write",
   ],
   kassenwart: ["members:read_sensitive"],
   // A schriftfuehrer's real-world job in a German Verein is literally running
   // meeting agendas/Protokolle, so meetings:write is a natural fit here.
-  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write"],
+  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write"],
   beisitzer: [],
-  // Also calendars:write, on top of departments:write -- an Abteilungsleitung
-  // needs to manage calendars day to day, not just the board (same
+  // Also calendars:write/locations:write/inventory:write, on top of
+  // departments:write -- an Abteilungsleitung needs to manage calendars,
+  // venues, and equipment day to day, not just the board (same
   // operational-need reasoning as members:read_sensitive above). Note this
   // is club-wide, not scoped to just their own department -- same shape as
   // their existing departments:write (Wave 1 precedent), not a new gap.
-  abteilungsleitung: ["departments:write", "calendars:write"],
+  abteilungsleitung: ["departments:write", "calendars:write", "locations:write", "inventory:write"],
   trainer: [],
   erziehungsberechtigt: [],
 };
