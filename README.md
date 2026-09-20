@@ -144,7 +144,7 @@ src/
 
 ## Data model
 
-Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns nineteen more: the Wave 1 set — `club_memberships`, `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — plus the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions`. See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the planned Wave 3 tables (locations/inventory) not yet built.
+Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns twenty-six more: the Wave 1 set — `club_memberships`, `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports`. See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
 
 ```mermaid
 erDiagram
@@ -172,6 +172,14 @@ erDiagram
     meetings ||--o{ meeting_invitees : "has"
     meetings ||--o{ meeting_attendance : "has"
     meetings ||--o{ meeting_resolutions : "has"
+    organization ||--o{ locations : "has"
+    locations ||--o{ location_key_holders : "has"
+    locations ||--o{ location_wifi_networks : "has"
+    locations ||--o{ location_links : "has"
+    organization ||--o{ inventory_items : "has"
+    locations ||--o{ inventory_items : "stores"
+    inventory_items ||--o{ inventory_loans : "has"
+    inventory_items ||--o{ inventory_damage_reports : "has"
 
     user {
         text id PK
@@ -300,6 +308,60 @@ erDiagram
         text description
         text result "angenommen | abgelehnt"
     }
+    locations {
+        uuid id PK
+        text club_id FK
+        text name
+        text address
+        numeric latitude
+        numeric longitude
+        text photo_url
+    }
+    location_key_holders {
+        uuid id PK
+        uuid location_id FK
+        text member_id FK
+    }
+    location_wifi_networks {
+        uuid id PK
+        uuid location_id FK
+        text ssid
+        text password "plain text, see Security"
+        boolean visible_to_guests
+    }
+    location_links {
+        uuid id PK
+        uuid location_id FK
+        text title
+        text url
+        boolean visible_to_guests
+    }
+    inventory_items {
+        uuid id PK
+        text club_id FK
+        text name
+        text condition "gut | beschaedigt | defekt"
+        uuid location_id FK "nullable, ON DELETE SET NULL"
+        integer acquisition_value_cents
+        integer maintenance_interval_days
+        date last_maintenance_at
+    }
+    inventory_loans {
+        uuid id PK
+        uuid item_id FK
+        text member_id FK
+        timestamp due_at
+        timestamp returned_at
+        text status "ausgeliehen | zurueckgegeben (ueberfaellig is derived, never stored)"
+    }
+    inventory_damage_reports {
+        uuid id PK
+        uuid item_id FK
+        text reported_by FK
+        text description
+        text photo_url "media storage key, not a public URL"
+        text status "gemeldet | in_bearbeitung | behoben"
+    }
 ```
 
 `notification`/`notification_state`/`notification_template` are omitted from the diagram above for space — unchanged from [Data Model - Better Auth Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/Better%20Auth%20Template%20Suite/Data%20Model%20-%20Better%20Auth%20Backend.md), see there for the full shape.
@@ -325,6 +387,12 @@ erDiagram
 **`GET /events.ics` is session-gated only.** It runs the same `sessionGuard` + `clubGuard` chain as everything else and returns events from whatever calendars the visibility algorithm grants the caller, built by the dependency-free RFC 5545 writer in `src/lib/ics.ts`. A static/token-based public link — so a calendar app can subscribe without a login — is a real, still-open question this repo's Wave 2 plan explicitly flags and defers, not an oversight.
 
 **Meeting audit entries are per action, not per row, with one deliberate exception.** Create/update/delete on a meeting, adding/removing an invitee, and a member's own RSVP response each write their own `audit_log` row. Recording attendance (`PATCH /meetings/:id/attendance`) is the exception: it takes a batch of per-member entries but writes exactly one summarizing `meeting_attendance.record` audit row for the whole call, not one per attendee. Attendance and resolutions carry real legal weight (Mitgliederversammlung-Protokolle are judged by this data), but a per-row audit trail for a board recording forty members' presence in one sitting would be noise, not signal.
+
+**`visible_to_guests` is a serverside filter applied in the `WHERE` clause, never a fetch-then-filter-in-JS step.** `location_wifi_networks`/`location_links` share this boolean flag (default `false`). A caller whose `membership.role === "guest"` gets an extra `visibleToGuests = true` condition added to the query in `src/routes/locations.ts`; a plain member/board caller sees every row, passwords included. Filtering after the fact would risk a future refactor accidentally logging or caching the unfiltered row before the filter runs — doing it in the query removes that class of mistake entirely.
+
+**Photo uploads are served through an authenticated route, not a public URL.** `src/lib/storage.ts` (`putObject`/`getObject`, adapted from the sister products' disk-storage pattern, no quota system, no `media_uploads` table) writes to `UPLOADS_DIR/<clubId>/<uuid>-<filename>` and returns only a `key` — never a URL. `GET /media/:key` (`src/routes/media.ts`) is the only way to read it back: it checks the key's club-id prefix against the caller's own `clubId` (404, never 403, on a mismatch) and resolves the path against `UPLOADS_DIR` to reject any `../` traversal attempt before touching the filesystem. `inventory_damage_reports.photo_url` stores the raw key, not a full URL; a client builds the display URL as `` `/media/${photoUrl}` `` (see `withPhotoUrl` in `src/routes/inventory-items.ts`).
+
+**"ueberfaellig" (overdue) and maintenance-due status are computed at read time, never written by a job.** `src/lib/inventory-status.ts` derives both from a plain date comparison against `now()` — `isLoanOverdue`/`effectiveLoanStatus` for `inventory_loans.dueAt`, `isMaintenanceDue`/`maintenanceDueDate` for `inventory_items.maintenanceIntervalDays` counted from `lastMaintenanceAt` (falling back to `acquiredAt` if the item has never been serviced). The DB column itself only ever holds `"ausgeliehen"`/`"zurueckgegeben"`; a cron job that flips it to `"ueberfaellig"` would drift from `now()` between runs in a way a read-time derivation never can.
 
 ## API reference
 
@@ -388,6 +456,19 @@ erDiagram
 | `/admin/notification-templates` | GET | session + `adminGuard` | One row per known `translation_key` (`NOTIFICATION_TEMPLATE_KEYS`), `translations` `null` when there's no override yet |
 | `/admin/notification-templates/:key` | PATCH | session + `adminGuard` | Body: `{ translations }` (`Record<langCode, {title, body}>`, `de`/`en` required, other supported languages optional). Upserts the override. 404 if `key` isn't in `NOTIFICATION_TEMPLATE_KEYS` |
 | `/admin/notification-templates/:key` | DELETE | session + `adminGuard` | Reverts to no-override (deletes the row, idempotent). 404 if `key` isn't in `NOTIFICATION_TEMPLATE_KEYS` |
+| `/locations` | GET, POST | session + `clubGuard` (write needs `locations:write`) | Any member reads; body `{ name, address?, latitude?, longitude?, openingHours?, photoUrl?, contactPerson?, accessNote? }` |
+| `/locations/:id` | GET, PATCH, DELETE | session + `clubGuard` (write needs `locations:write`) | Detail includes `keyHolders` |
+| `/locations/:id/key-holders` | POST, DELETE `/:memberId` | session + `clubGuard` (`locations:write`) | Body `{ memberId }`. 409 on a duplicate `(locationId, memberId)` |
+| `/locations/:id/wifi` | GET, POST, PATCH `/:wifiId`, DELETE `/:wifiId` | session + `clubGuard` (write needs `locations:write`) | GET filters to `visibleToGuests = true` for a `guest`-role caller. Body `{ label, ssid, password, visibleToGuests? }`. Passwords are never written to `audit_log` |
+| `/locations/:id/links` | GET, POST, PATCH `/:linkId`, DELETE `/:linkId` | session + `clubGuard` (write needs `locations:write`) | Same guest-visibility filter as `/wifi`. Body `{ title, url, icon?, visibleToGuests? }` |
+| `/inventory-items` | GET, POST | session + `clubGuard` (write needs `inventory:write`) | Any member reads; query `locationId?`/`category?` filters. Body `{ name, category?, condition, locationId?, acquisitionValueCents?, acquiredAt?, maintenanceIntervalDays?, lastMaintenanceAt? }`. Responses include derived `maintenanceDue`/`maintenanceDueAt` (see [Data model](#data-model)) |
+| `/inventory-items/:id` | GET, PATCH, DELETE | session + `clubGuard` (write needs `inventory:write`) | |
+| `/inventory-items/:id/loans` | GET, POST | session + `clubGuard` | Self-service: POST always borrows for the caller (`memberId` = caller's own membership). Body `{ dueAt? }`. Responses' `status` is the live-derived value (`"ueberfaellig"` overrides the stored value once past due) |
+| `/inventory-items/:id/loans/:loanId` | PATCH | session + `clubGuard` | Marks returned. Allowed for the borrower themself or a caller with `inventory:write`. 409 if already returned |
+| `/inventory-items/:id/damage-reports` | GET, POST | session + `clubGuard` | Self-service: POST always reports as the caller. Body `{ description, photoKey? }` (`photoKey` from `POST /media`). Responses include a derived `photoUrl: "/media/" + photoKey` |
+| `/inventory-items/:id/damage-reports/:reportId` | PATCH | session + `clubGuard` (`inventory:write`) | Body `{ status }`. `resolvedAt` auto-set when `status` becomes `"behoben"`, cleared otherwise |
+| `/media` | POST | session + `clubGuard` | Multipart upload, field name `file`. Content-type allowlist (`image/jpeg`/`png`/`webp`), 10 MB max. Returns `{ key }`, no DB row |
+| `/media/:key` | GET | session + `clubGuard` | Streams the file back. 404 (never 403) if the key's club-id prefix doesn't match the caller's `clubId`, or if it doesn't exist on disk |
 
 The scaffold's `/accounts` and `/examples` routes (ownership-scoped example resource / connectivity-check) were removed in Wave 1 (see [Key decisions](#key-decisions)) — `src/routes/club-members.ts` is now the reference implementation for "a real, club-scoped resource" that a new route should copy the pattern from, in place of the old `accounts.ts`.
 
@@ -466,6 +547,7 @@ All variables live in `.env.example`. The ones worth calling out specifically:
 | `DB_POOL_MAX` / `DB_POOL_MIN` / `DB_POOL_IDLE_TIMEOUT_MS` / `DB_POOL_CONNECTION_TIMEOUT_MS` | no | Explicit `pg` pool bounds — an unbounded pool was a documented weakness of a previous version of this stack |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | no | Consumed only by `npm run seed:admin`, never read by the running server |
 | `INTERNAL_STATS_TOKEN` | no | Bearer token for `GET /internal/stats`. Unset means the endpoint always responds 503, not a silent 401 — fails closed by default. Generate any long random value, e.g. `openssl rand -hex 32` |
+| `UPLOADS_DIR` | no | Local-disk root for uploaded photos (defaults to `./uploads`), served back through `GET /media/:key`. See `src/lib/storage.ts` |
 
 The verification and password-reset e-mails are HTML, built by `src/lib/emailTemplate.ts` (`buildVerifyEmailEmail`/`buildResetPasswordEmail`) and wired up in `src/auth/auth.ts` (`emailVerification.sendVerificationEmail` and `emailAndPassword.sendResetPassword`) — no external template system, just template-literal HTML passed to `sendEmail()`. The card layout, colors, and `assets/lpj-its-logo.png` logo (embedded via `cid:`, see `sendEmail`'s `attachments` param in `src/lib/email.ts`) are LPJ IT-Solutions' generic template branding — the product name and primary color come from `src/project.config.ts` (`appName`/`primaryColor`, re-exported by `emailTemplate.ts` as `APP_NAME`/`BRAND.primary`); the rest of `BRAND` and the logo file are edited directly. The link target inside those e-mails is controlled by the client apps, not here — see the website's/mobile's own README for `NEXT_PUBLIC_SITE_URL`/`EXPO_PUBLIC_WEBSITE_URL`. Exception: for the password-reset e-mail, `sendResetPassword` appends a fallback `callbackURL` pointing at the website's `/reset-password` page (first `WEB_ORIGIN`) when the calling client doesn't pass a `redirectTo` — otherwise the emailed link would dead-end on the backend's callback handler (it rejects links without a `callbackURL`).
 
@@ -490,6 +572,7 @@ The verification and password-reset e-mails are HTML, built by `src/lib/emailTem
 - `secureHeaders` sets `X-Content-Type-Options`, `X-Frame-Options: DENY`, and a `Referrer-Policy`. There is deliberately no Content-Security-Policy here — this is a JSON API with no HTML to protect; the nonce-based CSP in the website template would be meaningless noise on this server.
 - Rate limiting is in-memory and per-instance — correct for this template's single-replica default, wrong once you run more than one backend replica behind a load balancer (each instance keeps its own counters). Swap `src/middleware/rate-limit.ts`'s `Map` for a Redis-backed limiter (for example `@upstash/ratelimit`) before scaling horizontally.
 - Errors are normalized through `AppError`/`toAppError()` before they ever reach a response — an unhandled exception becomes an opaque 500 with a logged stack trace server-side, never a leaked internal message.
+- `GET /media/:key` resolves the requested key against `UPLOADS_DIR` and rejects the result if it falls outside that directory (`path.resolve` + prefix check, not just trusting `path.join`'s own `..`-normalization) before it's ever read off disk — a defense against a crafted key like `myClubId/../../../etc/passwd` reaching `readFile`.
 - `GET /internal/stats` is deliberately **not** gated by a Better Auth session/`adminGuard` — its caller is another backend, with no user account here at all (see [API reference](#api-reference)). A single static token, compared with `crypto.timingSafeEqual` rather than `===` (constant-time, so a wrong guess can't be narrowed down via response timing), is the whole auth mechanism. It can only ever read this one aggregate endpoint — nothing else `adminGuard` protects is reachable with it.
 
 ## Key decisions
@@ -508,6 +591,8 @@ Short version of decisions with real consequences if reversed. Full ADRs for the
 - **Terminfindung shows raw overlap data, not an auto-ranked best-slot suggestion.** `GET /availability/overlap` and `GET /meetings/:id/overlap` return every candidate's per-member availability and stop there — the board picks manually. This is an explicit Wave 2 scope decision, not a missing feature; building a ranking/scoring algorithm on top would mean guessing at a board's real-world scheduling constraints (quorum, who's indispensable, etc.) that this data model doesn't capture.
 - **`GET /events.ics` is session-gated, not a public link.** Every other calendar-adjacent route requires a session; the iCal feed does too, which means a calendar app can't subscribe to it without embedding a user's credentials. A public/token-based feed URL is a real, still-open question flagged in the Wave 2 plan, deliberately deferred rather than shipped half-thought-through (e.g. a leaked link would expose event data indefinitely with no way to scope or revoke it without also breaking every legitimate subscriber).
 - **RSVP capacity is enforced with `SELECT ... FOR UPDATE`, added after review found a race.** The first cut counted confirmed attendees without locking the event row; under READ COMMITTED, two concurrent RSVPs at `capacity - 1` could both read "under capacity" and both get seated. The row lock serializes RSVP (and cancel/waitlist-promotion) requests against the same event instead of trusting an unlocked read-then-write. Removing the lock would silently reintroduce the overbooking race under real concurrent load, not just in theory.
+- **WiFi passwords are plain `text`, not a Zero-Knowledge vault entry.** Unlike a per-person secret, a club WiFi password is deliberately shared with a whole role group — there's no individual to keep it secret from within the club, only from unauthorized guests, which `visibleToGuests` already handles server-side. Adding client-side crypto for this would be real complexity (device key management, no-recovery-if-lost UX) for a threat model this data doesn't have.
+- **Photo storage returns a key, never a public URL, unlike the sister products' pattern it's adapted from.** MyCouple's `/media/:key` is a public unauthenticated route; MyVerein's is session + `clubGuard` gated, because damage-report/location photos are club-internal, not meant to be link-shareable. This also meant skipping MyCouple's per-space storage quota system entirely — it exists there to bound a public, unmetered upload surface, which this route isn't.
 
 ## Deployment
 
