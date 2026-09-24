@@ -8,8 +8,8 @@ import { member, organization, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubMemberships } from "../db/schema/club-memberships.js";
-import { CLUB_ROLE_TYPES, hasClubPermission } from "../lib/club-permissions.js";
-import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { CLUB_ROLE_TYPES, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
+import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
@@ -135,7 +135,7 @@ clubMemberRoutes.use("/*", clubGuard);
 clubMemberRoutes.get("/me", async (c) => {
   const membership = c.get("membership");
   const shaped = await shapeMember(membership, true);
-  return c.json({ data: shaped });
+  return c.json({ data: { ...shaped, permissions: clubPermissionsFor(c.get("clubRoleTypes")) } });
 });
 
 const updateSelfSchema = z.object({
@@ -267,7 +267,13 @@ clubMemberRoutes.post(
     const row = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
     if (!row) throw new NotFoundError("Member not found");
 
-    const [created] = await db.insert(clubRoles).values({ memberId, ...body }).returning();
+    let created;
+    try {
+      [created] = await db.insert(clubRoles).values({ memberId, ...body }).returning();
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new ConflictError("Member already holds this role");
+      throw err;
+    }
 
     await db.insert(auditLog).values({
       eventType: "club_role.assign",

@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
+import { clubRoles } from "../db/schema/club-roles.js";
 import { toAppError } from "../lib/errors.js";
 import { clubMemberRoutes } from "./club-members.js";
 
@@ -198,5 +199,25 @@ describe("club-members scoping and permissions", () => {
     // assignment (vorsitz/stellv_vorsitz/schriftfuehrer), org-level "owner"
     // alone is deliberately not sufficient. See club-permissions.ts.
     expect(res.status).toBe(403);
+  });
+
+  it("rejects assigning the same role twice with 409 and exposes permissions on /me", async () => {
+    await db.insert(clubRoles).values({ memberId: memberAId, roleType: "vorsitz" });
+
+    const me = await app.request(`/club-members/me?clubId=${clubAId}`, { headers: { cookie: cookieA } });
+    const { data } = (await me.json()) as { data: { permissions: string[] } };
+    expect(data.permissions).toContain("roles:write");
+
+    const assign = () =>
+      app.request(`/club-members/${memberAId}/roles?clubId=${clubAId}`, {
+        method: "POST",
+        headers: { cookie: cookieA, "content-type": "application/json" },
+        body: JSON.stringify({ roleType: "kassenwart" }),
+      });
+    expect((await assign()).status).toBe(201);
+    expect((await assign()).status).toBe(409);
+
+    const rows = await db.query.clubRoles.findMany({ where: eq(clubRoles.memberId, memberAId) });
+    expect(rows.filter((r) => r.roleType === "kassenwart")).toHaveLength(1);
   });
 });

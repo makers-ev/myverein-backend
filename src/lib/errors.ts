@@ -118,3 +118,9 @@ export function toAppError(err: unknown): AppError {
   }
   return new InternalError("Unknown error", { cause: err });
 }
+
+/** Postgres unique violation (23505); drizzle wraps the pg error as `.cause`, so check both. */
+export function isUniqueViolation(err: unknown): boolean {
+  const e = err as { code?: string; cause?: { code?: string } } | undefined;
+  return (e?.code ?? e?.cause?.code) === "23505";
+}

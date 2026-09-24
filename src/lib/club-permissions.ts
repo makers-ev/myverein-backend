@@ -92,5 +92,10 @@ export function hasClubPermission(roleTypes: readonly string[], permission: Club
   return roleTypes.some((roleType) => (ROLE_PERMISSIONS[roleType as ClubRoleType] ?? []).includes(permission));
 }
 
+/** All permissions the caller's roles grant, deduplicated -- lets clients hide UI they'd get a 403 for. */
+export function clubPermissionsFor(roleTypes: readonly string[]): ClubPermission[] {
+  return [...new Set(roleTypes.flatMap((roleType) => ROLE_PERMISSIONS[roleType as ClubRoleType] ?? []))];
+}
+
 /** Roles considered "board" for quick checks (e.g. Vereinsinfo board listing). */
 export const BOARD_ROLE_TYPES: ClubRoleType[] = ["vorsitz", "stellv_vorsitz", "kassenwart", "schriftfuehrer", "beisitzer"];
