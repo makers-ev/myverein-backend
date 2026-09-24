@@ -138,8 +138,18 @@ clubMemberRoutes.get("/me", async (c) => {
   return c.json({ data: { ...shaped, permissions: clubPermissionsFor(c.get("clubRoleTypes")) } });
 });
 
+/** Update the membership sidecar, creating it first for members that joined without /apply (e.g. the club founder). */
+async function upsertMembership(memberRow: typeof member.$inferSelect, values: Partial<typeof clubMemberships.$inferInsert>) {
+  const [row] = await db
+    .insert(clubMemberships)
+    .values({ memberId: memberRow.id, joinedAt: memberRow.createdAt.toISOString().slice(0, 10), ...values })
+    .onConflictDoUpdate({ target: clubMemberships.memberId, set: { ...values, updatedAt: new Date() } })
+    .returning();
+  return row;
+}
+
 const updateSelfSchema = z.object({
-  birthDate: z.string().date().optional(),
+  birthDate: z.string().date().nullable().optional(),
   emergencyContactName: z.string().max(200).optional(),
   emergencyContactPhone: z.string().max(50).optional(),
 });
@@ -153,11 +163,7 @@ clubMemberRoutes.patch(
     const membership = c.get("membership");
     const body = c.req.valid("json");
 
-    const [row] = await db
-      .update(clubMemberships)
-      .set({ ...body, updatedAt: new Date() })
-      .where(eq(clubMemberships.memberId, membership.id))
-      .returning();
+    const row = await upsertMembership(membership, body);
 
     return c.json({ data: row });
   },
@@ -188,7 +194,7 @@ clubMemberRoutes.get("/:memberId", async (c) => {
 });
 
 const updateMemberSchema = z.object({
-  memberNumber: z.string().max(50).optional(),
+  memberNumber: z.string().max(50).nullable().optional(),
   category: z.enum(["aktiv", "passiv", "foerdernd", "ehrenmitglied", "jugend"]).optional(),
   leftAt: z.string().date().nullable().optional(),
   birthDate: z.string().date().optional(),
@@ -214,11 +220,7 @@ clubMemberRoutes.patch(
     const row = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
     if (!row) throw new NotFoundError("Member not found");
 
-    const [updated] = await db
-      .update(clubMemberships)
-      .set({ ...body, updatedAt: new Date() })
-      .where(eq(clubMemberships.memberId, memberId))
-      .returning();
+    const updated = await upsertMembership(row, body);
 
     await db.insert(auditLog).values({
       eventType: "club_member.update",

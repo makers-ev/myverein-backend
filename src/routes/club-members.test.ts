@@ -220,4 +220,21 @@ describe("club-members scoping and permissions", () => {
     const rows = await db.query.clubRoles.findMany({ where: eq(clubRoles.memberId, memberAId) });
     expect(rows.filter((r) => r.roleType === "kassenwart")).toHaveLength(1);
   });
+
+  it("upserts the membership sidecar on PATCH /me for a founder without one, and clears birthDate with null", async () => {
+    const patch = (body: object) =>
+      app.request(`/club-members/me?clubId=${clubAId}`, {
+        method: "PATCH",
+        headers: { cookie: cookieA, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const saved = await patch({ birthDate: "1990-05-01", emergencyContactName: "Ada" });
+    expect(saved.status).toBe(200);
+    const { data } = (await saved.json()) as { data: { birthDate: string | null } };
+    expect(data.birthDate).toBe("1990-05-01");
+
+    const cleared = (await (await patch({ birthDate: null })).json()) as { data: { birthDate: string | null; emergencyContactName: string } };
+    expect(cleared.data.birthDate).toBeNull();
+    expect(cleared.data.emergencyContactName).toBe("Ada");
+  });
 });

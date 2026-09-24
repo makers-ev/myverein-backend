@@ -4,6 +4,7 @@ import { db } from "../db/client.js";
 import { calendars } from "../db/schema/calendars.js";
 import { calendarVisibility, type CalendarVisibilityRow } from "../db/schema/calendar-visibility.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { hasClubPermission } from "./club-permissions.js";
 
 /**
  * Calendar visibility algorithm, shared by calendars.ts (visibility config)
@@ -19,6 +20,8 @@ import { clubRoles } from "../db/schema/club-roles.js";
  * there is no generic department-membership table. A rank-and-file member
  * with no department-scoped role can never match rule 4, only rules 1-3.
  * That's a real, documented limitation, not an oversight.
+ *
+ * Callers with calendars:write see every calendar (they manage the grants).
  */
 
 async function callerDepartmentIds(memberId: string): Promise<Set<string>> {
@@ -40,6 +43,7 @@ function grantAllows(
 
 /** Whether `calendarId` is visible to the caller. Does not check club scoping -- callers verify that separately. */
 export async function isCalendarVisible(calendarId: string, memberId: string, clubRoleTypes: readonly string[]): Promise<boolean> {
+  if (hasClubPermission(clubRoleTypes, "calendars:write")) return true;
   const grants = await db.query.calendarVisibility.findMany({ where: eq(calendarVisibility.calendarId, calendarId) });
   if (grants.length === 0) return true; // rule 1
 
@@ -51,6 +55,7 @@ export async function isCalendarVisible(calendarId: string, memberId: string, cl
 export async function getVisibleCalendarIds(clubId: string, memberId: string, clubRoleTypes: readonly string[]): Promise<string[]> {
   const clubCalendars = await db.query.calendars.findMany({ where: eq(calendars.clubId, clubId) });
   if (clubCalendars.length === 0) return [];
+  if (hasClubPermission(clubRoleTypes, "calendars:write")) return clubCalendars.map((cal) => cal.id);
 
   const grants = await db.query.calendarVisibility.findMany({
     where: inArray(calendarVisibility.calendarId, clubCalendars.map((cal) => cal.id)),
