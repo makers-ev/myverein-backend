@@ -240,7 +240,7 @@ locationRoutes.get("/:id/wifi", async (c) => {
 const createWifiSchema = z.object({
   label: z.string().min(1).max(200),
   ssid: z.string().min(1).max(200),
-  password: z.string().min(1),
+  password: z.string().default(""), // empty = open network (QR uses T:nopass)
   visibleToGuests: z.boolean().optional(),
 });
 
@@ -282,7 +282,7 @@ locationRoutes.post(
 const updateWifiSchema = z.object({
   label: z.string().min(1).max(200).optional(),
   ssid: z.string().min(1).max(200).optional(),
-  password: z.string().min(1).optional(),
+  password: z.string().optional(),
   visibleToGuests: z.boolean().optional(),
 });
 
