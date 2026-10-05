@@ -3,13 +3,14 @@ import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
-import { auth } from "../auth/auth.js";
 import { member, organization, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { clubApplications } from "../db/schema/club-applications.js";
 import { clubMemberships } from "../db/schema/club-memberships.js";
-import { CLUB_ROLE_TYPES, hasClubPermission } from "../lib/club-permissions.js";
-import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { CLUB_ROLE_TYPES, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
+import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
+import { nextMemberNumber } from "../lib/member-number.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
@@ -58,14 +59,13 @@ async function shapeMember(memberRow: typeof member.$inferSelect, includeSensiti
 // --- Aufnahmeantrag ---------------------------------------------------
 // Session-only (no clubGuard -- the applicant isn't a member yet).
 //
-// Wave 1 deliberately simplifies "digitaler Aufnahmeantrag" (Concept -
-// MyVerein §2) to an immediate self-service join instead of a pending-
-// approval queue: there is no `status: pending` on club_memberships (see
-// Data Model - MyVerein Backend §3), so a request is granted membership
-// right away. The board can still correct a wrong join afterwards via
-// PATCH /:memberId (e.g. setting `leftAt`). A real approval workflow is a
-// documented gap for a later wave, not silently dropped -- see README §
-// "Known Gaps".
+// Writes ONLY to club_applications (status "pending"); no member /
+// club_memberships row is created here. A board member with `members:write`
+// decides via /club-applications (approve creates the member + membership,
+// reject leaves no trace besides the decided application row). This replaces
+// the Wave 1 simplification of granting membership immediately. A user may
+// re-apply after a rejection, but never hold two pending applications for the
+// same club (partial unique index).
 const applySchema = z
   .object({
     // clubId (raw organization id) or clubSlug (human-shareable, e.g. a
@@ -96,31 +96,24 @@ clubMemberRoutes.post(
     });
     if (existing) throw new ConflictError("Already a member of this club");
 
-    // addMember returns the created member row directly (not wrapped),
-    // see node_modules/better-auth/dist/plugins/organization/routes/
-    // crud-members.mjs's `return ctx.json(createdMember)`.
-    const createdMember = await auth.api.addMember({
-      body: { userId: currentUser.id, organizationId: clubId, role: "member" },
-    });
-    if (!createdMember) throw new ConflictError("Could not create membership");
-
-    const [membership] = await db
-      .insert(clubMemberships)
-      .values({
-        memberId: createdMember.id,
-        category: body.category,
-        joinedAt: new Date().toISOString().slice(0, 10),
-        birthDate: body.birthDate,
-      })
-      .returning();
+    let application;
+    try {
+      [application] = await db
+        .insert(clubApplications)
+        .values({ userId: currentUser.id, clubId, category: body.category, birthDate: body.birthDate })
+        .returning();
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new ConflictError("An application for this club is already pending");
+      throw err;
+    }
 
     await db.insert(auditLog).values({
       eventType: "club_member.apply",
-      subjectId: createdMember.id,
+      subjectId: application.id,
       payload: { clubId, userId: currentUser.id, category: body.category },
     });
 
-    return c.json({ data: { member: createdMember, membership } }, 201);
+    return c.json({ data: { application } }, 201);
   },
 );
 
@@ -135,11 +128,31 @@ clubMemberRoutes.use("/*", clubGuard);
 clubMemberRoutes.get("/me", async (c) => {
   const membership = c.get("membership");
   const shaped = await shapeMember(membership, true);
-  return c.json({ data: shaped });
+  return c.json({ data: { ...shaped, permissions: clubPermissionsFor(c.get("clubRoleTypes")) } });
 });
 
+/**
+ * Update the membership sidecar, creating it first for members that joined without /apply (e.g. the club founder).
+ * A newly created row gets an automatic member number (see member-number.ts) unless the caller passed
+ * `memberNumber` explicitly (including null) -- the board can still override it manually afterwards.
+ */
+async function upsertMembership(memberRow: typeof member.$inferSelect, values: Partial<typeof clubMemberships.$inferInsert>) {
+  return db.transaction(async (tx) => {
+    const existing = await tx.query.clubMemberships.findFirst({ where: eq(clubMemberships.memberId, memberRow.id) });
+    const generated =
+      !existing && values.memberNumber === undefined ? { memberNumber: await nextMemberNumber(tx, memberRow.organizationId) } : {};
+
+    const [row] = await tx
+      .insert(clubMemberships)
+      .values({ memberId: memberRow.id, joinedAt: memberRow.createdAt.toISOString().slice(0, 10), ...generated, ...values })
+      .onConflictDoUpdate({ target: clubMemberships.memberId, set: { ...values, updatedAt: new Date() } })
+      .returning();
+    return row;
+  });
+}
+
 const updateSelfSchema = z.object({
-  birthDate: z.string().date().optional(),
+  birthDate: z.string().date().nullable().optional(),
   emergencyContactName: z.string().max(200).optional(),
   emergencyContactPhone: z.string().max(50).optional(),
 });
@@ -153,11 +166,7 @@ clubMemberRoutes.patch(
     const membership = c.get("membership");
     const body = c.req.valid("json");
 
-    const [row] = await db
-      .update(clubMemberships)
-      .set({ ...body, updatedAt: new Date() })
-      .where(eq(clubMemberships.memberId, membership.id))
-      .returning();
+    const row = await upsertMembership(membership, body);
 
     return c.json({ data: row });
   },
@@ -188,7 +197,7 @@ clubMemberRoutes.get("/:memberId", async (c) => {
 });
 
 const updateMemberSchema = z.object({
-  memberNumber: z.string().max(50).optional(),
+  memberNumber: z.string().max(50).nullable().optional(),
   category: z.enum(["aktiv", "passiv", "foerdernd", "ehrenmitglied", "jugend"]).optional(),
   leftAt: z.string().date().nullable().optional(),
   birthDate: z.string().date().optional(),
@@ -214,11 +223,7 @@ clubMemberRoutes.patch(
     const row = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
     if (!row) throw new NotFoundError("Member not found");
 
-    const [updated] = await db
-      .update(clubMemberships)
-      .set({ ...body, updatedAt: new Date() })
-      .where(eq(clubMemberships.memberId, memberId))
-      .returning();
+    const updated = await upsertMembership(row, body);
 
     await db.insert(auditLog).values({
       eventType: "club_member.update",
@@ -267,7 +272,13 @@ clubMemberRoutes.post(
     const row = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
     if (!row) throw new NotFoundError("Member not found");
 
-    const [created] = await db.insert(clubRoles).values({ memberId, ...body }).returning();
+    let created;
+    try {
+      [created] = await db.insert(clubRoles).values({ memberId, ...body }).returning();
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new ConflictError("Member already holds this role");
+      throw err;
+    }
 
     await db.insert(auditLog).values({
       eventType: "club_role.assign",

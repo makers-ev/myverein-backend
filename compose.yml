@@ -40,6 +40,12 @@ services:
       # crash-loop the container. The Docker path always needs "production"
       # regardless of what a developer's .env says.
       NODE_ENV: production
+      # .env's BIND_HOST=127.0.0.1 is for host-mode `npm run dev` (direct
+      # process). Inside a container the app must bind 0.0.0.0 so Docker's
+      # published-port forwarding can reach it; the `ports:` mapping's
+      # left-hand address (which still reads .env's BIND_HOST) controls
+      # external access.
+      BIND_HOST: 0.0.0.0
     env_file:
       - .env
     ports:

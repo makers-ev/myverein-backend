@@ -10,7 +10,7 @@ import { locationLinks } from "../db/schema/location-links.js";
 import { locationWifiNetworks } from "../db/schema/location-wifi.js";
 import { locationKeyHolders, locations } from "../db/schema/locations.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
-import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -181,12 +181,7 @@ locationRoutes.post(
     try {
       [row] = await db.insert(locationKeyHolders).values({ locationId: id, memberId: body.memberId }).returning();
     } catch (err) {
-      // node-postgres's unique-violation error (code 23505) arrives wrapped
-      // in drizzle-orm's DrizzleQueryError as `.cause`, not as `.code`
-      // directly on the caught error -- check both so this doesn't regress
-      // if drizzle ever stops wrapping.
-      const pgCode = (err as { code?: string } | undefined)?.code ?? (err as { cause?: { code?: string } } | undefined)?.cause?.code;
-      if (pgCode === "23505") {
+      if (isUniqueViolation(err)) {
         throw new ConflictError("Member already holds a key for this location");
       }
       throw err;
@@ -245,7 +240,7 @@ locationRoutes.get("/:id/wifi", async (c) => {
 const createWifiSchema = z.object({
   label: z.string().min(1).max(200),
   ssid: z.string().min(1).max(200),
-  password: z.string().min(1),
+  password: z.string().default(""), // empty = open network (QR uses T:nopass)
   visibleToGuests: z.boolean().optional(),
 });
 
@@ -287,7 +282,7 @@ locationRoutes.post(
 const updateWifiSchema = z.object({
   label: z.string().min(1).max(200).optional(),
   ssid: z.string().min(1).max(200).optional(),
-  password: z.string().min(1).optional(),
+  password: z.string().optional(),
   visibleToGuests: z.boolean().optional(),
 });
 

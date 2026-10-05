@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, date, uuid, index } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, date, uuid, index, unique } from "drizzle-orm/pg-core";
 
 import { member } from "../../auth/auth-schema.js";
 import { departments } from "./departments.js";
@@ -34,6 +34,8 @@ export const clubRoles = pgTable(
   (table) => [
     index("club_roles_member_id_idx").on(table.memberId),
     index("club_roles_department_id_idx").on(table.departmentId),
+    // Same role twice for one member is meaningless; NULLS NOT DISTINCT so department-less roles count too.
+    unique("club_roles_member_role_department_uq").on(table.memberId, table.roleType, table.departmentId).nullsNotDistinct(),
   ],
 );
 

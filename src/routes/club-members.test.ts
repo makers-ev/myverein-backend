@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
+import { clubRoles } from "../db/schema/club-roles.js";
 import { toAppError } from "../lib/errors.js";
 import { clubMemberRoutes } from "./club-members.js";
 
@@ -13,7 +14,7 @@ import { clubMemberRoutes } from "./club-members.js";
  * behaviour manually verified via curl during Wave 1 B4: club-scoping IDOR
  * (a member of club A gets 404, not data, for club B), sensitive-field
  * filtering by permission, and the Aufnahmeantrag self-service join flow
- * (see the "Wave 1 deliberately simplifies..." comment in club-members.ts).
+ * (pending application, see the /apply comment in club-members.ts).
  */
 
 const app = new Hono();
@@ -102,27 +103,42 @@ describe("club-members scoping and permissions", () => {
     expect(body.data.length).toBe(1);
   });
 
-  it("lets a plain member self-join via /apply and immediately see their own /me", async () => {
+  it("creates only a pending application via /apply -- no member yet, so /me is 404", async () => {
     const applicant = await signUpAndVerify(`club-members-applicant-${suffix}@example.com`, "Applicant");
 
     const applyRes = await app.request("/club-members/apply", {
       method: "POST",
       headers: { cookie: applicant.cookie, "content-type": "application/json" },
-      body: JSON.stringify({ clubId: clubAId, category: "aktiv" }),
+      body: JSON.stringify({ clubId: clubAId, category: "passiv", birthDate: "2000-02-03" }),
     });
     expect(applyRes.status).toBe(201);
+    const { data } = (await applyRes.json()) as { data: { application: { id: string; status: string; category: string; clubId: string; userId: string; birthDate: string } } };
+    expect(data.application.status).toBe("pending");
+    expect(data.application.category).toBe("passiv");
+    expect(data.application.clubId).toBe(clubAId);
+    expect(data.application.userId).toBe(applicant.userId);
+    expect(data.application.birthDate).toBe("2000-02-03");
 
     const meRes = await app.request(`/club-members/me?clubId=${clubAId}`, { headers: { cookie: applicant.cookie } });
-    expect(meRes.status).toBe(200);
-    const meBody = (await meRes.json()) as { data: { category: string; birthDate: null | string } };
-    expect(meBody.data.category).toBe("aktiv");
-    // The caller sees their OWN sensitive fields even with no club_roles.
-    expect(meBody.data.birthDate).toBeNull();
+    expect(meRes.status).toBe(404);
+
+    const memberRow = await db.query.member.findFirst({
+      where: (m, { and, eq }) => and(eq(m.organizationId, clubAId), eq(m.userId, applicant.userId)),
+    });
+    expect(memberRow).toBeUndefined();
+
+    // A second pending application for the same club is a conflict.
+    const again = await app.request("/club-members/apply", {
+      method: "POST",
+      headers: { cookie: applicant.cookie, "content-type": "application/json" },
+      body: JSON.stringify({ clubId: clubAId }),
+    });
+    expect(again.status).toBe(409);
 
     await db.delete(user).where(eq(user.id, applicant.userId));
   });
 
-  it("lets a member self-join via /apply using clubSlug instead of clubId", async () => {
+  it("accepts /apply using clubSlug instead of clubId, still without creating a member", async () => {
     const applicant = await signUpAndVerify(`club-members-slug-applicant-${suffix}@example.com`, "Slug Applicant");
 
     const applyRes = await app.request("/club-members/apply", {
@@ -131,9 +147,12 @@ describe("club-members scoping and permissions", () => {
       body: JSON.stringify({ clubSlug: `club-a-${suffix}` }),
     });
     expect(applyRes.status).toBe(201);
+    const { data } = (await applyRes.json()) as { data: { application: { clubId: string; category: string } } };
+    expect(data.application.clubId).toBe(clubAId);
+    expect(data.application.category).toBe("aktiv");
 
     const meRes = await app.request(`/club-members/me?clubId=${clubAId}`, { headers: { cookie: applicant.cookie } });
-    expect(meRes.status).toBe(200);
+    expect(meRes.status).toBe(404);
 
     await db.delete(user).where(eq(user.id, applicant.userId));
   });
@@ -164,7 +183,7 @@ describe("club-members scoping and permissions", () => {
     await db.delete(user).where(eq(user.id, applicant.userId));
   });
 
-  it("rejects a duplicate /apply with 409", async () => {
+  it("rejects /apply from an existing member with 409", async () => {
     const res = await app.request("/club-members/apply", {
       method: "POST",
       headers: { cookie: cookieA, "content-type": "application/json" },
@@ -198,5 +217,83 @@ describe("club-members scoping and permissions", () => {
     // assignment (vorsitz/stellv_vorsitz/schriftfuehrer), org-level "owner"
     // alone is deliberately not sufficient. See club-permissions.ts.
     expect(res.status).toBe(403);
+  });
+
+  it("rejects assigning the same role twice with 409 and exposes permissions on /me", async () => {
+    await db.insert(clubRoles).values({ memberId: memberAId, roleType: "vorsitz" });
+
+    const me = await app.request(`/club-members/me?clubId=${clubAId}`, { headers: { cookie: cookieA } });
+    const { data } = (await me.json()) as { data: { permissions: string[] } };
+    expect(data.permissions).toContain("roles:write");
+
+    const assign = () =>
+      app.request(`/club-members/${memberAId}/roles?clubId=${clubAId}`, {
+        method: "POST",
+        headers: { cookie: cookieA, "content-type": "application/json" },
+        body: JSON.stringify({ roleType: "kassenwart" }),
+      });
+    expect((await assign()).status).toBe(201);
+    expect((await assign()).status).toBe(409);
+
+    const rows = await db.query.clubRoles.findMany({ where: eq(clubRoles.memberId, memberAId) });
+    expect(rows.filter((r) => r.roleType === "kassenwart")).toHaveLength(1);
+  });
+
+  it("upserts the membership sidecar on PATCH /me for a founder without one, and clears birthDate with null", async () => {
+    const patch = (body: object) =>
+      app.request(`/club-members/me?clubId=${clubAId}`, {
+        method: "PATCH",
+        headers: { cookie: cookieA, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const saved = await patch({ birthDate: "1990-05-01", emergencyContactName: "Ada" });
+    expect(saved.status).toBe(200);
+    const { data } = (await saved.json()) as { data: { birthDate: string | null; memberNumber: string | null } };
+    expect(data.birthDate).toBe("1990-05-01");
+    // First creation of the sidecar row auto-generates a member number: <first 4 slug chars>-<0001>.
+    expect(data.memberNumber).toBe("CLUB-0001");
+
+    const cleared = (await (await patch({ birthDate: null })).json()) as { data: { birthDate: string | null; emergencyContactName: string } };
+    expect(cleared.data.birthDate).toBeNull();
+    expect(cleared.data.emergencyContactName).toBe("Ada");
+  });
+
+  it("keeps the generated member number on later updates and lets the board override it manually", async () => {
+    const override = await app.request(`/club-members/${memberAId}?clubId=${clubAId}`, {
+      method: "PATCH",
+      headers: { cookie: cookieA, "content-type": "application/json" },
+      body: JSON.stringify({ memberNumber: "VORSTAND-7" }),
+    });
+    expect(override.status).toBe(200);
+    expect(((await override.json()) as { data: { memberNumber: string } }).data.memberNumber).toBe("VORSTAND-7");
+
+    const selfPatch = await app.request(`/club-members/me?clubId=${clubAId}`, {
+      method: "PATCH",
+      headers: { cookie: cookieA, "content-type": "application/json" },
+      body: JSON.stringify({ emergencyContactName: "Grace" }),
+    });
+    expect(((await selfPatch.json()) as { data: { memberNumber: string } }).data.memberNumber).toBe("VORSTAND-7");
+  });
+
+  it("does not auto-generate a member number when one is passed explicitly on first creation", async () => {
+    const second = await signUpAndVerify(`club-members-explicit-${suffix}@example.com`, "Explicit Number");
+    const added = await auth.api.addMember({ body: { userId: second.userId, organizationId: clubAId, role: "member" } });
+
+    const res = await app.request(`/club-members/${added!.id}?clubId=${clubAId}`, {
+      method: "PATCH",
+      headers: { cookie: cookieA, "content-type": "application/json" },
+      body: JSON.stringify({ memberNumber: "MANUAL-1" }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { data: { memberNumber: string } }).data.memberNumber).toBe("MANUAL-1");
+
+    const cleared = await app.request(`/club-members/${added!.id}?clubId=${clubAId}`, {
+      method: "PATCH",
+      headers: { cookie: cookieA, "content-type": "application/json" },
+      body: JSON.stringify({ memberNumber: null }),
+    });
+    expect(((await cleared.json()) as { data: { memberNumber: string | null } }).data.memberNumber).toBeNull();
+
+    await db.delete(user).where(eq(user.id, second.userId));
   });
 });
