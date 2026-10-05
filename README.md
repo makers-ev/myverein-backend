@@ -60,7 +60,7 @@ curl http://localhost:3000/health
 | `npm run db:migrate` | Apply migrations via the `drizzle-kit` CLI (host mode) |
 | `npm run db:migrate:runtime` | Apply migrations via Drizzle's own migrator, no `drizzle-kit` dependency needed — what the Docker image runs |
 | `npm run seed:admin` | Create or promote the admin user from `ADMIN_EMAIL`/`ADMIN_PASSWORD` |
-| `npm run seed:club` | Bootstrap a demo club and make `ADMIN_EMAIL` its "vorsitz" — needed for local dev since there is no public "create club" route yet (Wave 1), see `src/scripts/seed-club.ts` |
+| `npm run seed:club` | Bootstrap a demo club and make `ADMIN_EMAIL` its "vorsitz" — needed for local dev. Real users create clubs through the Wave 6 registration + review flow (`/club-registrations`, [Club registration](#club-registration)); `organization/create` is closed for end users, `seed:club` and the approval call `auth.api.createOrganization` server-side, which is still allowed. See `src/scripts/seed-club.ts` |
 | `npm run auth:generate` | Regenerate `src/auth/auth-schema.ts` from the Better Auth config |
 | `npm run lint` | ESLint |
 | `npm test` | Vitest (unit + integration) |
@@ -86,6 +86,8 @@ flowchart TD
         Events["/events/*, /events.ics\nsessionGuard + clubGuard"]
         Availability["/availability/*\nsessionGuard + clubGuard"]
         Meetings["/meetings/*\nsessionGuard + clubGuard"]
+        Registrations["/club-registrations/*\nsession, verified e-mail"]
+        AdminRegistrations["/admin/club-registrations/*\nsession + adminGuard"]
         Health["/health, /ready"]
         Stats["/internal/stats\nINTERNAL_STATS_TOKEN, no session"]
         AdminStats["/admin/activity-stats\nsession + adminGuard"]
@@ -106,6 +108,8 @@ flowchart TD
     CORS --> Events
     CORS --> Availability
     CORS --> Meetings
+    CORS --> Registrations
+    CORS --> AdminRegistrations
     CORS --> Health
     CORS --> AdminStats
     Portal -->|bearer token| Stats
@@ -118,11 +122,13 @@ flowchart TD
     Events --> DB
     Availability --> DB
     Meetings --> DB
+    Registrations --> DB
+    AdminRegistrations --> DB
     Stats --> DB
     Health -.->|/ready only| DB
 ```
 
-Request flow for anything under `/club-members`, `/club-applications`, `/departments`, `/club-info`, `/calendars`, `/events`, `/availability`, or `/meetings`: `requestId` middleware stamps an `X-Request-Id` and attaches a request-scoped logger, `secureHeaders` sets response headers, `cors` checks the origin against `trustedOrigins`, `rateLimit` checks a per-IP bucket, `sessionGuard` calls `auth.api.getSession()` and attaches `user`/`session`, `clubGuard` resolves which club (`organization`) the request is for and attaches `clubId`/`membership`/`clubRoleTypes` — and only then does the route handler run. `POST /club-members/apply` is the one exception: it deliberately skips `clubGuard` (the applicant isn't a member yet; `/club-applications` itself runs the full chain plus a `members:write` check), see [Key decisions](#key-decisions). `GET /events.ics` is mounted separately at top level (see [Layout](#architecture) below) but runs the same `sessionGuard` + `clubGuard` chain — there is no unauthenticated calendar-feed link, see [Key decisions](#key-decisions). Any error thrown at any stage becomes an `AppError` via `toAppError()` in `app.onError` — nothing unhandled ever reaches a client as a raw stack trace.
+Request flow for anything under `/club-members`, `/club-applications`, `/departments`, `/club-info`, `/calendars`, `/events`, `/availability`, or `/meetings`: `requestId` middleware stamps an `X-Request-Id` and attaches a request-scoped logger, `secureHeaders` sets response headers, `cors` checks the origin against `trustedOrigins`, `rateLimit` checks a per-IP bucket, `sessionGuard` calls `auth.api.getSession()` and attaches `user`/`session`, `clubGuard` resolves which club (`organization`) the request is for and attaches `clubId`/`membership`/`clubRoleTypes` — and only then does the route handler run. `POST /club-members/apply` is the one exception: it deliberately skips `clubGuard` (the applicant isn't a member yet; `/club-applications` itself runs the full chain plus a `members:write` check), see [Key decisions](#key-decisions). `/club-registrations` (applicant, no club yet) runs `sessionGuard` plus a verified-e-mail check, `/admin/club-registrations` runs `adminGuard`; neither uses `clubGuard`, see [Club registration](#club-registration). `GET /events.ics` is mounted separately at top level (see [Layout](#architecture) below) but runs the same `sessionGuard` + `clubGuard` chain — there is no unauthenticated calendar-feed link, see [Key decisions](#key-decisions). Any error thrown at any stage becomes an `AppError` via `toAppError()` in `app.onError` — nothing unhandled ever reaches a client as a raw stack trace.
 
 Layout:
 
@@ -133,18 +139,18 @@ src/
 │                       #   club_roles, guardian_links, club_info_pages, club_applications, audit_log, calendars,
 │                       #   calendar_visibility, events, event_attendees, availability_slots,
 │                       #   availability_exceptions, meetings, meeting_invitees, meeting_attendance,
-│                       #   meeting_resolutions)
+│                       #   meeting_resolutions, club_registrations, club_registration_documents)
 ├── lib/               # errors, email, logger, activity-stats, club-permissions, calendar-visibility,
-│                       #   availability-match, ics, member-number — cross-cutting, no HTTP awareness
+│                       #   availability-match, ics, member-number, club-slug, club-registrations, club-registration-mail — cross-cutting, no HTTP awareness
 ├── middleware/         # session-guard, club-guard, rate-limit, request-id
-├── routes/            # health, club-members, club-applications, departments, club-info, calendars, events, availability,
-│                       #   meetings, internal-stats, admin-stats
+├── routes/            # health, club-members, club-applications, club-registrations, admin-club-registrations, departments, club-info, calendars, events, availability,
+│                       #   meetings, internal-stats, admin-stats, admin-clubs
 └── scripts/           # seed-admin, seed-club (CLI, not server runtime)
 ```
 
 ## Data model
 
-Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns twenty-seven more: the Wave 1 set — `club_memberships`, `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports`. See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
+Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns twenty-nine more: the Wave 1 set — `club_memberships`, `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents`. See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
 
 ```mermaid
 erDiagram
@@ -159,6 +165,10 @@ erDiagram
     user ||--o{ club_applications : "applies via"
     organization ||--o{ club_applications : "receives"
     member ||--o{ club_applications : "decides (decided_by)"
+    user ||--o{ club_registrations : "applies for a new club"
+    user ||--o{ club_registrations : "reviews (reviewed_by)"
+    organization ||--o| club_registrations : "created by (club_id)"
+    club_registrations ||--o{ club_registration_documents : "proof"
     member ||--o| club_memberships : "extends"
     member ||--o{ club_roles : "has"
     member ||--o{ guardian_links : "guards (as guardian)"
@@ -225,6 +235,38 @@ erDiagram
         timestamptz created_at
         timestamptz decided_at
         text decided_by FK "member.id"
+    }
+    club_registrations {
+        uuid id PK
+        text user_id FK "applicant"
+        text club_name
+        text legal_form "e_v | nicht_eingetragen | sonstige"
+        text register_court
+        text register_number
+        text street
+        text postal_code
+        text city
+        text website_url
+        text claimed_role "vorsitz | stellv_vorsitz | schriftfuehrer"
+        text status "draft | pending | needs_info | approved | rejected"
+        text review_note
+        text reviewed_by FK "user.id"
+        timestamptz reviewed_at
+        text club_id FK "organization, set on approval"
+        text slug_suggestion
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz submitted_at
+    }
+    club_registration_documents {
+        uuid id PK
+        uuid registration_id FK
+        text kind "registerauszug | satzung | freistellungsbescheid | gruendungsprotokoll | sonstiges"
+        text storage_key "registrations/<id>/..."
+        text filename
+        text mime_type
+        bigint size_bytes
+        timestamptz created_at
     }
     departments {
         uuid id PK
@@ -388,6 +430,8 @@ erDiagram
 
 `club_applications` is the pending-approval queue behind `POST /club-members/apply`: `id`, `user_id` (FK `user`, cascade), `club_id` (FK `organization`, cascade), `category` (default `aktiv`), `birth_date` (nullable), `status` (`pending` | `rejected` | `approved`, free text validated in routes, default `pending`), `created_at`, `decided_at` (nullable), `decided_by` (nullable FK `member.id`, `ON DELETE SET NULL`). A partial unique index on `(user_id, club_id) WHERE status = 'pending'` allows only one open application per user and club. Migration `0012_club-applications`.
 
+`club_registrations` holds the Wave 6 "Verein gründen" applications (see [Club registration](#club-registration)): `user_id` (applicant, FK `user`, cascade), the club data (`club_name`, `legal_form`, `register_court`/`register_number` — required for `e_v` —, `street`/`postal_code`/`city`, `website_url`), `claimed_role`, `status` (`draft` | `pending` | `needs_info` | `approved` | `rejected`, free text validated in the routes), `review_note`, `reviewed_by` (FK `user`, `SET NULL`), `reviewed_at`, `club_id` (FK `organization`, `SET NULL`, set on approval), `slug_suggestion`, `created_at`/`updated_at`/`submitted_at`. A partial unique index on `(user_id) WHERE status IN ('draft','pending','needs_info')` allows only one open registration per user. `club_registration_documents` stores the proof files: `registration_id` (FK, cascade), `kind`, `storage_key` (private path `registrations/<registration id>/<uuid>-<sanitized filename>`, never exposed), `filename`, `mime_type`, `size_bytes`. Migration `0013_club-registrations`.
+
 <a id="member-numbers"></a>**Member numbers.** `club_memberships.member_number` is generated automatically in the format `<ABBR>-<NNNN>`: `ABBR` is the first 4 alphanumeric characters of the club slug, uppercased (`demo-sportverein` → `DEMO`, fallback `CLUB`), `NNNN` is the larger of the club's `club_memberships` row count and the highest numeric suffix already issued for that prefix, plus one, zero-padded to 4 digits (`DEMO-0001`). Implemented in `src/lib/member-number.ts` (`clubAbbreviation`, `nextMemberNumber`), which locks the club's `organization` row (`SELECT … FOR UPDATE`) inside the creating transaction so concurrent creations get distinct numbers. It is applied on approval and when `PATCH /club-members/me` / `PATCH /club-members/:memberId` create the sidecar row for the first time, unless `memberNumber` is sent explicitly; the board can always overwrite it via `PATCH /club-members/:memberId`. Deleted memberships therefore no longer cause a repeat, but a manually assigned number in a different format can still equal a later generated one — the column has no unique constraint.
 
 `guardian_links` is the scoping boundary for the externe Rolle (Erziehungsberechtigte, see the Concept doc's persona of the same name): a many-to-many table linking a guardian membership to the youth member(s) they're responsible for. Any route exposing per-member data to a `guest`-tier caller must check this table before returning anything about a member who isn't the caller's own row.
@@ -470,6 +514,8 @@ erDiagram
 | `/meetings/:id/resolutions` | GET, POST | session + `clubGuard` (write needs `meetings:write`) | Body `{ description, votesFor, votesAgainst, votesAbstain, result }` (Beschluss) |
 | `/internal/stats` | GET | `INTERNAL_STATS_TOKEN` bearer token | Aggregate counts only (total users, new users last 7 days, active sessions, `audit_log` event-type breakdown) — never raw rows. Not gated by a Better Auth session; see [Security](#security) for why. Returns 503 if `INTERNAL_STATS_TOKEN` is unset (fails closed) |
 | `/admin/activity-stats` | GET | session + `adminGuard` | Query: `interval` (`day`\|`week`), `period` (`7d`\|`30d`\|`90d`). Per-bucket New/Active/Retained/Reactivated user counts plus period-over-period `changePercent`, for `_template_better-auth-admin`'s dashboard. "Active" = had a session created in the window (a login proxy, not request-level activity — this backend has none). Classification logic is a pure function in `src/lib/activity-stats.ts`, unit-tested separately from the DB query in `src/routes/admin-stats.ts` |
+| `/admin/club-stats` | GET | session + `adminGuard` | `200 { clubs: { total }, registrations: { pending } }` — number of all clubs (rows in `organization`) and of club registrations with status `pending` (one COUNT query, so the admin navbar badge needn't load the review queue). Dashboard KPI of the admin panel (`src/routes/admin-clubs.ts`, tested in `admin-clubs.test.ts`) |
+| `/admin/user-clubs` | GET | session + `adminGuard` | Query `userIds=<id1,id2,…>` (comma-separated, trimmed, de-duplicated, empty entries dropped; none left or more than 100 → 422). `200 { data: { "<userId>": [{ clubId, name, slug }] } }` via `member`→`organization`; every requested id is a key (empty array without membership), clubs per user sorted by name |
 | `/admin/send-verification-email` | POST | session + `adminGuard` | Body: `{ userId, callbackURL? }`. Re-enters Better Auth server-side (no session) to send a verification e-mail for a **different** user — the client-side `sendVerificationEmail` endpoint requires the signed-in session's email to match the target (`EMAIL_MISMATCH`), so an admin can never use it for anyone else; the server-side anonymous path has no such check. 404 if the user doesn't exist, 409 if already verified. Backs the admin dashboard's "Resend verification email" button (`src/routes/admin-emails.ts`, integration-tested in `src/routes/admin-emails.test.ts`) |
 | `/notifications` | GET | session | Own visible notifications (broadcast + targeted, minus own soft-deletes). Query: `filter` (`unread`\|`read`, omit for all) |
 | `/notifications/unread-count` | GET | session | `{ count }` for the bell badge |
@@ -494,6 +540,36 @@ erDiagram
 | `/inventory-items/:id/damage-reports/:reportId` | PATCH | session + `clubGuard` (`inventory:write`) | Body `{ status }`. `resolvedAt` auto-set when `status` becomes `"behoben"`, cleared otherwise |
 | `/media` | POST | session + `clubGuard` | Multipart upload, field name `file`. Content-type allowlist (`image/jpeg`/`png`/`webp`), 10 MB max. Returns `{ key }`, no DB row |
 | `/media/:key` | GET | session + `clubGuard` | Streams the file back. 404 (never 403) if the key's club-id prefix doesn't match the caller's `clubId`, or if it doesn't exist on disk |
+
+<a id="club-registration"></a>
+### Club registration (Wave 6)
+
+End users create clubs themselves, but a club only exists after a platform admin (Better Auth role `admin`) has reviewed it. Flow: applicant creates a draft, uploads proof documents, submits (`pending`); an admin requests more info (`needs_info`, applicant edits and resubmits), rejects (`rejected`, applicant may file a new registration) or approves (`approved`). The routes are session-only (no `clubGuard` — the applicant has no club yet) and need a verified e-mail address (403 otherwise). A registration is private: someone else's id is always 404. Everything below returns `{ data: ... }`.
+
+`registration` shape: `{ id, clubName, legalForm ('e_v'|'nicht_eingetragen'|'sonstige'), registerCourt|null, registerNumber|null, street, postalCode, city, websiteUrl|null, claimedRole ('vorsitz'|'stellv_vorsitz'|'schriftfuehrer'), status ('draft'|'pending'|'needs_info'|'approved'|'rejected'), reviewNote|null, slugSuggestion|null, clubId|null, clubSlug|null (approved only), submittedAt|null, createdAt, documents: [{ id, kind ('registerauszug'|'satzung'|'freistellungsbescheid'|'gruendungsprotokoll'|'sonstiges'), filename, mimeType, sizeBytes }] }`.
+
+| Route | Method | Auth | Notes |
+|---|---|---|---|
+| `/club-registrations` | POST | session, verified e-mail | Create a draft. Body `{ clubName, legalForm, registerCourt?, registerNumber?, street, postalCode, city, websiteUrl?, claimedRole? = 'vorsitz' }` (`e_v` requires court + number; `websiteUrl` must be http(s)). `201 { data: { registration } }`. 422 on invalid input, 409 if the user already has an open (`draft`/`pending`/`needs_info`) registration. Rate limit 10 per hour per client IP. Audit `club_registration.create` |
+| `/club-registrations/mine` | GET | session | Own registrations, newest first: `{ data: [registration] }` |
+| `/club-registrations/:id` | GET | session | `{ data: { registration } }`; 404 for someone else's/unknown/malformed id |
+| `/club-registrations/:id` | PATCH | session | Partial update of the draft fields (merged result is re-validated), only in `draft`/`needs_info` (409 otherwise). `200 { data: { registration } }` |
+| `/club-registrations/:id/documents` | POST | session | `multipart/form-data` with `file` + `kind`. Only in `draft`/`needs_info` (409). Allowlist PDF/JPEG/PNG (declared type must match the file's magic bytes), max 10 MB, max 5 files per registration, else 422. Upload and delete share a per-user limit of 30 per hour. Filename is sanitized (path separators stripped), stored under the private `registrations/<id>/` path. `201 { data: { document } }`. Audit `club_registration.document_add` |
+| `/club-registrations/:id/documents/:docId` | GET | session (applicant or admin) | Streams the file as an attachment (`Content-Type` from the allowlist, `Cache-Control: private, no-store`, RFC 5987 `filename*`). Admins may only read submitted (non-draft) registrations; every admin access is audit-logged (`club_registration.document_access`, `accessedBy`). 404 for everyone else |
+| `/club-registrations/:id/documents/:docId` | DELETE | session | Remove a document (only `draft`/`needs_info`, checked under the same row lock as submit/upload). `204`. Audit `club_registration.document_remove` |
+| `/club-registrations/:id/submit` | POST | session | `draft`/`needs_info` → `pending`. Needs at least one qualifying proof (`e_v`/`sonstige`: Registerauszug, Satzung, Freistellungsbescheid or Gründungsprotokoll; `nicht_eingetragen`: Satzung or Gründungsprotokoll; `sonstiges` alone never counts) else 422. 409 if an already approved club has the same register court + number (compared case/whitespace-insensitively; the message leaks no club data). All checks run in one transaction after locking the registration row (so a parallel document delete cannot produce a `pending` registration without proof). Limited to 5 submits per user per day (429); the reviewer mail is sent at most once per hour per registration. Writes `slug_suggestion`, clears `review_note`, sends the receipt mail to the applicant and the review notification (see `CLUB_REVIEW_NOTIFY_EMAIL`). `200 { data: { registration } }`. Audit `club_registration.submit` |
+| `/admin/club-registrations` | GET | session + `adminGuard` | Review queue, oldest submission first, max 200. `?status=pending\|needs_info\|approved\|rejected` (omitted: all except drafts; `draft`/unknown → 422). `{ data: [{ ...registration, applicant: { id, name, email }, duplicateHints: [{ clubId, name, city, postalCode }] }] }`. `duplicateHints` (max 10) lists existing clubs approved through a registration with the same Registergericht + number (listed first), with the same name/generated slug, or with the same postal code + city; `city`/`postalCode` are `null` for clubs not created via a registration |
+| `/admin/club-registrations/:id` | GET | session + `adminGuard` | Same shape, one object in `data`. 404 for drafts/unknown ids |
+| `/admin/club-registrations/:id/documents/:docId` | GET | session + `adminGuard` | Authenticated file download (404 for drafts; every access is audit-logged as `club_registration.document_access`) |
+| `/admin/club-registrations/:id/request-info` | POST | session + `adminGuard` | Body `{ note }` (required) → `needs_info`, mail to the applicant. `200 { data: { registration } }`. Audit `club_registration.request_info` |
+| `/admin/club-registrations/:id/reject` | POST | session + `adminGuard` | Body `{ note }` (required reason) → `rejected`, mail to the applicant. `200 { data: { registration } }`. Audit `club_registration.reject` |
+| `/admin/club-registrations/:id/approve` | POST | session + `adminGuard` | Body `{ slug? }`. Creates the club, see [Approval](#club-registration-approval). `200 { data: { registration, club: { id, name, slug } } }` |
+
+All three decisions only work from `pending`; any other status (or a lost race between two admins) is `409`. A non-admin session on `/admin/club-registrations/*` is rejected by `adminGuard` with `401`, same as every other `/admin` route.
+
+<a id="club-registration-approval"></a>**Approval.** `approve` takes a row lock on the registration (`SELECT … FOR UPDATE`), so parallel approvals serialize and the loser answers 409 without creating a second club. Inside that lock it first re-checks the register key (court + number, same normalization as the submit guard) against already approved registrations (409 — two pending registrations can share a key), then calls `auth.api.createOrganization({ name, slug, userId })` (server-side, no session — makes the applicant `owner`; the organization's `metadata` carries `{ registrationId }`; if the call fails after inserting the organization but before its owner member, that owner-less organization is recognised by this tag and removed before the next slug is tried), then in the same transaction marks the registration `approved` (`club_id`, `reviewed_by`, `reviewed_at`), inserts the `club_memberships` row with the automatic member number (`<ABBR>-0001`, see [Member numbers](#member-numbers)) and a `club_roles` row for `claimed_role`, and writes audit `club_registration.approve`. `claimed_role` must grant `members:write` and `roles:write` (`vorsitz`, `stellv_vorsitz`, `schriftfuehrer` do; checked against `club-permissions.ts`), so the founder can run the club right away (e.g. `GET /club-applications`). If anything fails after the organization was created, the organization is deleted again and a failed cleanup is logged (`logger.error`), never swallowed; the registration stays `pending` and can be retried.
+
+<a id="club-slug-rules"></a>**Slug rules** (`src/lib/club-slug.ts`). The slug is the public join key of a club (`clubSlug` in `POST /club-members/apply`) and is generated, not chosen by the applicant: lowercase, umlauts/ß transliterated (`ä→ae`, `ö→oe`, `ü→ue`, `ß→ss`, other accents dropped), legal-form additions (`e.V.`, `eV`, `eingetragener Verein`) removed, everything outside `a-z0-9` collapsed to single `-`, 3–50 characters (too short names get `-verein` appended, names without usable characters become `verein`). (`æ→ae`, `œ→oe`, `ø→o`, `ł→l`, `đ→d`, `þ→th` as well). Reserved slugs (`admin`, `api`, `app`, `www`, `demo`, `vereine`, `join`, `dashboard`, `docs`, `impressum`, `datenschutz`, `me`, …, see `RESERVED_SLUGS`; `verein` is deliberately allowed, it is the fallback) get `-verein` appended. The suggestion is stored at submit but only *assigned* on approval (open registrations reserve nothing, so no squatting); on collision `-2`, `-3`, … is appended, and a collision that happens between lookup and insert is retried (`organization_slug_uidx` is the final arbiter). An admin may override the slug in `approve` (`slug`, validated: `^[a-z0-9]+(-[a-z0-9]+)*$`, 3–50, not reserved, 422; already taken → 409, no automatic suffix). **The slug is immutable once assigned**: `POST /api/auth/organization/update` with a different `slug` is rejected (403, `beforeUpdateOrganization` hook in `src/auth/auth.ts`).
 
 The scaffold's `/accounts` and `/examples` routes (ownership-scoped example resource / connectivity-check) were removed in Wave 1 (see [Key decisions](#key-decisions)) — `src/routes/club-members.ts` is now the reference implementation for "a real, club-scoped resource" that a new route should copy the pattern from, in place of the old `accounts.ts`.
 
@@ -572,7 +648,8 @@ All variables live in `.env.example`. The ones worth calling out specifically:
 | `DB_POOL_MAX` / `DB_POOL_MIN` / `DB_POOL_IDLE_TIMEOUT_MS` / `DB_POOL_CONNECTION_TIMEOUT_MS` | no | Explicit `pg` pool bounds — an unbounded pool was a documented weakness of a previous version of this stack |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | no | Consumed only by `npm run seed:admin`, never read by the running server |
 | `INTERNAL_STATS_TOKEN` | no | Bearer token for `GET /internal/stats`. Unset means the endpoint always responds 503, not a silent 401 — fails closed by default. Generate any long random value, e.g. `openssl rand -hex 32` |
-| `UPLOADS_DIR` | no | Local-disk root for uploaded photos (defaults to `./uploads`), served back through `GET /media/:key`. See `src/lib/storage.ts` |
+| `CLUB_REVIEW_NOTIFY_EMAIL` | no | Recipient(s) of the "new club registration to review" mail sent on `POST /club-registrations/:id/submit` — comma-separated for several. Unset: only a log warning, nothing fails. Mails around registrations (receipt, review notice, info request, rejection, approval with slug) are best effort: a send failure is logged and never blocks or rolls back a status change |
+| `UPLOADS_DIR` | no | Local-disk root for uploaded photos (defaults to `./uploads` for host-mode dev; the Docker image sets `/data/uploads`, mounted as the `uploads` named volume in `compose.yml` so the non-root `hono` user can write and files survive redeploys), served back through `GET /media/:key`. See `src/lib/storage.ts` |
 
 The verification and password-reset e-mails are HTML, built by `src/lib/emailTemplate.ts` (`buildVerifyEmailEmail`/`buildResetPasswordEmail`) and wired up in `src/auth/auth.ts` (`emailVerification.sendVerificationEmail` and `emailAndPassword.sendResetPassword`) — no external template system, just template-literal HTML passed to `sendEmail()`. The card layout, colors, and `assets/lpj-its-logo.png` logo (embedded via `cid:`, see `sendEmail`'s `attachments` param in `src/lib/email.ts`) are LPJ IT-Solutions' generic template branding — the product name and primary color come from `src/project.config.ts` (`appName`/`primaryColor`, re-exported by `emailTemplate.ts` as `APP_NAME`/`BRAND.primary`); the rest of `BRAND` and the logo file are edited directly. The link target inside those e-mails is controlled by the client apps, not here — see the website's/mobile's own README for `NEXT_PUBLIC_SITE_URL`/`EXPO_PUBLIC_WEBSITE_URL`. Exception: for the password-reset e-mail, `sendResetPassword` appends a fallback `callbackURL` pointing at the website's `/reset-password` page (first `WEB_ORIGIN`) when the calling client doesn't pass a `redirectTo` — otherwise the emailed link would dead-end on the backend's callback handler (it rejects links without a `callbackURL`).
 
@@ -595,9 +672,11 @@ The verification and password-reset e-mails are HTML, built by `src/lib/emailTem
 - CORS is locked to an explicit `trustedOrigins` list, never a wildcard.
 - Cookies are `Secure`-flagged only when `BACKEND_URL` starts with `https://` (**not** `NODE_ENV`, which is unreliable for this — the Docker `backend` service always sets `NODE_ENV=production` for its own unrelated reason, even for plain-HTTP local/LAN/Expo-Go testing; keying `Secure` off that would make every spec-compliant HTTP client silently drop the session cookie post-sign-in). Same `isHttpsDeployment` signal also gates whether Expo Go's dev-mode `exp://` origin is trusted.
 - `secureHeaders` sets `X-Content-Type-Options`, `X-Frame-Options: DENY`, and a `Referrer-Policy`. There is deliberately no Content-Security-Policy here — this is a JSON API with no HTML to protect; the nonce-based CSP in the website template would be meaningless noise on this server.
-- Rate limiting is in-memory and per-instance — correct for this template's single-replica default, wrong once you run more than one backend replica behind a load balancer (each instance keeps its own counters). Swap `src/middleware/rate-limit.ts`'s `Map` for a Redis-backed limiter (for example `@upstash/ratelimit`) before scaling horizontally.
+- Rate limiting is in-memory and per-instance (expired buckets are swept once per window, so the maps don't grow without bound) and keyed by the `x-forwarded-for` header as sent by the client, falling back to one shared bucket — it is only meaningful behind a reverse proxy that overwrites that header; a directly exposed instance can have it spoofed. Sensitive per-account actions (registration submit, document upload/delete) therefore use an additional per-user key. Correct for this template's single-replica default, wrong once you run more than one backend replica behind a load balancer (each instance keeps its own counters). Swap `src/middleware/rate-limit.ts`'s `Map` for a Redis-backed limiter (for example `@upstash/ratelimit`) before scaling horizontally.
 - Errors are normalized through `AppError`/`toAppError()` before they ever reach a response — an unhandled exception becomes an opaque 500 with a logged stack trace server-side, never a leaked internal message.
 - `GET /media/:key` resolves the requested key against `UPLOADS_DIR` and rejects the result if it falls outside that directory (`path.resolve` + prefix check, not just trusting `path.join`'s own `..`-normalization) before it's ever read off disk — a defense against a crafted key like `myClubId/../../../etc/passwd` reaching `readFile`.
+- **Club creation is server-side only.** `organization({ allowUserToCreateOrganization: false })` in `src/auth/auth.ts` makes Better Auth refuse `POST /api/auth/organization/create` for any signed-in user (before Wave 6 anyone with a session could create clubs with arbitrary slugs, i.e. squat join keys and become `owner`). `auth.api.createOrganization({ body: { userId } })` without a session — used by the registration approval and `npm run seed:club` — is treated as a system action and still works. Owners cannot delete their club (`disableOrganizationDeletion: true`; otherwise the freed slug could be re-squatted and the approved registration would be left with `club_id` NULL), cannot change its slug **or name** through `organization/update` (the reviewed name stays stable; other fields such as `logo` remain editable; renaming is a platform/DB operation), and `organization/check-slug` answers 404 (it would be a slug-existence oracle). See [Slug rules](#club-slug-rules).
+- Registration proof documents are private: stored under `registrations/<id>/` (not reachable via `/media`, which is club-scoped), served only through the authenticated applicant/admin download routes, content type from a PDF/JPEG/PNG allowlist verified against the file's magic bytes, 10 MB / 5 files cap, client filenames sanitized. Retention/deletion of the proofs is not implemented yet (needs a scheduler).
 - `GET /internal/stats` is deliberately **not** gated by a Better Auth session/`adminGuard` — its caller is another backend, with no user account here at all (see [API reference](#api-reference)). A single static token, compared with `crypto.timingSafeEqual` rather than `===` (constant-time, so a wrong guess can't be narrowed down via response timing), is the whole auth mechanism. It can only ever read this one aggregate endpoint — nothing else `adminGuard` protects is reachable with it.
 
 ## Key decisions
@@ -704,7 +783,7 @@ Confirm `Domain=example.com` is present in the output. If it's missing, the *run
 
 ## Testing and CI
 
-`npm test` runs Vitest: 251 tests across 24 files as of this write. Unit tests for `permissions.ts`, `club-permissions.ts`, `errors.ts`, the rate-limit middleware, `availability-match.ts`'s Terminfindung precedence logic, and `ics.ts`'s RFC 5545 writer need nothing running; the club-scoping/permission integration tests — `club-members.test.ts`, `club-applications.test.ts`, `calendars.test.ts`, `events.test.ts`, `availability.test.ts`, `meetings.test.ts` — and the `internal-stats.test.ts` token-gate tests all need a real `DATABASE_URL` (the same Postgres `docker compose up -d db` gives you) since they exercise actual sign-up/sign-in/organization-creation against Better Auth and real cross-club IDOR checks rather than mocking either. `events.test.ts` covers the capacity-1 waitlist flow end to end (second RSVP gets `"warteliste"`, then gets promoted once the first cancels) sequentially — it doesn't fire concurrent requests, so the row lock itself is exercised by inspection/code review rather than a dedicated race test. `.github/workflows/ci.yml` runs lint, `tsc --noEmit`, migrations, build, and the full test suite against a Postgres service container on every push and pull request.
+`npm test` runs Vitest: 311 tests across 28 files as of this write. Unit tests for `club-slug.ts` (slugify rules, reserved words, collision suffixes), `club-registration-mail.ts`, the rate limiter (including per-user keys), `permissions.ts`, `club-permissions.ts`, `errors.ts`, the rate-limit middleware, `availability-match.ts`'s Terminfindung precedence logic, and `ics.ts`'s RFC 5545 writer need nothing running; the club-scoping/permission integration tests — `club-members.test.ts`, `club-applications.test.ts`, `club-registrations.test.ts` (Wave 6: closed `organization/create` and immutable slug, registration lifecycle, approval effects incl. owner/role/member number/immediate permissions, request-info + resubmit, double and parallel decisions, parallel slug collision, compensation, one open registration per user, IDOR, admin gating, upload hardening, duplicate guard, mail failures not blocking, owner cannot delete/rename the club or probe slugs, per-user submit limit, delete-vs-submit race, register-key duplicate on approve, orphan organization cleanup, audit of admin document access), `calendars.test.ts`, `events.test.ts`, `availability.test.ts`, `meetings.test.ts` — and the `internal-stats.test.ts` token-gate tests and `admin-clubs.test.ts` (admin gating, club total + pending-registration count, per-user clubs ordering/validation/limit) all need a real `DATABASE_URL` (the same Postgres `docker compose up -d db` gives you) since they exercise actual sign-up/sign-in/organization-creation against Better Auth and real cross-club IDOR checks rather than mocking either. `events.test.ts` covers the capacity-1 waitlist flow end to end (second RSVP gets `"warteliste"`, then gets promoted once the first cancels) sequentially — it doesn't fire concurrent requests, so the row lock itself is exercised by inspection/code review rather than a dedicated race test. `.github/workflows/ci.yml` runs lint, `tsc --noEmit`, migrations, build, and the full test suite against a Postgres service container on every push and pull request.
 
 ## How this fits into the template suite
 

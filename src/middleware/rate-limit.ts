@@ -4,6 +4,7 @@
 // replicas behind a load balancer (each instance has its own counter).
 // Upgrade path: swap the in-memory Map for a Redis-backed limiter
 // (e.g. @upstash/ratelimit) if/when a product scales horizontally.
+import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 
 import { TooManyRequestsError } from "../lib/errors.js";
@@ -18,12 +19,21 @@ interface Bucket {
  * back to a single shared bucket if no IP header is present (e.g. local
  * dev without a reverse proxy setting `x-forwarded-for`).
  */
-export function rateLimit({ windowMs, max }: { windowMs: number; max: number }) {
+export function rateLimit({ windowMs, max, key: keyFn }: { windowMs: number; max: number; key?: (c: Context) => string }) {
   const buckets = new Map<string, Bucket>();
+  let lastSweep = Date.now();
 
   return createMiddleware(async (c, next) => {
-    const key = c.req.header("x-forwarded-for") ?? "unknown";
+    // Default key = x-forwarded-for as sent by the client (only trustworthy behind a proxy that overwrites it, see README).
+    // `key` lets a route limit per user instead (must run after sessionGuard then).
+    const key = keyFn ? keyFn(c) : (c.req.header("x-forwarded-for") ?? "unknown");
     const now = Date.now();
+
+    // Drop expired buckets at most once per window so the map can't grow without bound.
+    if (now - lastSweep >= windowMs) {
+      for (const [k, b] of buckets) if (b.resetAt <= now) buckets.delete(k);
+      lastSweep = now;
+    }
 
     let bucket = buckets.get(key);
     if (!bucket || bucket.resetAt <= now) {
