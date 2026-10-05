@@ -18,23 +18,23 @@ describe("club registration mails", () => {
 
   it("sends no reviewer mail (and does not throw) when CLUB_REVIEW_NOTIFY_EMAIL is unset", async () => {
     delete process.env.CLUB_REVIEW_NOTIFY_EMAIL;
-    await expect(sendRegistrationReviewNotifyMail(applicant, "TV Test")).resolves.toBeUndefined();
+    await expect(sendRegistrationReviewNotifyMail(applicant, "TV Test", "reg-1")).resolves.toBeUndefined();
     expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it("notifies every configured reviewer address", async () => {
     process.env.CLUB_REVIEW_NOTIFY_EMAIL = "a@example.com, b@example.com";
-    await sendRegistrationReviewNotifyMail(applicant, "TV Test");
+    await sendRegistrationReviewNotifyMail(applicant, "TV Test", "reg-1");
     expect(vi.mocked(sendEmail).mock.calls.map(([m]) => m.to)).toEqual(["a@example.com", "b@example.com"]);
   });
 
   it("swallows send failures", async () => {
     vi.mocked(sendEmail).mockRejectedValueOnce(new Error("smtp down"));
-    await expect(sendRegistrationApprovedMail(applicant, "TV Test", "tv-test")).resolves.toBeUndefined();
+    await expect(sendRegistrationApprovedMail(applicant, "TV Test", "tv-test", "reg-1")).resolves.toBeUndefined();
   });
 
   it("escapes user-supplied text in the HTML body", async () => {
-    await sendRegistrationNeedsInfoMail(applicant, "<script>x</script>", "Zeile 1\n<img src=x>");
+    await sendRegistrationNeedsInfoMail(applicant, "<script>x</script>", "Zeile 1\n<img src=x>", "reg-1");
     const html = vi.mocked(sendEmail).mock.calls[0]![0].html;
     expect(html).not.toContain("<script>");
     expect(html).not.toContain("<img src=x>");

@@ -17,7 +17,7 @@ import {
   sendRegistrationNeedsInfoMail,
   sendRegistrationRejectedMail,
 } from "../lib/club-registration-mail.js";
-import { documentResponse, findDocument, isUuid, shapeRegistration, shapeRegistrations } from "../lib/club-registrations.js";
+import { documentResponse, findDocument, isUuid, recordAdminDocumentAccess, registerKey, registerKeyMatches, shapeRegistration, shapeRegistrations } from "../lib/club-registrations.js";
 import { assertValidClubSlug, slugifyClubName, uniqueClubSlug } from "../lib/club-slug.js";
 import { ConflictError, InternalError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
@@ -92,6 +92,19 @@ async function duplicateHintsFor(reg: ClubRegistrationRow): Promise<DuplicateHin
     .limit(10);
   for (const h of byLocation) hints.set(h.clubId, h);
 
+  // Same Registergericht + Registernummer as an already approved club: the strongest duplicate signal.
+  const key = registerKey(reg.registerCourt, reg.registerNumber);
+  if (key) {
+    const byRegister = await db
+      .select({ clubId: organization.id, name: organization.name, city: clubRegistrations.city, postalCode: clubRegistrations.postalCode })
+      .from(clubRegistrations)
+      .innerJoin(organization, eq(organization.id, clubRegistrations.clubId))
+      .where(and(eq(clubRegistrations.status, "approved"), ne(clubRegistrations.id, reg.id), registerKeyMatches(key)))
+      .limit(10);
+    // Put register matches first so the 10-entry cap never drops them.
+    return [...new Map([...byRegister, ...hints.values()].map((h) => [h.clubId, h])).values()].slice(0, 10);
+  }
+
   return [...hints.values()].slice(0, 10);
 }
 
@@ -112,6 +125,22 @@ async function shapeForAdmin(rows: ClubRegistrationRow[]) {
 async function applicantOf(userId: string): Promise<{ name: string; email: string } | null> {
   const row = await db.query.user.findFirst({ where: eq(user.id, userId) });
   return row ? { name: row.name, email: row.email } : null;
+}
+
+/** Deletes `org` iff it was created for `registrationId` (metadata tag) and has no member rows. Returns whether it did. */
+async function removeOwnOrphanOrganization(org: typeof organization.$inferSelect, registrationId: string): Promise<boolean> {
+  let tag: unknown;
+  try {
+    tag = (JSON.parse(org.metadata ?? "null") as { registrationId?: unknown } | null)?.registrationId;
+  } catch {
+    return false;
+  }
+  if (tag !== registrationId) return false;
+  const anyMember = await db.query.member.findFirst({ where: eq(member.organizationId, org.id) });
+  if (anyMember) return false;
+  await db.delete(organization).where(eq(organization.id, org.id));
+  logger.warn({ clubId: org.id, registrationId }, "[admin-club-registrations] removed owner-less organization left behind by a failed createOrganization");
+  return true;
 }
 
 // --- queue -------------------------------------------------------------
@@ -144,7 +173,9 @@ adminClubRegistrationRoutes.get("/:id", async (c) => {
 
 adminClubRegistrationRoutes.get("/:id/documents/:docId", async (c) => {
   const row = await loadRegistration(c.req.param("id"));
+  if (row.status === "draft") throw new NotFoundError("Registration not found");
   const doc = await findDocument(row.id, c.req.param("docId"));
+  await recordAdminDocumentAccess(c.get("user").id, row.id, doc);
   return documentResponse(c, doc);
 });
 
@@ -175,7 +206,7 @@ async function decideWithNote(c: { get: (k: "user") => { id: string } }, id: str
     return null;
   });
   if (applicant) {
-    inBackground(status === "needs_info" ? sendRegistrationNeedsInfoMail(applicant, decided.clubName, note) : sendRegistrationRejectedMail(applicant, decided.clubName, note));
+    inBackground(status === "needs_info" ? sendRegistrationNeedsInfoMail(applicant, decided.clubName, note, decided.id) : sendRegistrationRejectedMail(applicant, decided.clubName, note, decided.id));
   }
   return decided;
 }
@@ -217,6 +248,18 @@ adminClubRegistrationRoutes.post("/:id/approve", async (c) => {
       if (!reg) throw new NotFoundError("Registration not found");
       if (reg.status !== "pending") throw new ConflictError("Registration has already been decided or is not pending");
 
+      // Two pending registrations can share a register key (the submit-time guard only sees *approved* ones):
+      // re-check under the lock so the second one is refused once the first became a club.
+      const key = registerKey(reg.registerCourt, reg.registerNumber);
+      if (key) {
+        const [dup] = await tx
+          .select({ id: clubRegistrations.id })
+          .from(clubRegistrations)
+          .where(and(eq(clubRegistrations.status, "approved"), ne(clubRegistrations.id, reg.id), registerKeyMatches(key)))
+          .limit(1);
+        if (dup) throw new ConflictError("A club with these register details already exists");
+      }
+
       // createOrganization runs on its own pool connection (committed immediately) and makes the applicant
       // `owner`. If anything below fails, the catch block removes the organization again.
       const baseSlug = explicitSlug ?? reg.slugSuggestion ?? slugifyClubName(reg.clubName);
@@ -224,11 +267,19 @@ adminClubRegistrationRoutes.post("/:id/approve", async (c) => {
       for (let attempt = 0; attempt < MAX_SLUG_ATTEMPTS && !org; attempt++) {
         const slug = explicitSlug ?? (await uniqueClubSlug(db, baseSlug));
         try {
-          org = await auth.api.createOrganization({ body: { name: reg.clubName, slug, userId: reg.userId } });
+          // metadata tags the organization with this registration, so a half-created one can be recognised below.
+          org = await auth.api.createOrganization({ body: { name: reg.clubName, slug, userId: reg.userId, metadata: { registrationId: reg.id } } });
         } catch (err) {
-          // organization_slug_uidx is the last line of defence: someone else took the slug between our lookup and the insert.
           const taken = await db.query.organization.findFirst({ where: eq(organization.slug, slug) });
           if (!taken) throw err;
+          // createOrganization inserts the organization and then its owner member in separate statements: if the
+          // second one failed, OUR owner-less organization is still sitting on the slug. Remove it (only if it is
+          // verifiably ours and has no member) before trying another slug -- otherwise we'd squat our own slug.
+          if (await removeOwnOrphanOrganization(taken, reg.id)) {
+            if (explicitSlug !== undefined) throw err;
+            continue;
+          }
+          // organization_slug_uidx is the last line of defence: someone else took the slug between our lookup and the insert.
           if (explicitSlug !== undefined) throw new ConflictError("This slug is already taken");
         }
       }
@@ -280,7 +331,7 @@ adminClubRegistrationRoutes.post("/:id/approve", async (c) => {
     logger.error({ err, registrationId: result.registration.id }, "[admin-club-registrations] could not load applicant for approval mail");
     return null;
   });
-  if (applicant) inBackground(sendRegistrationApprovedMail(applicant, result.club.name, result.club.slug));
+  if (applicant) inBackground(sendRegistrationApprovedMail(applicant, result.club.name, result.club.slug, result.registration.id));
 
   return c.json({ data: { registration: await shapeRegistration(result.registration), club: result.club } });
 });

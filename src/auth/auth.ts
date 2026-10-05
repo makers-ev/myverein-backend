@@ -2,7 +2,7 @@ import "dotenv/config";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { expo } from "@better-auth/expo";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { eq } from "drizzle-orm";
 import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plugins";
 
@@ -139,15 +139,22 @@ export const auth = betterAuth({
       // flag. Left at its default (true), any signed-in user could POST
       // /api/auth/organization/create with an arbitrary slug (squatting).
       allowUserToCreateOrganization: false,
+      // Owners must not be able to delete their club: the freed slug could be re-squatted and the approved
+      // registration would be left with club_id NULL. (Deleting is a platform/DB operation.)
+      disableOrganizationDeletion: true,
       organizationHooks: {
-        // The slug is the public join key (Aufnahmeantrag) and must stay
-        // stable once assigned -- reject any attempt to change it through
-        // /api/auth/organization/update. Re-sending the current value is a no-op.
+        // The slug is the public join key (Aufnahmeantrag) and the name is what the platform admin verified
+        // during the registration review -- both must stay stable once assigned, so reject any attempt to
+        // change them through /api/auth/organization/update. Re-sending the current value is a no-op;
+        // other fields (logo, metadata) stay editable. A name change is a platform/DB operation.
         beforeUpdateOrganization: async ({ organization: data, member }) => {
-          if (typeof data.slug !== "string") return;
+          if (typeof data.slug !== "string" && typeof data.name !== "string") return;
           const current = await db.query.organization.findFirst({ where: eq(organizationTable.id, member.organizationId) });
-          if (current?.slug !== data.slug) {
+          if (typeof data.slug === "string" && current?.slug !== data.slug) {
             throw new APIError("FORBIDDEN", { message: "The club slug cannot be changed" });
+          }
+          if (typeof data.name === "string" && current?.name !== data.name) {
+            throw new APIError("FORBIDDEN", { message: "The club name cannot be changed" });
           }
         },
       },
@@ -160,6 +167,15 @@ export const auth = betterAuth({
     bearer(),
     openAPI(),
   ],
+  hooks: {
+    // organization/check-slug would let any signed-in user probe which club slugs exist (existence oracle),
+    // and nothing in MyVerein needs it any more now that slugs are generated server-side.
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path === "/organization/check-slug") {
+        throw new APIError("NOT_FOUND", { message: "Not found" });
+      }
+    }),
+  },
   databaseHooks: {
     session: {
       create: {

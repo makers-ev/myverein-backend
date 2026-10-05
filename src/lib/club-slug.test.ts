@@ -14,6 +14,11 @@ describe("slugifyClubName", () => {
     expect(slugifyClubName("Öko Übung Ärzte")).toBe("oeko-uebung-aerzte");
   });
 
+  it("transliterates letters that do not decompose", () => {
+    expect(slugifyClubName("Søren Łódź Đorđe")).toBe("soren-lodz-dorde");
+    expect(slugifyClubName("Ærø Œuvre Þór")).toBe("aero-oeuvre-thor");
+  });
+
   it("drops other diacritics", () => {
     expect(slugifyClubName("Café Français")).toBe("cafe-francais");
   });
@@ -53,6 +58,11 @@ describe("slugifyClubName", () => {
     expect(slugifyClubName("Demo e.V.")).toBe("demo-verein");
     expect(slugifyClubName("API")).toBe("api-verein");
     expect(isReservedSlug(slugifyClubName("www"))).toBe(false);
+    for (const word of ["Vereine", "join", "Dashboard", "mobile", "web", "docs", "blog", "news", "billing", "security", "privacy", "impressum", "datenschutz", "agb", "contact", "imprint", "support", "help", "me"]) {
+      expect(isReservedSlug(slugifyClubName(word)), word).toBe(false);
+      expect(isReservedSlug(word.toLowerCase()), word).toBe(true);
+    }
+    expect(isReservedSlug("verein")).toBe(false); // stays the fallback
   });
 
   it("limits the length to 50 characters without a trailing dash", () => {

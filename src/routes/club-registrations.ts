@@ -21,6 +21,7 @@ import {
   documentResponse,
   findDocument,
   isUuid,
+  recordAdminDocumentAccess,
   registerKey,
   registerKeyMatches,
   shapeRegistration,
@@ -64,6 +65,14 @@ clubRegistrationRoutes.use("*", async (c, next) => {
   if (!c.get("user").emailVerified) throw new ForbiddenError("A verified email address is required to register a club");
   await next();
 });
+
+// Per-user (not per-IP) limits: they cap mail flooding through needs_info -> submit cycles and upload/delete churn,
+// and can't be dodged by rotating the client IP header. Each limiter instance has its own buckets.
+const perUser = (c: { get: (k: "user") => { id: string } }) => `user:${c.get("user").id}`;
+const submitLimiter = rateLimit({ windowMs: 24 * 60 * 60_000, max: 5, key: perUser });
+const documentLimiter = rateLimit({ windowMs: 60 * 60_000, max: 30, key: perUser }); // shared by upload + delete
+/** Reviewers are mailed at most once per registration within this window, however often it is resubmitted. */
+const REVIEWER_MAIL_THROTTLE_MS = 60 * 60_000;
 
 // --- validation --------------------------------------------------------
 
@@ -238,6 +247,7 @@ clubRegistrationRoutes.patch("/:id", zValidator("json", patchSchema, validationH
 
 clubRegistrationRoutes.post(
   "/:id/documents",
+  documentLimiter,
   bodyLimit({
     maxSize: MAX_DOCUMENT_BYTES + 64 * 1024, // multipart framing overhead on top of the file itself
     onError: () => {
@@ -254,7 +264,7 @@ clubRegistrationRoutes.post(
     const kind = z.enum(REGISTRATION_DOCUMENT_KINDS).safeParse(body["kind"]);
     if (!kind.success) throw new ValidationError(`kind must be one of: ${REGISTRATION_DOCUMENT_KINDS.join(", ")}`);
 
-    if (!(file.type in DOCUMENT_SIGNATURES)) throw new ValidationError(`Unsupported content type: ${file.type || "unknown"} (allowed: PDF, JPEG, PNG)`);
+    if (!Object.hasOwn(DOCUMENT_SIGNATURES, file.type)) throw new ValidationError(`Unsupported content type: ${file.type || "unknown"} (allowed: PDF, JPEG, PNG)`);
     if (file.size > MAX_DOCUMENT_BYTES) throw new ValidationError(`File exceeds maximum size of ${MAX_DOCUMENT_BYTES} bytes`);
     if (file.size === 0) throw new ValidationError("File is empty");
 
@@ -305,25 +315,34 @@ clubRegistrationRoutes.post(
 clubRegistrationRoutes.get("/:id/documents/:docId", async (c) => {
   const currentUser = c.get("user");
   const id = c.req.param("id");
-  // Applicant or platform admin; everyone else gets the same 404 as for an unknown id.
-  const registration =
-    currentUser.role === "admin"
-      ? isUuid(id)
-        ? await db.query.clubRegistrations.findFirst({ where: eq(clubRegistrations.id, id) })
-        : undefined
-      : await loadOwn(id, currentUser.id);
+  // Applicant, or a platform admin for submitted (non-draft) registrations -- consistent with /admin, where drafts
+  // are 404. Everyone else gets the same 404 as for an unknown id.
+  let registration = isUuid(id)
+    ? await db.query.clubRegistrations.findFirst({ where: and(eq(clubRegistrations.id, id), eq(clubRegistrations.userId, currentUser.id)) })
+    : undefined;
+  const viaAdmin = !registration && currentUser.role === "admin" && isUuid(id);
+  if (viaAdmin) {
+    registration = await db.query.clubRegistrations.findFirst({ where: and(eq(clubRegistrations.id, id), ne(clubRegistrations.status, "draft")) });
+  }
   if (!registration) throw new NotFoundError("Registration not found");
   const doc = await findDocument(registration.id, c.req.param("docId"));
+  if (viaAdmin) await recordAdminDocumentAccess(currentUser.id, registration.id, doc);
   return documentResponse(c, doc);
 });
 
-clubRegistrationRoutes.delete("/:id/documents/:docId", async (c) => {
+clubRegistrationRoutes.delete("/:id/documents/:docId", documentLimiter, async (c) => {
   const registration = await loadOwn(c.req.param("id"), c.get("user").id);
   assertEditable(registration);
   const doc = await findDocument(registration.id, c.req.param("docId"));
 
   await db.transaction(async (tx) => {
-    await tx.delete(clubRegistrationDocuments).where(eq(clubRegistrationDocuments.id, doc.id));
+    // Same lock as submit/upload: a concurrent submit either sees the document or the deletion is refused.
+    const [locked] = await tx.select({ status: clubRegistrations.status }).from(clubRegistrations).where(eq(clubRegistrations.id, registration.id)).for("update");
+    if (!locked || (locked.status !== "draft" && locked.status !== "needs_info")) {
+      throw new ConflictError("Registration can only be changed while it is a draft or needs more information");
+    }
+    const deleted = await tx.delete(clubRegistrationDocuments).where(eq(clubRegistrationDocuments.id, doc.id)).returning({ id: clubRegistrationDocuments.id });
+    if (deleted.length === 0) throw new NotFoundError("Document not found");
     await tx.insert(auditLog).values({
       eventType: "club_registration.document_remove",
       subjectId: registration.id,
@@ -335,52 +354,62 @@ clubRegistrationRoutes.delete("/:id/documents/:docId", async (c) => {
   return c.body(null, 204);
 });
 
-clubRegistrationRoutes.post("/:id/submit", async (c) => {
+clubRegistrationRoutes.post("/:id/submit", submitLimiter, async (c) => {
   const currentUser = c.get("user");
   const registration = await loadOwn(c.req.param("id"), currentUser.id);
   assertEditable(registration);
-  assertRegisterFields(registration.legalForm, registration.registerCourt, registration.registerNumber);
 
-  // E2: at least one qualifying proof for the legal form.
-  const docs = await db.select({ kind: clubRegistrationDocuments.kind }).from(clubRegistrationDocuments).where(eq(clubRegistrationDocuments.registrationId, registration.id));
-  const qualifying = QUALIFYING_KINDS[registration.legalForm] ?? [];
-  if (!docs.some((d) => (qualifying as string[]).includes(d.kind))) {
-    throw new ValidationError(`At least one proof document is required (${qualifying.join(", ")})`);
-  }
-
-  // Duplicate guard: same Registergericht + number as an already approved club. The message deliberately
-  // reveals nothing about that club (no name/slug/id).
-  const key = registerKey(registration.registerCourt, registration.registerNumber);
-  if (key) {
-    const [dup] = await db
-      .select({ id: clubRegistrations.id })
-      .from(clubRegistrations)
-      .where(and(eq(clubRegistrations.status, "approved"), ne(clubRegistrations.id, registration.id), registerKeyMatches(key)))
-      .limit(1);
-    if (dup) throw new ConflictError("A club with these register details already exists. Please join it with a membership application instead.");
-  }
-
+  // Best-effort suggestion; the authoritative slug is assigned (and collision-checked) on approval.
   const slugSuggestion = await uniqueClubSlug(db, slugifyClubName(registration.clubName));
 
   const submitted = await db.transaction(async (tx) => {
+    // Lock first, then validate everything against the locked state: a concurrent document delete/upload or PATCH
+    // can't slip in between the checks and the status change.
+    const [locked] = await tx.select().from(clubRegistrations).where(eq(clubRegistrations.id, registration.id)).for("update");
+    if (!locked) throw new NotFoundError("Registration not found");
+    assertEditable(locked);
+    assertRegisterFields(locked.legalForm, locked.registerCourt, locked.registerNumber);
+
+    // E2: at least one qualifying proof for the legal form.
+    const docs = await tx.select({ kind: clubRegistrationDocuments.kind }).from(clubRegistrationDocuments).where(eq(clubRegistrationDocuments.registrationId, locked.id));
+    const qualifying = QUALIFYING_KINDS[locked.legalForm] ?? [];
+    if (!docs.some((d) => (qualifying as string[]).includes(d.kind))) {
+      throw new ValidationError(`At least one proof document is required (${qualifying.join(", ")})`);
+    }
+
+    // Duplicate guard: same Registergericht + number as an already approved club. The message deliberately
+    // reveals nothing about that club (no name/slug/id).
+    const key = registerKey(locked.registerCourt, locked.registerNumber);
+    if (key) {
+      const [dup] = await tx
+        .select({ id: clubRegistrations.id })
+        .from(clubRegistrations)
+        .where(and(eq(clubRegistrations.status, "approved"), ne(clubRegistrations.id, locked.id), registerKeyMatches(key)))
+        .limit(1);
+      if (dup) throw new ConflictError("A club with these register details already exists. Please join it with a membership application instead.");
+    }
+
     const [row] = await tx
       .update(clubRegistrations)
       .set({ status: "pending", submittedAt: new Date(), slugSuggestion, reviewNote: null, updatedAt: new Date() })
-      .where(and(eq(clubRegistrations.id, registration.id), inArray(clubRegistrations.status, ["draft", "needs_info"])))
+      .where(eq(clubRegistrations.id, locked.id))
       .returning();
-    if (!row) throw new ConflictError("Registration has already been submitted");
     await tx.insert(auditLog).values({
       eventType: "club_registration.submit",
       subjectId: row.id,
-      payload: { userId: currentUser.id, from: registration.status, slugSuggestion },
+      payload: { userId: currentUser.id, from: locked.status, slugSuggestion },
     });
-    return row;
+    return { row, previousSubmittedAt: locked.submittedAt };
   });
 
   // After commit, best effort: a failing mail must never undo the status change.
   const applicant = { name: currentUser.name, email: currentUser.email };
-  inBackground(sendRegistrationReceivedMail(applicant, submitted.clubName));
-  inBackground(sendRegistrationReviewNotifyMail(applicant, submitted.clubName));
+  inBackground(sendRegistrationReceivedMail(applicant, submitted.row.clubName, submitted.row.id));
+  // Throttle reviewer mails per registration so needs_info -> submit cycles can't flood the reviewers.
+  const prev = submitted.previousSubmittedAt;
+  if (!prev || Date.now() - prev.getTime() >= REVIEWER_MAIL_THROTTLE_MS) {
+    inBackground(sendRegistrationReviewNotifyMail(applicant, submitted.row.clubName, submitted.row.id));
+  }
 
-  return c.json({ data: { registration: await shapeRegistration(submitted) } });
+  return c.json({ data: { registration: await shapeRegistration(submitted.row) } });
 });

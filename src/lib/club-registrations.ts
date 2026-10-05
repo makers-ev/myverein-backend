@@ -9,6 +9,7 @@ import {
   type ClubRegistrationDocumentRow,
   type ClubRegistrationRow,
 } from "../db/schema/club-registrations.js";
+import { auditLog } from "../db/schema/audit-log.js";
 import { NotFoundError } from "./errors.js";
 import { getObject } from "./storage.js";
 
@@ -121,6 +122,11 @@ export async function findDocument(registrationId: string, docId: string): Promi
   return doc;
 }
 
+/** RFC 5987 `attr-char` encoding: encodeURIComponent additionally leaves ' ( ) * unescaped, which are not allowed there. */
+export function encodeRfc5987(value: string): string {
+  return encodeURIComponent(value).replace(/['()*]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
 /** Streams a stored proof document as an attachment. The content type comes from our own allowlist, never from the filename. */
 export async function documentResponse(c: Context, doc: ClubRegistrationDocumentRow): Promise<Response> {
   let buffer: Buffer;
@@ -131,8 +137,17 @@ export async function documentResponse(c: Context, doc: ClubRegistrationDocument
   }
   const asciiName = doc.filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
   c.header("Content-Type", doc.mimeType);
-  c.header("Content-Disposition", `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(doc.filename)}`);
+  c.header("Content-Disposition", `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeRfc5987(doc.filename)}`);
   c.header("Cache-Control", "private, no-store");
   c.header("X-Content-Type-Options", "nosniff");
   return c.body(new Uint8Array(buffer));
+}
+
+/** Platform admins reading an applicant's proof documents is sensitive (GDPR): every such access is audit-logged. */
+export async function recordAdminDocumentAccess(adminId: string, registrationId: string, doc: ClubRegistrationDocumentRow): Promise<void> {
+  await db.insert(auditLog).values({
+    eventType: "club_registration.document_access",
+    subjectId: registrationId,
+    payload: { documentId: doc.id, kind: doc.kind, accessedBy: adminId },
+  });
 }

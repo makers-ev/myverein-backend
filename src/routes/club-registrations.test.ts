@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -13,6 +13,7 @@ import { auditLog } from "../db/schema/audit-log.js";
 import { clubMemberships } from "../db/schema/club-memberships.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrationDocuments, clubRegistrations } from "../db/schema/club-registrations.js";
+import { encodeRfc5987 } from "../lib/club-registrations.js";
 import { toAppError } from "../lib/errors.js";
 import { sendEmail } from "../lib/email.js";
 import { nextMemberNumber } from "../lib/member-number.js";
@@ -194,7 +195,32 @@ describe("club registrations (Wave 6)", () => {
       expect((await update({ slug: `hijacked-${suffix}` })).status).toBe(403);
       expect((await db.query.organization.findFirst({ where: eq(organization.id, clubId) }))?.slug).toBe(slug);
       expect((await update({ slug })).status).toBe(200); // re-sending the current value is a no-op
-      expect((await update({ name: `Renamed ${suffix}` })).status).toBe(200);
+      // The reviewed name is locked too (changing it is a platform/DB operation); other fields stay editable.
+      expect((await update({ name: `Renamed ${suffix}` })).status).toBe(403);
+      expect((await update({ name: approved.data.club.name })).status).toBe(200);
+      expect((await update({ logo: "https://example.org/logo.png" })).status).toBe(200);
+      expect((await db.query.organization.findFirst({ where: eq(organization.id, clubId) }))?.name).not.toBe(`Renamed ${suffix}`);
+
+      // Owners cannot delete their club (slug re-squatting, approved registration left without club).
+      const del = await auth.handler(
+        new Request("http://localhost:3000/api/auth/organization/delete", {
+          method: "POST",
+          headers: { ...json, cookie: owner.cookie, origin },
+          body: JSON.stringify({ organizationId: clubId }),
+        }),
+      );
+      expect(del.status).toBe(404);
+      expect(await db.query.organization.findFirst({ where: eq(organization.id, clubId) })).toBeDefined();
+
+      // check-slug is not an existence oracle for normal sessions.
+      const check = await auth.handler(
+        new Request("http://localhost:3000/api/auth/organization/check-slug", {
+          method: "POST",
+          headers: { ...json, cookie: owner.cookie, origin },
+          body: JSON.stringify({ slug }),
+        }),
+      );
+      expect(check.status).toBe(404);
     });
   });
 
@@ -288,6 +314,13 @@ describe("club registrations (Wave 6)", () => {
       expect(own.headers.get("content-type")).toBe("application/pdf");
       expect(Buffer.from(await own.arrayBuffer()).equals(PDF)).toBe(true);
       expect((await req(admin, `/club-registrations/${first.id}/documents/${docId}`)).status).toBe(200);
+      const accesses = await db.select().from(auditLog).where(and(eq(auditLog.subjectId, first.id), eq(auditLog.eventType, "club_registration.document_access")));
+      expect(accesses).toHaveLength(1);
+      expect(accesses[0].payload).toMatchObject({ documentId: docId, accessedBy: admin.userId });
+      // Owner access is not an admin access; drafts are invisible to admins (like under /admin).
+      const draftDoc = await addDoc(owner, second.id);
+      expect((await req(admin, `/club-registrations/${second.id}/documents/${draftDoc}`)).status).toBe(404);
+      expect((await req(admin, `/admin/club-registrations/${second.id}/documents/${draftDoc}`)).status).toBe(404);
       expect((await req(null, `/club-registrations/${first.id}/documents/${docId}`)).status).toBe(401);
     });
 
@@ -298,6 +331,41 @@ describe("club registrations (Wave 6)", () => {
       for (let i = 0; i < 11; i++) statuses.push((await post(who, "/club-registrations", validBody("Rate Verein"), "rate-limit-client")).status);
       expect(statuses.slice(0, 10)).toEqual(Array(10).fill(409)); // already has an open registration
       expect(statuses[10]).toBe(429);
+    });
+  });
+
+  describe("hardening", () => {
+    it("limits submits per user (5/day) independent of the client IP", async () => {
+      const who = await applicant("submitlimit");
+      const reg = await create(who, "Submit Limit Verein");
+      const statuses: number[] = [];
+      for (let i = 0; i < 6; i++) statuses.push((await submit(who, reg.id)).status); // random x-forwarded-for each time
+      expect(statuses).toEqual([422, 422, 422, 422, 422, 429]);
+    });
+
+    it("serializes a document delete against a parallel submit (no pending registration without proof)", async () => {
+      const who = await applicant("delrace");
+      const reg = await create(who, "Delete Race Verein");
+      const docId = await addDoc(who, reg.id);
+      const [del, sub] = await Promise.all([req(who, `/club-registrations/${reg.id}/documents/${docId}`, { method: "DELETE" }), submit(who, reg.id)]);
+
+      const remaining = await db.select().from(clubRegistrationDocuments).where(eq(clubRegistrationDocuments.registrationId, reg.id));
+      const row = await db.query.clubRegistrations.findFirst({ where: eq(clubRegistrations.id, reg.id) });
+      if (sub.status === 200) {
+        expect([204, 409]).toContain(del.status);
+        expect(row?.status).toBe("pending");
+        expect(del.status === 409 ? remaining.length : 1).toBeGreaterThanOrEqual(1);
+        if (del.status === 409) expect(remaining).toHaveLength(1);
+      } else {
+        expect([sub.status, del.status]).toEqual([422, 204]);
+        expect(row?.status).toBe("draft");
+        expect(remaining).toHaveLength(0);
+      }
+      expect(!(sub.status === 200 && del.status === 204 && remaining.length === 0)).toBe(true);
+    });
+
+    it("encodes the download filename per RFC 5987", () => {
+      expect(encodeRfc5987("Satzung (v2)*'ä'.pdf")).toBe("Satzung%20%28v2%29%2A%27%C3%A4%27.pdf");
     });
   });
 
@@ -455,6 +523,8 @@ describe("club registrations (Wave 6)", () => {
       expect(doc.status).toBe(200);
       expect(doc.headers.get("content-disposition")).toContain("attachment");
       expect((await req(admin, `/admin/club-registrations/${regB.id}/documents/${entryA.documents[0].id}`)).status).toBe(404);
+      const audited = await db.select().from(auditLog).where(and(eq(auditLog.subjectId, regA.id), eq(auditLog.eventType, "club_registration.document_access")));
+      expect(audited).toHaveLength(1);
     });
 
     it("request-info and reject need a note and only act on pending; request-info allows editing and resubmitting", async () => {
@@ -515,6 +585,9 @@ describe("club registrations (Wave 6)", () => {
 
       const owner = await db.query.member.findFirst({ where: (m, { and, eq }) => and(eq(m.organizationId, data.club.id), eq(m.userId, founder.userId)) });
       expect(owner?.role).toBe("owner");
+      // The organization is tagged with its registration (used to recognise half-created orphans).
+      const orgRow = await db.query.organization.findFirst({ where: eq(organization.id, data.club.id) });
+      expect(JSON.parse(orgRow!.metadata!)).toEqual({ registrationId: reg.id });
       const roles = await db.select().from(clubRoles).where(eq(clubRoles.memberId, owner!.id));
       expect(roles.map((r) => r.roleType)).toEqual(["stellv_vorsitz"]);
       const membership = await db.query.clubMemberships.findFirst({ where: eq(clubMemberships.memberId, owner!.id) });
@@ -628,6 +701,49 @@ describe("club registrations (Wave 6)", () => {
       const retry = await decide(reg.id, "approve");
       expect(retry.status).toBe(200);
       expect(((await retry.json()) as { data: { club: { slug: string } } }).data.club.slug).toBe(reg.slugSuggestion);
+    });
+
+    it("refuses to approve a second pending registration with the same register key and shows it as a duplicate hint", async () => {
+      const first = await applicant("regkey-a");
+      const second = await applicant("regkey-b");
+      const court = "AG Frankfurt";
+      const number = `VR ${suffix}1`;
+      const regA = await submitted(first, `Registerkey A ${suffix}`, { legalForm: "e_v", registerCourt: court, registerNumber: number, postalCode: "60311", city: "Frankfurt" });
+      // Both pass the submit-time guard because neither is approved yet.
+      const regB = await submitted(second, `Registerkey B ${suffix}`, { legalForm: "e_v", registerCourt: ` ${court.toUpperCase()} `, registerNumber: number.replace(" ", ""), postalCode: "80331", city: "Muenchen" });
+
+      const hintsOf = async (id: string) =>
+        ((await (await req(admin, `/admin/club-registrations/${id}`)).json()) as { data: { duplicateHints: Array<{ clubId: string; name: string }> } }).data.duplicateHints;
+      expect(await hintsOf(regB.id)).toEqual([]);
+
+      const approvedA = await decide(regA.id, "approve");
+      expect(approvedA.status).toBe(200);
+      const clubA = ((await approvedA.json()) as { data: { club: { id: string } } }).data.club;
+      expect((await hintsOf(regB.id)).map((h) => h.clubId)).toEqual([clubA.id]); // matched by register key only
+
+      expect((await decide(regB.id, "approve")).status).toBe(409);
+      expect(await db.query.organization.findFirst({ where: eq(organization.name, regB.clubName) })).toBeUndefined();
+      expect((await db.query.clubRegistrations.findFirst({ where: eq(clubRegistrations.id, regB.id) }))?.status).toBe("pending");
+    });
+
+    it("removes its own owner-less organization when createOrganization fails half-way, then retries with the slug", async () => {
+      const who = await applicant("orphan");
+      const reg = await submitted(who, `Waise Verein ${suffix}`);
+      const spy = vi.spyOn(auth.api, "createOrganization").mockImplementationOnce((async ({ body }: { body: { name: string; slug: string; metadata?: unknown } }) => {
+        // Simulates: organization row inserted, owner member insert failed.
+        await db.insert(organization).values({ id: randomUUID(), name: body.name, slug: body.slug, createdAt: new Date(), metadata: JSON.stringify(body.metadata) });
+        throw new Error("member insert failed");
+      }) as unknown as typeof auth.api.createOrganization);
+
+      const res = await decide(reg.id, "approve");
+      spy.mockRestore();
+      expect(res.status).toBe(200);
+      const { club } = ((await res.json()) as { data: { club: { id: string; slug: string } } }).data;
+      expect(club.slug).toBe(reg.slugSuggestion); // not -2: the orphan was removed first
+      const orgs = await db.select().from(organization).where(eq(organization.name, reg.clubName));
+      expect(orgs).toHaveLength(1);
+      const owner = await db.query.member.findFirst({ where: and(eq(member.organizationId, club.id), eq(member.userId, who.userId)) });
+      expect(owner?.role).toBe("owner");
     });
 
     it("refuses a claimed role that could not administer the club", async () => {

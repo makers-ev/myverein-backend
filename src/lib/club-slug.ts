@@ -45,6 +45,23 @@ export const RESERVED_SLUGS: ReadonlySet<string> = new Set([
   "ready",
   "status",
   "myverein",
+  "vereine",
+  "join",
+  "dashboard",
+  "mobile",
+  "web",
+  "docs",
+  "blog",
+  "news",
+  "billing",
+  "security",
+  "privacy",
+  "impressum",
+  "datenschutz",
+  "agb",
+  "contact",
+  "imprint",
+  "me",
   "root",
   "system",
   "test",
@@ -77,6 +94,13 @@ export function slugifyClubName(name: string): string {
     .replace(/ö/g, "oe")
     .replace(/ü/g, "ue")
     .replace(/ß/g, "ss")
+    // Letters that do not decompose under NFD.
+    .replace(/æ/g, "ae")
+    .replace(/œ/g, "oe")
+    .replace(/ø/g, "o")
+    .replace(/ł/g, "l")
+    .replace(/đ/g, "d")
+    .replace(/þ/g, "th")
     // Remaining accents (é -> e, ñ -> n): decompose and drop the combining marks.
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "");
