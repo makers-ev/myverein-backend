@@ -4,7 +4,7 @@ import { appName, primaryColor } from "../project.config.js";
 // first entry of WEB_ORIGIN (same convention as auth.ts's password-reset
 // callbackURL fallback), since that's already this backend's one source of
 // truth for "where the web client lives".
-const SITE_URL = (process.env.WEB_ORIGIN ?? "").split(",")[0]?.trim() || "http://localhost:3011";
+export const SITE_URL = (process.env.WEB_ORIGIN ?? "").split(",")[0]?.trim() || "http://localhost:3011";
 export const LOGO_CID = "app-logo";
 export const LOGO_PATH = "./assets/myverein-logo.png";
 
@@ -92,6 +92,73 @@ export function buildVerifyEmailEmail({ name, url }: { name: string; url: string
     greeting: `Hallo ${name},`,
     bodyHtml: "bitte bestätige deine E-Mail-Adresse, indem du auf den Button unten klickst.",
     ctaLabel: "E-Mail-Adresse bestätigen",
+    ctaUrl: url,
+  });
+}
+
+/** User-supplied text (club names, review notes) ends up inside HTML mail bodies -- always escape it. */
+export function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/** Escapes and keeps line breaks of a multi-line note. */
+function noteHtml(note: string): string {
+  return escapeHtml(note).replace(/\r?\n/g, "<br />");
+}
+
+// --- Wave 6: Vereinserstellung ----------------------------------------
+
+export function buildRegistrationReceivedEmail({ name, clubName, url }: { name: string; clubName: string; url: string }): string {
+  return layout({
+    greeting: `Hallo ${escapeHtml(name)},`,
+    bodyHtml: `wir haben deinen Antrag zur Gründung des Vereins <strong>${escapeHtml(clubName)}</strong> erhalten. Wir prüfen die Angaben und Nachweise und melden uns per E-Mail bei dir.`,
+    ctaLabel: "Zu MyVerein",
+    ctaUrl: url,
+  });
+}
+
+export function buildRegistrationReviewNotifyEmail({
+  clubName,
+  applicantName,
+  applicantEmail,
+  url,
+}: {
+  clubName: string;
+  applicantName: string;
+  applicantEmail: string;
+  url: string;
+}): string {
+  return layout({
+    greeting: "Hallo,",
+    bodyHtml: `es liegt ein neuer Antrag zur Vereinsgründung zur Prüfung vor: <strong>${escapeHtml(clubName)}</strong>, eingereicht von ${escapeHtml(applicantName)} (${escapeHtml(applicantEmail)}).`,
+    ctaLabel: "Antrag prüfen",
+    ctaUrl: url,
+  });
+}
+
+export function buildRegistrationNeedsInfoEmail({ name, clubName, note, url }: { name: string; clubName: string; note: string; url: string }): string {
+  return layout({
+    greeting: `Hallo ${escapeHtml(name)},`,
+    bodyHtml: `zu deinem Antrag für <strong>${escapeHtml(clubName)}</strong> haben wir eine Rückfrage:<br /><br />${noteHtml(note)}<br /><br />Bitte ergänze deine Angaben oder Nachweise und sende den Antrag erneut ab.`,
+    ctaLabel: "Antrag bearbeiten",
+    ctaUrl: url,
+  });
+}
+
+export function buildRegistrationRejectedEmail({ name, clubName, note, url }: { name: string; clubName: string; note: string; url: string }): string {
+  return layout({
+    greeting: `Hallo ${escapeHtml(name)},`,
+    bodyHtml: `leider konnten wir deinen Antrag für <strong>${escapeHtml(clubName)}</strong> nicht freigeben.<br /><br />Begründung:<br />${noteHtml(note)}<br /><br />Du kannst bei Bedarf einen neuen Antrag stellen.`,
+    ctaLabel: "Zu MyVerein",
+    ctaUrl: url,
+  });
+}
+
+export function buildRegistrationApprovedEmail({ name, clubName, slug, url }: { name: string; clubName: string; slug: string; url: string }): string {
+  return layout({
+    greeting: `Hallo ${escapeHtml(name)},`,
+    bodyHtml: `dein Verein <strong>${escapeHtml(clubName)}</strong> ist freigeschaltet. Die Vereinskennung lautet <strong>${escapeHtml(slug)}</strong> – damit können Mitglieder per Aufnahmeantrag beitreten. Du bist als Vorstand eingetragen und kannst den Verein ab sofort verwalten.`,
+    ctaLabel: "Zum Verein",
     ctaUrl: url,
   });
 }

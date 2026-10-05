@@ -2,9 +2,11 @@ import "dotenv/config";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { expo } from "@better-auth/expo";
+import { APIError } from "better-auth/api";
 import { eq } from "drizzle-orm";
 import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plugins";
 
+import { organization as organizationTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { notification, notificationTemplate } from "../db/schema/notifications.js";
@@ -129,7 +131,27 @@ export const auth = betterAuth({
     // native fetch never sends. This plugin rewrites `expo-origin` into a
     // request better-auth itself already trusts.
     expo(),
-    organization(),
+    organization({
+      // Clubs are created ONLY server-side: by the Wave 6 approval flow
+      // (routes/admin-club-registrations.ts) and `npm run seed:club`, both of
+      // which call `auth.api.createOrganization({ body: { userId } })` without
+      // a session -- Better Auth treats that as a system action and skips this
+      // flag. Left at its default (true), any signed-in user could POST
+      // /api/auth/organization/create with an arbitrary slug (squatting).
+      allowUserToCreateOrganization: false,
+      organizationHooks: {
+        // The slug is the public join key (Aufnahmeantrag) and must stay
+        // stable once assigned -- reject any attempt to change it through
+        // /api/auth/organization/update. Re-sending the current value is a no-op.
+        beforeUpdateOrganization: async ({ organization: data, member }) => {
+          if (typeof data.slug !== "string") return;
+          const current = await db.query.organization.findFirst({ where: eq(organizationTable.id, member.organizationId) });
+          if (current?.slug !== data.slug) {
+            throw new APIError("FORBIDDEN", { message: "The club slug cannot be changed" });
+          }
+        },
+      },
+    }),
     admin({
       ac: accessControl,
       roles: { admin: adminRole, user: userRole },

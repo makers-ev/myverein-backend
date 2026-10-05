@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 // Adapted from mycouple-backend's src/lib/storage.ts (local-disk object
@@ -50,4 +50,14 @@ export async function getObject(key: string): Promise<Buffer> {
     throw new Error("Invalid object key");
   }
   return readFile(resolved);
+}
+
+/** Best-effort removal of a stored file (same traversal guard as getObject). A missing file is not an error. */
+export async function deleteObject(key: string): Promise<void> {
+  const root = path.resolve(UPLOADS_DIR);
+  const resolved = path.resolve(root, key);
+  if (resolved === root || !resolved.startsWith(root + path.sep)) {
+    throw new Error("Invalid object key");
+  }
+  await rm(resolved, { force: true });
 }

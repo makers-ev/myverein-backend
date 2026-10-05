@@ -92,6 +92,13 @@
       "when": 1791194211455,
       "tag": "0012_club-applications",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1791199610293,
+      "tag": "0013_club-registrations",
+      "breakpoints": true
     }
   ]
 }
