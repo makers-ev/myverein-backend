@@ -46,6 +46,10 @@ services:
       # left-hand address (which still reads .env's BIND_HOST) controls
       # external access.
       BIND_HOST: 0.0.0.0
+    volumes:
+      # Persistent upload storage (UPLOADS_DIR=/data/uploads, set in the Dockerfile). A named volume takes over the
+      # image directory's hono ownership on first mount.
+      - uploads:/data/uploads
     env_file:
       - .env
     ports:
@@ -66,3 +70,4 @@ services:
 
 volumes:
   pgdata:
+  uploads:
