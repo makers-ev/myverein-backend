@@ -130,7 +130,10 @@ clubApplicationRoutes.post("/:id/approve", async (c) => {
   } catch (err) {
     // The member row was created outside the transaction -- best-effort removal so a failed approval doesn't leave
     // a member without a club_memberships row while the application is still pending.
-    await db.delete(member).where(eq(member.id, createdMember.id)).catch(() => undefined);
+    await db
+      .delete(member)
+      .where(eq(member.id, createdMember.id))
+      .catch((cleanupErr) => console.error("[club-applications] failed to remove member after aborted approval", createdMember.id, cleanupErr));
     throw err;
   }
 });

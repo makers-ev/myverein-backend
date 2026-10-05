@@ -254,6 +254,17 @@ describe("club-applications decision queue", () => {
     expect((await decide(boardA, clubAId, rejectedId, "approve")).status).toBe(409);
   });
 
+  it("lets exactly one of two concurrent approvals win", async () => {
+    const applicant = await newApplicant("race");
+    const id = await applyOk(applicant, clubAId);
+
+    const results = await Promise.all([decide(boardA, clubAId, id, "approve"), decide(boardA, clubAId, id, "approve")]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+
+    const members = await db.query.member.findMany({ where: (m, { and, eq }) => and(eq(m.organizationId, clubAId), eq(m.userId, applicant.userId)) });
+    expect(members.length).toBe(1);
+  });
+
   it("returns 409 on approve when the applicant became a member through another route meanwhile", async () => {
     const applicant = await newApplicant("already");
     const id = await applyOk(applicant, clubAId);
