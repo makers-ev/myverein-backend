@@ -11,6 +11,7 @@ import { auditLog } from "../db/schema/audit-log.js";
 import { locationLinks } from "../db/schema/location-links.js";
 import { locationWifiNetworks, WIFI_SECURITY_TYPES, type LocationWifiNetworkRow } from "../db/schema/location-wifi.js";
 import { LOCATION_VISIBILITIES, locationKeyHistory, locationKeyHolders, locations, type LocationRow, type LocationVisibility } from "../db/schema/locations.js";
+import { clubMembers } from "../db/schema/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { wifiQrPayload } from "../lib/wifi-qr.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
@@ -119,6 +120,30 @@ const photoUrlRemoved = z.never({ error: "photoUrl is no longer accepted: upload
 
 // --- Location CRUD -----------------------------------------------------------
 
+/**
+ * Key holders of a location with a display name, so clients need not load the member directory: `memberName` comes
+ * from the linked `club_members` row (also for departed members), else from the newest key-history snapshot, else null.
+ * Only call after the access-info permission check.
+ */
+async function loadKeyHolders(locationId: string, clubId: string) {
+  const holders = await db.query.locationKeyHolders.findMany({ where: eq(locationKeyHolders.locationId, locationId) });
+  if (holders.length === 0) return [];
+  const memberIds = holders.map((h) => h.memberId);
+  const names = await db
+    .select({ memberId: clubMembers.memberId, displayName: clubMembers.displayName })
+    .from(clubMembers)
+    .where(and(eq(clubMembers.clubId, clubId), inArray(clubMembers.memberId, memberIds)));
+  const byMember = new Map(names.map((n) => [n.memberId, n.displayName]));
+  const snapshots = await db
+    .select({ memberId: locationKeyHistory.memberId, memberName: locationKeyHistory.memberName })
+    .from(locationKeyHistory)
+    .where(and(eq(locationKeyHistory.locationId, locationId), inArray(locationKeyHistory.memberId, memberIds)))
+    .orderBy(desc(locationKeyHistory.createdAt), desc(locationKeyHistory.id));
+  const snapshotByMember = new Map<string, string>();
+  for (const s of snapshots) if (s.memberId && !snapshotByMember.has(s.memberId)) snapshotByMember.set(s.memberId, s.memberName);
+  return holders.map((h) => ({ ...h, memberName: byMember.get(h.memberId) ?? snapshotByMember.get(h.memberId) ?? null, keyLabel: h.keyLabel ?? null }));
+}
+
 locationRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
   const rows = await db.query.locations.findMany({
@@ -136,9 +161,7 @@ locationRoutes.get("/:id", async (c) => {
   const row = await loadClubLocation(id, clubId);
   const roleTypes = c.get("clubRoleTypes");
   // Key holders are access info: only with locations:write / locations:read_access (otherwise an empty list + accessRestricted).
-  const keyHolders = canReadAccess(roleTypes)
-    ? await db.query.locationKeyHolders.findMany({ where: eq(locationKeyHolders.locationId, id) })
-    : [];
+  const keyHolders = canReadAccess(roleTypes) ? await loadKeyHolders(id, clubId) : [];
 
   const [shaped] = await withPhotoUrls(clubId, [shapeLocation(row, roleTypes)]);
   return c.json({ data: { ...shaped, keyHolders } });

@@ -211,6 +211,39 @@ describe("location key history and wifi security (B14)", () => {
     });
   });
 
+  describe("key holders with names", () => {
+    it("shows memberName (club member, also departed) and keyLabel to write/read_access callers, nothing to plain members", async () => {
+      const gone = await join("gone", "member");
+      const loc = (await json(await call(board, "", { method: "POST", body: { name: "Mit Namen" } }))).data.id as string;
+      await call(board, `/${loc}/key-holders`, { method: "POST", body: { memberId: gone.memberId, keyLabel: "Nr. 7" } });
+      await call(board, `/${loc}/key-holders`, { method: "POST", body: { memberId: leader.memberId } });
+      await db.update(clubMembers).set({ status: "ausgetreten", displayName: "Gone Person" }).where(eq(clubMembers.memberId, gone.memberId));
+
+      const asBoard = (await json(await call(board, `/${loc}`))).data.keyHolders as Json[];
+      expect(asBoard.find((k) => k.memberId === gone.memberId)).toMatchObject({ memberName: "Gone Person", keyLabel: "Nr. 7" });
+      expect(asBoard.find((k) => k.memberId === leader.memberId)).toMatchObject({ keyLabel: null });
+      const asLeader = (await json(await call(leader, `/${loc}`))).data.keyHolders as Json[];
+      expect(asLeader).toHaveLength(2);
+
+      const asPlain = (await json(await call(plain, `/${loc}`))).data;
+      expect(asPlain.keyHolders).toEqual([]);
+      expect(asPlain.accessRestricted).toBe(true);
+    });
+
+    it("falls back to the key-history snapshot name, else null, when no club member row exists", async () => {
+      const noRow = await join("norow", "member");
+      const loc = (await json(await call(board, "", { method: "POST", body: { name: "Ohne Mitglied" } }))).data.id as string;
+      await call(board, `/${loc}/key-holders`, { method: "POST", body: { memberId: noRow.memberId } });
+      await db.delete(clubMembers).where(eq(clubMembers.memberId, noRow.memberId));
+      let holders = (await json(await call(board, `/${loc}`))).data.keyHolders as Json[];
+      expect(holders[0]!.memberName).toBe("Name norow");
+
+      await db.delete(locationKeyHistory).where(eq(locationKeyHistory.locationId, loc));
+      holders = (await json(await call(board, `/${loc}`))).data.keyHolders as Json[];
+      expect(holders[0]!.memberName).toBeNull();
+    });
+  });
+
   describe("wifi security type", () => {
     const wifi = (body: Json) => call(board, `/${locationId}/wifi`, { method: "POST", body });
 
