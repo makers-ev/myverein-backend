@@ -1,11 +1,12 @@
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { MIGRATIONS, ScratchDatabases } from "./scratch-db.js";
 
 /**
  * Wave 7 B2: migration 0014 (club_members foundation) against a scratch database that is first migrated to the
@@ -14,16 +15,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  * Postgres user is a superuser).
  */
 
-const MIGRATIONS = path.resolve("src/db/migrations");
 const baseUrl = process.env.DATABASE_URL!;
-const dbName = `mv_migtest_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-const scratchUrl = (() => {
-  const u = new URL(baseUrl);
-  u.pathname = `/${dbName}`;
-  return u.toString();
-})();
+const scratch = new ScratchDatabases(baseUrl);
 
-let admin: Pool;
 let pool: Pool;
 let tmpOld: string;
 
@@ -47,17 +41,10 @@ async function backfillStatements(): Promise<string[]> {
 
 describe("migration 0014 member foundation (Wave 7 B2)", () => {
   beforeAll(async () => {
-    admin = new Pool({ connectionString: baseUrl, max: 1 });
-    await admin.query(`CREATE DATABASE "${dbName}"`);
-    pool = new Pool({ connectionString: scratchUrl, max: 2 });
+    pool = await scratch.create("0014");
 
     // Wave 1-6 state = migrations 0000..0013.
-    tmpOld = await mkdtemp(path.join(os.tmpdir(), "mv-mig-old-"));
-    await cp(MIGRATIONS, tmpOld, { recursive: true });
-    const journalPath = path.join(tmpOld, "meta", "_journal.json");
-    const journal = JSON.parse(await readFile(journalPath, "utf8")) as { entries: Array<{ idx: number }> };
-    journal.entries = journal.entries.filter((e) => e.idx <= 13);
-    await writeFile(journalPath, JSON.stringify(journal));
+    tmpOld = await scratch.migrationsUpTo(13);
     await migrate(drizzle(pool), { migrationsFolder: tmpOld });
 
     // Legacy sample data.
@@ -83,10 +70,7 @@ describe("migration 0014 member foundation (Wave 7 B2)", () => {
   }, 60_000);
 
   afterAll(async () => {
-    await pool?.end();
-    await admin?.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-    await admin?.end();
-    if (tmpOld) await rm(tmpOld, { recursive: true, force: true });
+    await scratch.cleanup();
   });
 
   it("creates exactly one club_members row per member row and keeps club_memberships", async () => {

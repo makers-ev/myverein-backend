@@ -1,11 +1,12 @@
-import { cp, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { MIGRATIONS, ScratchDatabases } from "./scratch-db.js";
 
 /**
  * Wave 7 B18/B13 migration 0019 (media_files, photo_key columns): bookkeeping of the migration folder (journal order,
@@ -13,7 +14,6 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  * it -- stored keys survive the column rename. Needs a role that may CREATE DATABASE.
  */
 
-const MIGRATIONS = path.resolve("src/db/migrations");
 const baseUrl = process.env.DATABASE_URL!;
 
 describe("migration folder bookkeeping", () => {
@@ -35,33 +35,18 @@ describe("migration folder bookkeeping", () => {
 });
 
 describe("migration 0019/0020 media-security-layer", () => {
-  let admin: Pool;
+  const scratch = new ScratchDatabases(baseUrl);
   let pool: Pool;
   let tmpOld: string;
-  let dbName: string;
 
   beforeAll(async () => {
-    admin = new Pool({ connectionString: baseUrl, max: 1 });
-    tmpOld = await mkdtemp(path.join(os.tmpdir(), "mv-mig-0019-"));
-    await cp(MIGRATIONS, tmpOld, { recursive: true });
-    const journalPath = path.join(tmpOld, "meta", "_journal.json");
-    const journal = JSON.parse(await readFile(journalPath, "utf8")) as { entries: Array<{ idx: number }> };
-    journal.entries = journal.entries.filter((e) => e.idx <= 18);
-    await writeFile(journalPath, JSON.stringify(journal));
-
-    dbName = `mv_mig_0019_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-    await admin.query(`CREATE DATABASE "${dbName}"`);
-    const url = new URL(baseUrl);
-    url.pathname = `/${dbName}`;
-    pool = new Pool({ connectionString: url.toString(), max: 2 });
+    tmpOld = await scratch.migrationsUpTo(18);
+    pool = await scratch.create("0019");
     await migrate(drizzle(pool), { migrationsFolder: tmpOld });
   }, 60_000);
 
   afterAll(async () => {
-    await pool.end();
-    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-    await admin.end();
-    await rm(tmpOld, { recursive: true, force: true });
+    await scratch.cleanup();
   });
 
   it("keeps stored photo keys through the column rename and creates the registry and the member photo reference", async () => {

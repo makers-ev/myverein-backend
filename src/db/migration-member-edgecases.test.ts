@@ -1,11 +1,12 @@
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { MIGRATIONS, ScratchDatabases } from "./scratch-db.js";
 
 /**
  * Wave 7 B2 edge cases of migrations 0014/0015 on scratch databases migrated to Wave 6 state first: legacy duplicate
@@ -13,43 +14,25 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  * atomic rollback when the migration fails half-way. Needs a role that may CREATE DATABASE.
  */
 
-const MIGRATIONS = path.resolve("src/db/migrations");
 const baseUrl = process.env.DATABASE_URL!;
 
-const created: string[] = [];
-let admin: Pool;
+const scratch = new ScratchDatabases(baseUrl);
 let tmpOld: string;
 
 async function wave6Database(label: string, seed: (pool: Pool) => Promise<void>): Promise<Pool> {
-  const dbName = `mv_mig_${label}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-  await admin.query(`CREATE DATABASE "${dbName}"`);
-  created.push(dbName);
-  const url = new URL(baseUrl);
-  url.pathname = `/${dbName}`;
-  const pool = new Pool({ connectionString: url.toString(), max: 2 });
+  const pool = await scratch.create(label);
   await migrate(drizzle(pool), { migrationsFolder: tmpOld });
   await seed(pool);
   return pool;
 }
 
 describe("migrations 0014/0015 edge cases", () => {
-  const pools: Pool[] = [];
-
   beforeAll(async () => {
-    admin = new Pool({ connectionString: baseUrl, max: 1 });
-    tmpOld = await mkdtemp(path.join(os.tmpdir(), "mv-mig-edge-"));
-    await cp(MIGRATIONS, tmpOld, { recursive: true });
-    const journalPath = path.join(tmpOld, "meta", "_journal.json");
-    const journal = JSON.parse(await readFile(journalPath, "utf8")) as { entries: Array<{ idx: number }> };
-    journal.entries = journal.entries.filter((e) => e.idx <= 13);
-    await writeFile(journalPath, JSON.stringify(journal));
+    tmpOld = await scratch.migrationsUpTo(13);
   }, 30_000);
 
   afterAll(async () => {
-    for (const p of pools) await p.end();
-    for (const name of created) await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
-    await admin.end();
-    await rm(tmpOld, { recursive: true, force: true });
+    await scratch.cleanup();
   });
 
   const seedLegacy = async (pool: Pool) => {
@@ -67,7 +50,6 @@ describe("migrations 0014/0015 edge cases", () => {
 
   it("keeps legacy duplicate member numbers, folds umlaut categories into the default key, handles an empty slug and cross-club links", async () => {
     const pool = await wave6Database("edge", seedLegacy);
-    pools.push(pool);
     await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS });
 
     const q = async (text: string) => (await pool.query(text)).rows as Array<Record<string, any>>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -97,7 +79,6 @@ describe("migrations 0014/0015 edge cases", () => {
 
   it("re-running the real migrator is a no-op", async () => {
     const pool = await wave6Database("rerun", seedLegacy);
-    pools.push(pool);
     await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS });
     // Every journal entry is applied exactly once (the count follows the journal, so new migrations don't break this).
     const journalEntries = (JSON.parse(await readFile(path.join(MIGRATIONS, "meta", "_journal.json"), "utf8")) as { entries: unknown[] }).entries.length;
@@ -112,7 +93,6 @@ describe("migrations 0014/0015 edge cases", () => {
 
   it("rolls back completely when the migration fails half-way (nothing is left half-migrated)", async () => {
     const pool = await wave6Database("fail", seedLegacy);
-    pools.push(pool);
     // A foreign relation with the name of an index 0014 creates makes the migration fail after tables and backfill ran.
     await pool.query(`CREATE TABLE club_members_club_id_idx (x int)`);
     await expect(migrate(drizzle(pool), { migrationsFolder: MIGRATIONS })).rejects.toThrow();

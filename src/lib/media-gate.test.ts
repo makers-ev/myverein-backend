@@ -15,7 +15,7 @@ function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) return entry.name === "migrations" ? [] : sourceFiles(full);
-    return full.endsWith(".ts") && !full.endsWith(".test.ts") && !full.endsWith("media-fixtures.ts") ? [full] : [];
+    return full.endsWith(".ts") && !full.endsWith(".test.ts") && !full.endsWith("media-fixtures.ts") && !full.endsWith("scratch-db.ts") ? [full] : [];
   });
 }
 

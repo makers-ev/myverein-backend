@@ -1,11 +1,9 @@
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { MIGRATIONS, ScratchDatabases } from "./scratch-db.js";
 
 /**
  * Wave 7 B7/B8/B17 migration 0016 on a scratch database migrated to the state before it: free-text meeting types are
@@ -13,37 +11,21 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  * `visibility` (true -> gast, false -> mitglied) and the column is dropped. Needs a role that may CREATE DATABASE.
  */
 
-const MIGRATIONS = path.resolve("src/db/migrations");
 const baseUrl = process.env.DATABASE_URL!;
 
 describe("migration 0016 roles-scoping", () => {
-  let admin: Pool;
+  const scratch = new ScratchDatabases(baseUrl);
   let pool: Pool;
   let tmpOld: string;
-  let dbName: string;
 
   beforeAll(async () => {
-    admin = new Pool({ connectionString: baseUrl, max: 1 });
-    tmpOld = await mkdtemp(path.join(os.tmpdir(), "mv-mig-0016-"));
-    await cp(MIGRATIONS, tmpOld, { recursive: true });
-    const journalPath = path.join(tmpOld, "meta", "_journal.json");
-    const journal = JSON.parse(await readFile(journalPath, "utf8")) as { entries: Array<{ idx: number }> };
-    journal.entries = journal.entries.filter((e) => e.idx <= 15);
-    await writeFile(journalPath, JSON.stringify(journal));
-
-    dbName = `mv_mig_0016_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-    await admin.query(`CREATE DATABASE "${dbName}"`);
-    const url = new URL(baseUrl);
-    url.pathname = `/${dbName}`;
-    pool = new Pool({ connectionString: url.toString(), max: 2 });
+    tmpOld = await scratch.migrationsUpTo(15);
+    pool = await scratch.create("0016");
     await migrate(drizzle(pool), { migrationsFolder: tmpOld });
   }, 60_000);
 
   afterAll(async () => {
-    await pool.end();
-    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-    await admin.end();
-    await rm(tmpOld, { recursive: true, force: true });
+    await scratch.cleanup();
   });
 
   it("maps meeting types and wifi/link visibility without losing rows", async () => {

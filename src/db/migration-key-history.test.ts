@@ -1,11 +1,9 @@
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { Pool } from "pg";
+import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { MIGRATIONS, ScratchDatabases } from "./scratch-db.js";
 
 /**
  * Wave 7 B14 migration 0021 (location_key_history, location_wifi_networks.security, location_key_holders.key_label):
@@ -13,37 +11,21 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  * bookkeeping (journal order, snapshot chain) is covered by migration-media-layer.test.ts for every entry.
  */
 
-const MIGRATIONS = path.resolve("src/db/migrations");
 const baseUrl = process.env.DATABASE_URL!;
 
 describe("migration 0021 key-history-wifi-security", () => {
-  let admin: Pool;
+  const scratch = new ScratchDatabases(baseUrl);
   let pool: Pool;
   let tmpOld: string;
-  let dbName: string;
 
   beforeAll(async () => {
-    admin = new Pool({ connectionString: baseUrl, max: 1 });
-    tmpOld = await mkdtemp(path.join(os.tmpdir(), "mv-mig-0021-"));
-    await cp(MIGRATIONS, tmpOld, { recursive: true });
-    const journalPath = path.join(tmpOld, "meta", "_journal.json");
-    const journal = JSON.parse(await readFile(journalPath, "utf8")) as { entries: Array<{ idx: number }> };
-    journal.entries = journal.entries.filter((e) => e.idx <= 20);
-    await writeFile(journalPath, JSON.stringify(journal));
-
-    dbName = `mv_mig_0021_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-    await admin.query(`CREATE DATABASE "${dbName}"`);
-    const url = new URL(baseUrl);
-    url.pathname = `/${dbName}`;
-    pool = new Pool({ connectionString: url.toString(), max: 2 });
+    tmpOld = await scratch.migrationsUpTo(20);
+    pool = await scratch.create("0021");
     await migrate(drizzle(pool), { migrationsFolder: tmpOld });
   }, 60_000);
 
   afterAll(async () => {
-    await pool.end();
-    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
-    await admin.end();
-    await rm(tmpOld, { recursive: true, force: true });
+    await scratch.cleanup();
   });
 
   it("marks password-less networks open, keeps the rest wpa, and seeds the history from the current key holders", async () => {
