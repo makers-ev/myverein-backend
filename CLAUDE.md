@@ -62,3 +62,17 @@ searching the repo. To build or rebuild it, use the `/graphify` skill
 default semantic-extraction backend (Gemini) needs its own API key and can
 break in environments without one; the `/graphify` skill instead runs
 semantic extraction through Claude itself, no separate key required.
+
+## Media security rule
+
+Every image or document upload and download goes through the central media
+security layer (see the vault's `Implementation Plan - MyVerein Wave 7`, B18,
+modelled on MyCouple's `Implementation Plan - Media-Zugriffskontrolle
+(Sicherheitsfix)`): the upload registry (`media_files`), keys instead of URLs
+in feature tables, short-lived **signed URLs issued only after the feature
+route's own permission check**, sensitive documents streamed only with
+authentication and an audit entry, central magic-byte/size/EXIF checks, quota,
+`Cache-Control: private`. Never persist or return a raw/public media URL, never
+add a feature-specific file-serving path, and never serve user files without
+going through that layer (the only exception is explicitly opted-in
+`public_opt_in` media). New upload features must extend the layer's tests.
