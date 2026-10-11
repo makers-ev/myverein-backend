@@ -9,7 +9,7 @@ import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plu
 import { organization as organizationTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
-import { ensureClubMember } from "../lib/club-members.js";
+import { ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
 import { logger } from "../lib/logger.js";
 import { notification, notificationTemplate } from "../db/schema/notifications.js";
 import { sendEmail } from "../lib/email.js";
@@ -154,6 +154,16 @@ export const auth = betterAuth({
             await ensureClubMember(db, addedMember);
           } catch (err) {
             logger.error({ err, memberId: addedMember.id }, "[auth] could not create club_members row for new member");
+          }
+        },
+        // Removing the account membership keeps the person as club member (FK ON DELETE SET NULL) but closes it
+        // (status ausgetreten + history) so no ghost "aktiv" member without account remains. /leave and user deletion
+        // fire no hook; there the same closing happens lazily (resolveClubMember, GET /club-members).
+        afterRemoveMember: async ({ organization: org }) => {
+          try {
+            await markDetachedMembersLeft(db, org.id);
+          } catch (err) {
+            logger.error({ err, clubId: org.id }, "[auth] could not close club_members row of removed member");
           }
         },
         afterAcceptInvitation: async ({ member: acceptedMember }) => {

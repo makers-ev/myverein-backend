@@ -53,6 +53,9 @@ export const clubMembers = pgTable(
       .notNull()
       .references(() => organization.id, { onDelete: "cascade" }),
     memberId: text("member_id").references(() => member.id, { onDelete: "set null" }),
+    // The user whose account was linked last. Survives the removal of the account membership (member_id becomes NULL)
+    // and lets a re-join of the same person reuse this row instead of creating a duplicate. NULL = never had an account.
+    lastUserId: text("last_user_id"),
     displayName: text("display_name").notNull(),
     firstName: text("first_name"),
     lastName: text("last_name"),
@@ -77,6 +80,7 @@ export const clubMembers = pgTable(
   (table) => [
     uniqueIndex("club_members_member_id_uidx").on(table.memberId),
     index("club_members_club_id_idx").on(table.clubId),
+    index("club_members_club_last_user_idx").on(table.clubId, table.lastUserId),
     index("club_members_club_status_idx").on(table.clubId, table.status),
     index("club_members_club_member_number_idx").on(table.clubId, table.memberNumber),
   ],

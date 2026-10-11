@@ -1,8 +1,8 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
 
 import { member, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { clubMembers, memberCategories, type ClubMemberRow, type MemberCategoryRow } from "../db/schema/club-members.js";
+import { clubMembers, clubMemberStatusHistory, LEFT_STATUSES, memberCategories, type ClubMemberRow, type MemberCategoryRow } from "../db/schema/club-members.js";
 import { nextMemberNumber } from "./member-number.js";
 import { NotFoundError } from "./errors.js";
 
@@ -74,6 +74,32 @@ export async function ensureClubMember(executor: DbExecutor, memberRow: MemberAc
     const account = defaults.user ?? (await tx.query.user.findFirst({ where: eq(user.id, memberRow.userId) }));
     if (!account) throw new NotFoundError("User not found");
 
+    // Re-join of a person whose account membership was removed earlier: reuse the old row (same member number and
+    // history) instead of creating a duplicate.
+    const detached = await tx.query.clubMembers.findFirst({
+      where: and(eq(clubMembers.clubId, memberRow.organizationId), eq(clubMembers.lastUserId, memberRow.userId), isNull(clubMembers.memberId)),
+      orderBy: (t, { desc }) => [desc(t.updatedAt)],
+    });
+    if (detached) {
+      const [relinked] = await tx
+        .update(clubMembers)
+        .set({ memberId: memberRow.id, status: "aktiv", leftAt: null, exitReason: null, updatedAt: new Date() })
+        .where(and(eq(clubMembers.id, detached.id), isNull(clubMembers.memberId)))
+        .returning();
+      if (relinked) {
+        await tx.insert(clubMemberStatusHistory).values({
+          clubMemberId: relinked.id,
+          fromStatus: detached.status,
+          toStatus: "aktiv",
+          fromCategoryId: detached.categoryId,
+          toCategoryId: detached.categoryId,
+          effectiveOn: new Date().toISOString().slice(0, 10),
+          reason: "Konto-Mitgliedschaft wiederhergestellt",
+        });
+        return relinked;
+      }
+    }
+
     await ensureDefaultCategories(memberRow.organizationId, tx);
     const category =
       (defaults.categoryKey ? await findCategoryByKey(tx, memberRow.organizationId, defaults.categoryKey) : null) ??
@@ -86,6 +112,7 @@ export async function ensureClubMember(executor: DbExecutor, memberRow: MemberAc
       .values({
         clubId: memberRow.organizationId,
         memberId: memberRow.id,
+        lastUserId: memberRow.userId,
         displayName: account.name,
         contactEmail: account.email,
         birthDate: defaults.birthDate ?? null,
@@ -115,9 +142,66 @@ export async function resolveClubMember(clubId: string, idParam: string, executo
     row = await executor.query.clubMembers.findFirst({ where: and(eq(clubMembers.id, idParam), eq(clubMembers.clubId, clubId)) });
   } else {
     row = await executor.query.clubMembers.findFirst({ where: and(eq(clubMembers.memberId, idParam), eq(clubMembers.clubId, clubId)) });
+    if (!row) {
+      // Repair: an account member of THIS club whose club_members row is missing (a join path bypassed the hook).
+      const account = await executor.query.member.findFirst({ where: and(eq(member.id, idParam), eq(member.organizationId, clubId)) });
+      if (account) row = await ensureClubMember(executor, account);
+    }
   }
   if (!row) throw new NotFoundError("Member not found");
+  // A row whose account membership was removed meanwhile (leave / user deletion do not fire a hook) is closed lazily.
+  if (row.memberId === null && row.lastUserId !== null && !LEFT_STATUSES.includes(row.status as never)) {
+    await markDetachedMembersLeft(executor, clubId);
+    row = (await executor.query.clubMembers.findFirst({ where: eq(clubMembers.id, row.id) })) ?? row;
+  }
   return row;
+}
+
+/**
+ * Closes club_members rows whose account membership no longer exists (removed, left, or the user was deleted):
+ * status `ausgetreten`, `left_at` today, reason + history entry. Rows that never had an account (`last_user_id IS NULL`,
+ * e.g. children created by the board) are untouched. Idempotent; returns the number of rows closed.
+ */
+export async function markDetachedMembersLeft(executor: DbExecutor, clubId?: string): Promise<number> {
+  return executor.transaction(async (tx) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const stale = await tx
+      .select({ id: clubMembers.id, status: clubMembers.status, categoryId: clubMembers.categoryId })
+      .from(clubMembers)
+      .where(
+        and(
+          isNull(clubMembers.memberId),
+          isNotNull(clubMembers.lastUserId),
+          notInArray(clubMembers.status, [...LEFT_STATUSES]),
+          clubId ? eq(clubMembers.clubId, clubId) : undefined,
+        ),
+      )
+      .for("update");
+    if (stale.length === 0) return 0;
+    await tx
+      .update(clubMembers)
+      .set({ status: "ausgetreten", leftAt: today, exitReason: DETACHED_REASON, updatedAt: new Date() })
+      .where(inArray(clubMembers.id, stale.map((r) => r.id)));
+    await tx.insert(clubMemberStatusHistory).values(
+      stale.map((r) => ({ clubMemberId: r.id, fromStatus: r.status, toStatus: "ausgetreten", fromCategoryId: r.categoryId, toCategoryId: r.categoryId, effectiveOn: today, reason: DETACHED_REASON })),
+    );
+    const closed = stale;
+    return closed.length;
+  });
+}
+
+export const DETACHED_REASON = "Konto-Mitgliedschaft entfernt";
+
+/** Per club: account members vs. club_members rows linked to an account. `missing` must be 0 (operational check). */
+export async function checkClubMemberConsistency(executor: DbExecutor, clubId?: string): Promise<Array<{ clubId: string; members: number; linked: number; missing: number }>> {
+  const result = await executor.execute<{ club_id: string; members: string; linked: string }>(sql`
+    SELECT m.organization_id AS club_id, count(*)::text AS members, count(cm.id)::text AS linked
+    FROM member m
+    LEFT JOIN club_members cm ON cm.member_id = m.id
+    ${clubId ? sql`WHERE m.organization_id = ${clubId}` : sql``}
+    GROUP BY m.organization_id
+    ORDER BY m.organization_id`);
+  return result.rows.map((r) => ({ clubId: r.club_id, members: Number(r.members), linked: Number(r.linked), missing: Number(r.members) - Number(r.linked) }));
 }
 
 /**

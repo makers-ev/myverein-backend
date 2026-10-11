@@ -25,11 +25,11 @@ export async function nextMemberNumber(tx: DbTransaction, clubId: string): Promi
 
   const abbr = clubAbbreviation(slug);
 
-  // Highest numeric suffix already handed out ("DEMO-0007" -> 7) or the plain `club_members` row count (account-less members included), whichever is larger: the
+  // Highest numeric suffix already handed out ("DEMO-0007" -> 7; at most 9 digits, longer suffixes are manual numbers and ignored so the cast can never overflow) or the plain `club_members` row count (account-less members included), whichever is larger: the
   // count alone would repeat a number once a member with a lower number was deleted.
   const stats = await tx.execute<{ count: string; max_suffix: string | null }>(sql`
     SELECT count(*)::text AS count,
-           max(substring(cm.member_number FROM '^' || ${abbr} || '-([0-9]+)$')::int)::text AS max_suffix
+           max(substring(cm.member_number FROM '^' || ${abbr} || '-([0-9]{1,9})$')::bigint)::text AS max_suffix
     FROM club_members cm
     WHERE cm.club_id = ${clubId}
   `);

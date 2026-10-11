@@ -19,8 +19,9 @@ import { clubRoles } from "../db/schema/club-roles.js";
 import { departments } from "../db/schema/departments.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { CLUB_ROLE_TYPES, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
-import { ensureClubMember, ensureDefaultCategories, findCategoryByKey, isUuid, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
+import { ensureClubMember, ensureDefaultCategories, findCategoryByKey, isUuid, markDetachedMembersLeft, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
+import { logger } from "../lib/logger.js";
 import { nextMemberNumber } from "../lib/member-number.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -142,6 +143,13 @@ const optText = (max: number) =>
     .nullable()
     .optional()
     .transform((v) => (v === "" ? null : v));
+/** Manually assigned member number: 1-50 characters, no control characters. */
+const memberNumberText = z
+  .string()
+  .trim()
+  .min(1)
+  .max(50)
+  .refine((v) => ![...v].some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127), { message: "must not contain control characters" });
 const optDate = z.string().date().nullable().optional();
 const optEmail = z
   .string()
@@ -286,7 +294,14 @@ clubMemberRoutes.get("/", async (c) => {
     .from(member)
     .leftJoin(clubMembers, eq(clubMembers.memberId, member.id))
     .where(and(eq(member.organizationId, clubId), isNull(clubMembers.id)));
-  for (const { row } of missing) await ensureClubMember(db, row);
+  for (const { row } of missing) {
+    try {
+      await ensureClubMember(db, row);
+    } catch (err) {
+      logger.error({ err, memberId: row.id, clubId }, "[club-members] could not repair missing club_members row");
+    }
+  }
+  await markDetachedMembersLeft(db, clubId).catch((err) => logger.error({ err, clubId }, "[club-members] could not close detached members"));
 
   const rows = await db.select().from(clubMembers).where(eq(clubMembers.clubId, clubId)).orderBy(asc(clubMembers.displayName), asc(clubMembers.id));
   return c.json({ data: await shapeClubMembers(rows, callerOf(c)) });
@@ -302,7 +317,7 @@ const createMemberSchema = z
     // Only "live" statuses can be assigned at creation; leaving the club goes through the exit workflow.
     status: z.enum(["interessent", "probe", "aktiv", "ruhend"]).optional(),
     joinedAt: z.string().date().optional(),
-    memberNumber: z.string().trim().min(1).max(50).optional(),
+    memberNumber: memberNumberText.optional(),
     birthDate: optDate,
     street: optText(200),
     postalCode: optText(20),
@@ -353,7 +368,7 @@ clubMemberRoutes.post("/", zValidator("json", createMemberSchema, validationHook
     return row!;
   });
 
-  return c.json({ data: await shapeOne(created, callerOf(c), true) }, 201);
+  return c.json({ data: await shapeOne(created, callerOf(c)) }, 201);
 });
 
 clubMemberRoutes.get("/:id", async (c) => {
@@ -366,13 +381,7 @@ const updateMemberSchema = z.object({
   firstName: optText(100),
   lastName: optText(100),
   // `memberNumber: null` clears the number, but only when the field is explicitly present in the body.
-  memberNumber: z
-    .string()
-    .trim()
-    .max(50)
-    .nullable()
-    .optional()
-    .transform((v) => (v === "" ? null : v)),
+  memberNumber: z.union([memberNumberText, z.literal("").transform(() => null), z.null()]).optional(),
   categoryId: z.string().uuid().optional(),
   // Older clients send the category key as `category`; categoryKey is the explicit alias.
   category: z.string().trim().min(1).max(50).optional(),
@@ -402,7 +411,7 @@ clubMemberRoutes.patch("/:id", zValidator("json", updateMemberSchema, validation
   const changes = definedOnly(fields);
 
   const updated = await db.transaction(async (tx) => {
-    if (typeof changes.memberNumber === "string" && (await memberNumberTaken(tx, clubId, changes.memberNumber, target.id))) {
+    if (typeof changes.memberNumber === "string" && changes.memberNumber !== target.memberNumber && (await memberNumberTaken(tx, clubId, changes.memberNumber, target.id))) {
       throw new ConflictError("Member number is already in use");
     }
     const [row] = await tx
@@ -420,7 +429,7 @@ clubMemberRoutes.patch("/:id", zValidator("json", updateMemberSchema, validation
     return row!;
   });
 
-  return c.json({ data: await shapeOne(updated, callerOf(c), true) });
+  return c.json({ data: await shapeOne(updated, callerOf(c)) });
 });
 
 // --- Department assignment ---------------------------------------------------
@@ -574,12 +583,16 @@ function shapeGuardianLink(link: GuardianLinkRow, ward: ClubMemberRow, guardian:
 
 clubMemberRoutes.get("/:id/guardians", async (c) => {
   const ward = await resolveClubMember(c.get("clubId"), c.req.param("id"));
+  const caller = callerOf(c);
   const rows = await db
     .select({ link: guardianLinks, guardian: clubMembers })
     .from(guardianLinks)
     .leftJoin(clubMembers, eq(clubMembers.memberId, guardianLinks.guardianMemberId))
     .where(eq(guardianLinks.wardClubMemberId, ward.id))
     .orderBy(asc(guardianLinks.createdAt), asc(guardianLinks.id));
+  // Names of a child's guardians are personal data: board with members:read_sensitive, or the guardian themself.
+  const isGuardianOfWard = rows.some((r) => r.link.guardianMemberId === caller.memberId);
+  if (!caller.canReadSensitive && !isGuardianOfWard) throw new ForbiddenError("Missing members:read_sensitive permission");
   return c.json({ data: rows.map((r) => shapeGuardianLink(r.link, ward, r.guardian)) });
 });
 
