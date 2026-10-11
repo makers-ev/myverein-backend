@@ -426,6 +426,17 @@ describe("meetings routes", () => {
       expect(res.status).toBe(403);
     });
 
+    it("rejects vote counts above 100000 or below 0 (422)", async () => {
+      for (const votes of [{ votesFor: 100001, votesAgainst: 0, votesAbstain: 0 }, { votesFor: 0, votesAgainst: 100001, votesAbstain: 0 }, { votesFor: 0, votesAgainst: 0, votesAbstain: -1 }]) {
+        const res = await app.request(`/meetings/${meetingId}/resolutions?clubId=${clubAId}`, {
+          method: "POST",
+          headers: { cookie: cookieA, "content-type": "application/json" },
+          body: JSON.stringify({ description: "Zu viele Stimmen", result: "angenommen", ...votes }),
+        });
+        expect(res.status).toBe(422);
+      }
+    });
+
     it("creates a resolution with meetings:write and lists it", async () => {
       const res = await app.request(`/meetings/${meetingId}/resolutions?clubId=${clubAId}`, {
         method: "POST",
@@ -625,6 +636,12 @@ describe("meetings routes", () => {
       expect((await patchRes({ result: "angenommen" })).status).toBe(422);
       expect((await patchRes({ correctionNote: "nur Vermerk" })).status).toBe(422);
       expect((await patchRes({ result: "angenommen", correctionNote: "Zaehlfehler" }, cookieA, "00000000-0000-4000-8000-000000000000")).status).toBe(404);
+    });
+
+    it("rejects vote counts above 100000 in a correction (422)", async () => {
+      expect((await patchRes({ votesAbstain: 100001, correctionNote: "Tippfehler" })).status).toBe(422);
+      expect((await patchRes({ votesFor: 100000, correctionNote: "Grenzwert" })).status).toBe(200);
+      expect((await patchRes({ votesFor: 5, correctionNote: "Zurueck" })).status).toBe(200);
     });
 
     it("corrects the resolution, stamps the Berichtigungsvermerk and audits the previous values", async () => {

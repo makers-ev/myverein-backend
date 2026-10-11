@@ -150,7 +150,7 @@ export async function storeUpload(input: StoreUploadInput): Promise<MediaFileRow
         .from(mediaFiles)
         .where(and(eq(mediaFiles.clubId, input.clubId), isNull(mediaFiles.deletedAt)));
       if (Number(used) + buffer.length > clubQuotaBytes()) {
-        throw new ValidationError("The storage quota of this club is exhausted", { code: "QUOTA_EXCEEDED" });
+        throw new ValidationError("The storage quota of this club is exhausted", { code: "QUOTA_EXCEEDED", details: { code: "club_quota" } });
       }
     }
     // Unclaimed uploads are capped per user so POST /media cannot be used as free storage (they are swept after a TTL).
@@ -162,7 +162,7 @@ export async function storeUpload(input: StoreUploadInput): Promise<MediaFileRow
         .where(and(eq(mediaFiles.uploadedBy, input.uploadedBy), eq(mediaFiles.ownerType, UNATTACHED_OWNER), isNull(mediaFiles.deletedAt)));
       const limits = unattachedLimits();
       if (files + 1 > limits.files || Number(bytes) + buffer.length > limits.bytes) {
-        throw new ValidationError("Too many unused uploads: attach or wait for the pending ones to expire", { code: "QUOTA_EXCEEDED" });
+        throw new ValidationError("Too many unused uploads: attach or wait for the pending ones to expire", { code: "QUOTA_EXCEEDED", details: { code: "unattached_cap" } });
       }
     }
     const [row] = await tx

@@ -194,7 +194,9 @@ describe("media routes and security layer", () => {
       const statuses = results.map((r) => r.status).sort();
       expect(statuses).toEqual([201, 201, 422, 422, 422]);
       const rejected = results.find((r) => r.status === 422)!;
-      expect(((await rejected.json()) as { error: { code: string } }).error.code).toBe("QUOTA_EXCEEDED");
+      const rejectedBody = (await rejected.json()) as { error: { code: string; details?: unknown } };
+      expect(rejectedBody.error.code).toBe("QUOTA_EXCEEDED");
+      expect(rejectedBody.error.details).toEqual({ code: "club_quota" });
 
       // Deleting a file gives the space back.
       const live = await db.select().from(mediaFiles).where(eq(mediaFiles.clubId, clubBId));
@@ -340,7 +342,9 @@ describe("media routes and security layer", () => {
       await uploadOk(clubAId, who.cookie, file(makePng(false), "2.png", "image/png"));
       const third = await uploadFile(clubAId, who.cookie, file(makePng(false), "3.png", "image/png"));
       expect(third.status).toBe(422);
-      expect(((await third.json()) as { error: { code: string } }).error.code).toBe("QUOTA_EXCEEDED");
+      const thirdBody = (await third.json()) as { error: { code: string; details?: unknown } };
+      expect(thirdBody.error.code).toBe("QUOTA_EXCEEDED");
+      expect(thirdBody.error.details).toEqual({ code: "unattached_cap" });
       // another (fresh) user is unaffected
       const other = await signUpAndVerify(`media-cap2-${suffix}@example.com`, "Cap User 2");
       userIds.push(other.userId);

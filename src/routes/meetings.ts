@@ -421,11 +421,14 @@ meetingRoutes.get("/:id/resolutions", async (c) => {
   return c.json({ data: rows });
 });
 
+// Upper bound for vote counts (no club has more members; guards against absurd values).
+const MAX_VOTES = 100000;
+
 const createResolutionSchema = z.object({
   description: z.string().min(1),
-  votesFor: z.number().int().min(0),
-  votesAgainst: z.number().int().min(0),
-  votesAbstain: z.number().int().min(0),
+  votesFor: z.number().int().min(0).max(MAX_VOTES),
+  votesAgainst: z.number().int().min(0).max(MAX_VOTES),
+  votesAbstain: z.number().int().min(0).max(MAX_VOTES),
   result: z.string().min(1),
 });
 
@@ -465,9 +468,9 @@ meetingRoutes.post(
 const correctResolutionSchema = z
   .object({
     description: z.string().min(1).optional(),
-    votesFor: z.number().int().min(0).optional(),
-    votesAgainst: z.number().int().min(0).optional(),
-    votesAbstain: z.number().int().min(0).optional(),
+    votesFor: z.number().int().min(0).max(MAX_VOTES).optional(),
+    votesAgainst: z.number().int().min(0).max(MAX_VOTES).optional(),
+    votesAbstain: z.number().int().min(0).max(MAX_VOTES).optional(),
     result: z.string().min(1).optional(),
     correctionNote: z.string().trim().min(1).max(2000),
   })
