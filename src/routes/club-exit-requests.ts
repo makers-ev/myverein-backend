@@ -14,6 +14,7 @@ import { loadClubSettings } from "../lib/club-settings.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { addDays, earliestExitDate } from "../lib/exit-notice.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
+import { assertExitAllowed } from "../lib/member-protection.js";
 import { effectiveStatus, isLeftStatus, todayBerlin, transitionMember } from "../lib/member-lifecycle.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -245,6 +246,7 @@ clubExitRequestRoutes.post("/", zValidator("json", createSchema, validationHook)
 
     const created = await db.transaction(async (tx) => {
       const row = await lockMember(tx, clubId, own.id);
+      await assertExitAllowed(tx, row, c.get("clubRoleTypes"));
       await assertCanLeave(tx, row, today);
       const [inserted] = await insertRequest(tx, {
         clubMemberId: row.id,
@@ -280,7 +282,9 @@ clubExitRequestRoutes.post("/", zValidator("json", createSchema, validationHook)
   }
 
   const result = await db.transaction(async (tx) => {
+    // Lock order everywhere in this file: member row first, then request rows.
     const row = await lockMember(tx, clubId, target.id);
+    await assertExitAllowed(tx, row, c.get("clubRoleTypes"));
     if (kind === "cancellation") await assertCanLeave(tx, row, today);
     else if (isLeftStatus(effectiveStatus(row, today))) throw new ConflictError("Member has already left the club");
 
@@ -356,6 +360,8 @@ clubExitRequestRoutes.post("/:id/approve", zValidator("json", approveSchema, val
 
   const loaded = await loadRequest(clubId, c.req.param("id"));
   if (loaded.request.status !== "pending") throw new ConflictError("Exit request has already been decided");
+  // Four eyes: the requester never decides their own request (board-recorded requests are created approved, never here).
+  if (loaded.request.requestedBy === actor.id) throw new ForbiddenError("You cannot approve your own request", { details: { code: "self_approval" } });
   const settings = await loadClubSettings(db, clubId);
 
   let effectiveOn: string;
@@ -371,7 +377,13 @@ clubExitRequestRoutes.post("/:id/approve", zValidator("json", approveSchema, val
   }
 
   const result = await db.transaction(async (tx) => {
-    // Claim first: only one concurrent decision can move the request out of 'pending'.
+    // Member row first (same order as create / withdraw), then the request.
+    const memberRow = await lockMember(tx, clubId, loaded.request.clubMemberId);
+    await assertExitAllowed(tx, memberRow, c.get("clubRoleTypes"));
+    if (loaded.request.kind === "cancellation" && hasScheduledExit(memberRow, today)) {
+      throw new ConflictError("An exit is already scheduled for this member", { details: { code: "exit_already_scheduled", leftAt: memberRow.leftAt } });
+    }
+    // Claim: only one concurrent decision can move the request out of 'pending'.
     const [claimed] = await tx
       .update(clubExitRequests)
       .set({ status: "approved", decidedBy: actor.id, decidedAt: new Date(), decisionNote: body.note?.trim() || null, effectiveOn })
@@ -446,7 +458,8 @@ clubExitRequestRoutes.post("/:id/withdraw", zValidator("json", withdrawSchema, v
   const today = todayBerlin();
 
   const loaded = await loadRequest(clubId, c.req.param("id"));
-  const isRequester = loaded.request.requestedBy === actor.id;
+  // The "requester" privilege belongs to the member's own cancellation; a request the board recorded for someone needs members:write.
+  const isRequester = loaded.request.requestedBy === actor.id && loaded.member.memberId === actor.id;
   if (!isRequester && !canWrite(c)) {
     // Someone concerned (the member) learns they may not; everybody else cannot tell the request exists.
     if (loaded.member.memberId === actor.id) throw new ForbiddenError("Only the requester or the board can withdraw this request");
@@ -455,12 +468,13 @@ clubExitRequestRoutes.post("/:id/withdraw", zValidator("json", withdrawSchema, v
   const settings = await loadClubSettings(db, clubId);
 
   const result = await db.transaction(async (tx) => {
+    const memberRow = await lockMember(tx, clubId, loaded.request.clubMemberId);
     const [current] = await tx.select().from(clubExitRequests).where(eq(clubExitRequests.id, loaded.request.id)).for("update");
     if (!current || !["pending", "approved"].includes(current.status)) throw new ConflictError("Exit request can no longer be withdrawn");
 
     if (current.status === "approved") {
       if (current.kind === "exclusion") throw new ConflictError("An exclusion cannot be withdrawn; reopen the member instead");
-      const row = await lockMember(tx, clubId, current.clubMemberId);
+      const row = memberRow;
       if (!hasScheduledExit(row, today)) throw new ConflictError("The exit is already effective; reopen the member instead");
       if (row.leftAt !== current.effectiveOn) throw new ConflictError("The scheduled exit does not belong to this request");
       // Sending the stored status again while an exit is scheduled takes the exit back (kind "cancel_exit").

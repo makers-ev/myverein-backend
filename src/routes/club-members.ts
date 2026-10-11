@@ -6,6 +6,7 @@ import { z } from "zod";
 import { member, organization, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { clubExitRequests } from "../db/schema/club-exit-requests.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import {
   clubMemberDepartments,
@@ -906,6 +907,13 @@ clubMemberRoutes.post("/:id/transition", zValidator("json", transitionSchema, va
     // Category first (share lock), then the member row inside transitionMember: same order as archiving.
     const category = await resolveCategory(tx, clubId, { categoryId: body.categoryId, categoryKey: body.categoryKey });
     const done = await transitionMember(tx, clubId, target.id, { toStatus: body.toStatus, category, effectiveOn: body.effectiveOn, reason: body.reason, reopen: body.reopen }, actor.id, today);
+    // A direct exit makes open exit requests of the member obsolete: close them instead of leaving them dangling.
+    if (body.toStatus !== undefined && isLeftStatus(body.toStatus) && done.kind !== "cancel_exit") {
+      await tx
+        .update(clubExitRequests)
+        .set({ status: "rejected", decidedBy: actor.id, decidedAt: new Date(), decisionNote: "Ersetzt durch direkte Statusänderung" })
+        .where(and(eq(clubExitRequests.clubMemberId, target.id), eq(clubExitRequests.status, "pending")));
+    }
     await tx.insert(auditLog).values({
       eventType: "club_member.transition",
       subjectId: target.id,
@@ -1220,7 +1228,7 @@ clubMemberRoutes.post("/:id/unlink", zValidator("json", z.object({ force: z.bool
   const clubId = c.get("clubId");
   if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
   const target = await resolveClubMember(clubId, c.req.param("id"));
-  const row = await unlinkAccount(clubId, target.id, c.get("membership").id, c.req.valid("json").force === true);
+  const row = await unlinkAccount(clubId, target.id, c.get("membership").id, c.req.valid("json").force === true, c.get("clubRoleTypes"));
   return c.json({ data: await shapeOne(row, callerOf(c)) });
 });
 

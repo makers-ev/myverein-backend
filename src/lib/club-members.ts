@@ -29,6 +29,9 @@ export function isUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
 
+/** Key of the advisory lock that serialises "link an invited account" with the repair paths of `ensureClubMember`. */
+export const accountLinkLockKey = (clubId: string, userId: string) => `account-link:${clubId}:${userId}`;
+
 /** Idempotently creates the five default categories for a club (existing keys are left untouched). */
 export async function ensureDefaultCategories(clubId: string, executor: DbExecutor = db): Promise<void> {
   await executor
@@ -88,6 +91,9 @@ export async function ensureClubMember(executor: DbExecutor, memberRow: MemberAc
   if (existing) return existing;
 
   return executor.transaction(async (tx) => {
+    // Waits while an invitation is being accepted for this account (lib/member-invites.ts holds the same lock between
+    // addMember and the link), then re-reads: the linked row is found instead of a second one being created.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${accountLinkLockKey(memberRow.organizationId, memberRow.userId)}, 0))`);
     const raced = await tx.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, memberRow.id) });
     if (raced) return raced;
 

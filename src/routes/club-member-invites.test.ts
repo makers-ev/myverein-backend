@@ -14,6 +14,11 @@ import { clubRoles } from "../db/schema/club-roles.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { toAppError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
+import { pool } from "../db/client.js";
+import { accountLinkLockKey, ensureClubMember } from "../lib/club-members.js";
+import { inviteLinkContext } from "../lib/invite-context.js";
+import { guardianLinks } from "../db/schema/guardian-links.js";
+import { departments } from "../db/schema/departments.js";
 
 const sent = vi.hoisted(() => ({ mails: [] as Array<{ to: string; subject: string; html: string }>, fail: false }));
 vi.mock("../lib/email.js", () => ({
@@ -455,6 +460,71 @@ describe("account linking by invitation (B4)", () => {
     it("a member without account cannot be unlinked (409)", async () => {
       const c = await child();
       expect((await call(founder, `/club-members/${c.id}/unlink`, { method: "POST", body: {} })).status).toBe(409);
+    });
+  });
+
+  describe("review fixes", () => {
+    async function linkedWith(label: string, roleType?: string) {
+      const invitee = await signUp(label);
+      userIds.push(invitee.userId);
+      const { token, clubMemberId } = await invited(invitee.email, `Name ${label}`);
+      const out = await data(await accept(invitee, token));
+      if (roleType) await db.insert(clubRoles).values({ memberId: out.memberId, roleType });
+      return { invitee, clubMemberId, accountId: out.memberId as string };
+    }
+
+    it("unlinking a board member needs roles:write (also with force); the warning lists what disappears", async () => {
+      const secretary = await join("fix-secretary", "schriftfuehrer");
+      const { clubMemberId } = await linkedWith("fix-board", "beisitzer");
+      const denied = await call(secretary, `/club-members/${clubMemberId}/unlink`, { method: "POST", body: { force: true } });
+      expect(denied.status).toBe(403);
+      expect(((await body(denied)).error.details as Json).code).toBe("board_protected");
+      const warn = await call(founder, `/club-members/${clubMemberId}/unlink`, { method: "POST", body: {} });
+      expect(warn.status).toBe(409);
+      expect(((await body(warn)).error.details as Json)).toMatchObject({ code: "account_has_open_items", roles: 1, openLoans: 0, keys: 0, guardianLinks: 0, departmentsLed: 0, eventRsvps: 0, meetingInvites: 0 });
+      expect((await call(founder, `/club-members/${clubMemberId}/unlink`, { method: "POST", body: { force: true } })).status).toBe(200);
+    });
+
+    it("guardian links and led departments are part of the warning", async () => {
+      const { clubMemberId, accountId } = await linkedWith("fix-links");
+      const kid = await child();
+      await db.insert(guardianLinks).values({ guardianMemberId: accountId, wardClubMemberId: kid.id });
+      await db.insert(departments).values({ clubId: club, name: `Abteilung ${suffix}`, leadMemberId: accountId });
+      const warn = await call(founder, `/club-members/${clubMemberId}/unlink`, { method: "POST", body: {} });
+      expect(warn.status).toBe(409);
+      expect(((await body(warn)).error.details as Json)).toMatchObject({ guardianLinks: 1, departmentsLed: 1 });
+    });
+
+    it("the repair path ensureClubMember waits for an accept in progress instead of creating a competing row", async () => {
+      const invitee = await signUp("fix-lock");
+      userIds.push(invitee.userId);
+      // account membership without club_members row, as it exists between addMember and the link
+      const created = (await inviteLinkContext.run({ clubMemberId: "x" }, () => auth.api.addMember({ body: { userId: invitee.userId, organizationId: club, role: "member" } })))!;
+      expect(await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, created.id) })).toBeUndefined();
+
+      const holder = await pool.connect();
+      await holder.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [accountLinkLockKey(club, invitee.userId)]);
+      let done = false;
+      const repair = ensureClubMember(db, created).then((row) => {
+        done = true;
+        return row;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(done).toBe(false);
+      await holder.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [accountLinkLockKey(club, invitee.userId)]);
+      holder.release();
+      expect((await repair).memberId).toBe(created.id);
+    });
+
+    it("an accept racing with the list repair still ends with exactly one linked row", async () => {
+      const invitee = await signUp("fix-race");
+      userIds.push(invitee.userId);
+      const { token, clubMemberId } = await invited(invitee.email);
+      const results = await Promise.all([accept(invitee, token), ...Array.from({ length: 6 }, () => call(founder, "/club-members?pageSize=100"))]);
+      expect(results[0]!.status).toBe(200);
+      const account = (await db.query.member.findFirst({ where: and(eq(member.organizationId, club), eq(member.userId, invitee.userId)) }))!;
+      expect(await db.select().from(clubMembers).where(eq(clubMembers.memberId, account.id))).toHaveLength(1);
+      expect((await stored(clubMemberId)).memberId).toBe(account.id);
     });
   });
 

@@ -10,13 +10,23 @@ import { and, eq, gt, isNull, sql } from "drizzle-orm";
 
 import { auth } from "../auth/auth.js";
 import { member, session } from "../auth/auth-schema.js";
-import { db } from "../db/client.js";
+import { db, pool } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubMemberInvites, type ClubMemberInviteRow } from "../db/schema/club-member-invites.js";
+import { clubRoles } from "../db/schema/club-roles.js";
+import { departments } from "../db/schema/departments.js";
+import { eventAttendees } from "../db/schema/event-attendees.js";
+import { events } from "../db/schema/events.js";
+import { calendars } from "../db/schema/calendars.js";
+import { guardianLinks } from "../db/schema/guardian-links.js";
+import { meetingInvitees, meetings } from "../db/schema/meetings.js";
 import { clubMembers, clubMemberStatusHistory, type ClubMemberRow } from "../db/schema/club-members.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { locationKeyHolders, locations } from "../db/schema/locations.js";
-import { assertRejoinAllowed, type DbExecutor } from "./club-members.js";
+import { accountLinkLockKey, assertRejoinAllowed, type DbExecutor } from "./club-members.js";
+import { hasClubPermission } from "./club-permissions.js";
+import { isOwnerRole } from "./member-protection.js";
+import { BOARD_ROLE_TYPES } from "./club-permissions.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError } from "./errors.js";
 import { inviteLinkContext } from "./invite-context.js";
 import { logger } from "./logger.js";
@@ -29,7 +39,7 @@ export function inviteTtlDays(): number {
 }
 
 export function hashInviteToken(token: string): string {
-  return createHmac("sha256", process.env.BETTER_AUTH_SECRET ?? "").update(token).digest("hex");
+  return createHmac("sha256", process.env.BETTER_AUTH_SECRET!).update(token).digest("hex");
 }
 
 /** "Max Mustermann" -> "Max M."; a single name -> "M***". Enough for the invitee to recognise themself. */
@@ -112,7 +122,19 @@ export async function acceptInvite(token: string, account: AcceptingUser): Promi
   const { invite, row } = await findUsableInvite(token);
   // Accepts of ONE account in ONE club run one after the other, so two parallel accepts (e.g. two invitations to the same
   // address) deterministically end with the first linked and the second refused as "already a member" (single replica).
-  return serialized(`${row.clubId}:${account.id}`, () => acceptClaimed(invite, row, account));
+  return serialized(`${row.clubId}:${account.id}`, async () => {
+    // Session-level advisory lock per (club, account) around addMember + link: the repair paths (ensureClubMember, taken
+    // by GET /club-members, id resolution, ...) take the same lock and so cannot create a competing club_members row
+    // for the new account membership while it is not linked yet.
+    const lockClient = await pool.connect();
+    try {
+      await lockClient.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [accountLinkLockKey(row.clubId, account.id)]);
+      return await acceptClaimed(invite, row, account);
+    } finally {
+      await lockClient.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [accountLinkLockKey(row.clubId, account.id)]).catch(() => undefined);
+      lockClient.release();
+    }
+  });
 }
 
 const tails = new Map<string, Promise<unknown>>();
@@ -206,19 +228,47 @@ async function acceptClaimed(invite: ClubMemberInviteRow, row: ClubMemberRow, ac
   return { clubId, clubName: club?.name ?? null, clubMemberId: row.id, memberId: created.id };
 }
 
-/** Open loans and key holder entries of an account in a club (they disappear with the account membership). */
-async function openItemsOf(tx: DbExecutor, clubId: string, accountMemberId: string): Promise<{ openLoans: number; keys: number }> {
+/** Everything that disappears with the account membership (counts, for the `force` warning). */
+async function itemsBoundToAccount(tx: DbExecutor, clubId: string, accountMemberId: string) {
+  const count = sql<number>`count(*)::int`;
   const [loans] = await tx
-    .select({ n: sql<number>`count(*)::int` })
+    .select({ n: count })
     .from(inventoryLoans)
     .innerJoin(inventoryItems, eq(inventoryItems.id, inventoryLoans.itemId))
     .where(and(eq(inventoryLoans.memberId, accountMemberId), eq(inventoryItems.clubId, clubId), isNull(inventoryLoans.returnedAt)));
   const [keys] = await tx
-    .select({ n: sql<number>`count(*)::int` })
+    .select({ n: count })
     .from(locationKeyHolders)
     .innerJoin(locations, eq(locations.id, locationKeyHolders.locationId))
     .where(and(eq(locationKeyHolders.memberId, accountMemberId), eq(locations.clubId, clubId)));
-  return { openLoans: loans?.n ?? 0, keys: keys?.n ?? 0 };
+  const [guardians] = await tx
+    .select({ n: count })
+    .from(guardianLinks)
+    .innerJoin(clubMembers, eq(clubMembers.id, guardianLinks.wardClubMemberId))
+    .where(and(eq(guardianLinks.guardianMemberId, accountMemberId), eq(clubMembers.clubId, clubId)));
+  const [led] = await tx.select({ n: count }).from(departments).where(and(eq(departments.leadMemberId, accountMemberId), eq(departments.clubId, clubId)));
+  const [rsvps] = await tx
+    .select({ n: count })
+    .from(eventAttendees)
+    .innerJoin(events, eq(events.id, eventAttendees.eventId))
+    .innerJoin(calendars, eq(calendars.id, events.calendarId))
+    .where(and(eq(eventAttendees.memberId, accountMemberId), eq(calendars.clubId, clubId)));
+  const [invites] = await tx
+    .select({ n: count })
+    .from(meetingInvitees)
+    .innerJoin(meetings, eq(meetings.id, meetingInvitees.meetingId))
+    .where(and(eq(meetingInvitees.memberId, accountMemberId), eq(meetings.clubId, clubId)));
+  const roles = await tx.select({ roleType: clubRoles.roleType }).from(clubRoles).where(eq(clubRoles.memberId, accountMemberId));
+  return {
+    openLoans: loans?.n ?? 0,
+    keys: keys?.n ?? 0,
+    guardianLinks: guardians?.n ?? 0,
+    departmentsLed: led?.n ?? 0,
+    eventRsvps: rsvps?.n ?? 0,
+    meetingInvites: invites?.n ?? 0,
+    roles: roles.length,
+    roleTypes: roles.map((r) => r.roleType),
+  };
 }
 
 /**
@@ -231,7 +281,7 @@ async function openItemsOf(tx: DbExecutor, clubId: string, accountMemberId: stri
  * of the account go with it via their foreign keys, exactly like `removeMember`). Refuses (409) the caller's own
  * account, an owner account, and -- unless `force` -- an account with open loans / keys.
  */
-export async function unlinkAccount(clubId: string, clubMemberId: string, actorMemberId: string, force: boolean): Promise<ClubMemberRow> {
+export async function unlinkAccount(clubId: string, clubMemberId: string, actorMemberId: string, force: boolean, callerRoleTypes: readonly string[]): Promise<ClubMemberRow> {
   return db.transaction(async (tx) => {
     const [row] = await tx.select().from(clubMembers).where(and(eq(clubMembers.id, clubMemberId), eq(clubMembers.clubId, clubId))).for("update");
     if (!row) throw new NotFoundError("Member not found");
@@ -240,11 +290,19 @@ export async function unlinkAccount(clubId: string, clubMemberId: string, actorM
 
     const account = await tx.query.member.findFirst({ where: eq(member.id, row.memberId) });
     if (!account) throw new ConflictError("Member has no account");
-    if (account.role.split(",").map((r) => r.trim()).includes("owner")) throw new ConflictError("The owner account cannot be unlinked");
+    if (isOwnerRole(account.role)) throw new ConflictError("The owner account cannot be unlinked", { details: { code: "owner_protected" } });
 
-    const open = await openItemsOf(tx, clubId, account.id);
-    if (!force && (open.openLoans > 0 || open.keys > 0)) {
-      throw new ConflictError("The account still has open loans or keys; return them first or repeat with force", { details: { code: "account_has_open_items", ...open } });
+    const open = await itemsBoundToAccount(tx, clubId, account.id);
+    // Board accounts lose their roles with the link: only a caller with roles:write may do that (not even `force` helps).
+    if (open.roleTypes.some((r) => (BOARD_ROLE_TYPES as string[]).includes(r)) && !hasClubPermission(callerRoleTypes, "roles:write")) {
+      throw new ForbiddenError("Unlinking a board member requires the roles:write permission", { details: { code: "board_protected" } });
+    }
+    const { roleTypes: _roleTypes, ...counts } = open;
+    void _roleTypes;
+    if (!force && Object.values(counts).some((n) => n > 0)) {
+      throw new ConflictError("Unlinking deletes loans, key entries, roles, guardian links, led departments, RSVPs and meeting invitations of this account; remove them first or repeat with force", {
+        details: { code: "account_has_open_items", ...counts },
+      });
     }
 
     const [updated] = await tx.update(clubMembers).set({ accountUnlinkedAt: new Date(), updatedAt: new Date() }).where(eq(clubMembers.id, row.id)).returning();
@@ -263,7 +321,7 @@ export async function unlinkAccount(clubId: string, clubMemberId: string, actorM
     await tx.insert(auditLog).values({
       eventType: "club_member.unlink",
       subjectId: row.id,
-      payload: { clubId, accountMemberId: account.id, userId: account.userId, changedBy: actorMemberId, forced: force, ...open },
+      payload: { clubId, accountMemberId: account.id, userId: account.userId, changedBy: actorMemberId, forced: force, ...counts },
     });
     return { ...updated!, memberId: null };
   });

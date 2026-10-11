@@ -496,4 +496,89 @@ describe("exit workflow (B6)", () => {
       expect((await call(founder, "/club-exit-requests/not-a-uuid")).status).toBe(404);
     });
   });
+  // --- review fixes (protection, lock order, four eyes) --------------------------------------------------
+
+  describe("review fixes", () => {
+    let secretary: Actor; // schriftfuehrer: members:write, no roles:write
+    beforeAll(async () => {
+      await setSettings({ noticePeriodDays: 0, noticeMode: "immediate" });
+      secretary = await join("rf-secretary", "schriftfuehrer");
+    });
+
+    it("the club owner can neither be excluded nor cancelled by the board nor cancel themself (409 owner_protected)", async () => {
+      const attempts = [
+        request(secretary, { clubMemberId: founder.clubMemberId, kind: "exclusion", reason: "Putsch" }),
+        request(secretary, { clubMemberId: founder.clubMemberId, kind: "cancellation" }),
+        request(founder, {}),
+      ];
+      for (const res of await Promise.all(attempts)) {
+        expect(res.status).toBe(409);
+        expect(((await body(res)).error.details as Json).code).toBe("owner_protected");
+      }
+      expect((await call(founder, "/club-members/me")).status).toBe(200);
+    });
+
+    it("a chairperson (vorsitz) is only removable with roles:write, also in the approve path; four eyes on approval", async () => {
+      const chair = await join("rf-chair", "vorsitz");
+      const denied = await request(secretary, { clubMemberId: chair.clubMemberId, kind: "exclusion", reason: "Streit" });
+      expect(denied.status).toBe(403);
+      expect(((await body(denied)).error.details as Json).code).toBe("board_protected");
+      expect((await request(secretary, { clubMemberId: chair.clubMemberId, kind: "cancellation" })).status).toBe(403);
+
+      const own = await data(await request(chair, {}));
+      expect(own.status).toBe("pending");
+      // nobody approves their own request, even with members:write
+      const self = await call(chair, `/club-exit-requests/${own.id}/approve`, { method: "POST", body: {} });
+      expect(self.status).toBe(403);
+      expect(((await body(self)).error.details as Json).code).toBe("self_approval");
+      // a secretary without roles:write cannot approve it either; the owner/vorsitz can
+      const viaSecretary = await call(secretary, `/club-exit-requests/${own.id}/approve`, { method: "POST", body: {} });
+      expect(viaSecretary.status).toBe(403);
+      expect(((await body(viaSecretary)).error.details as Json).code).toBe("board_protected");
+      expect((await call(founder, `/club-exit-requests/${own.id}/approve`, { method: "POST", body: {} })).status).toBe(200);
+    });
+
+    it("an authorised caller (roles:write) may exclude a non-owner chairperson", async () => {
+      const chair = await join("rf-chair2", "stellv_vorsitz");
+      expect((await request(founder, { clubMemberId: chair.clubMemberId, kind: "exclusion", reason: "Satzungsverstoss" })).status).toBe(201);
+    });
+
+    it("approve refuses a member with an already scheduled exit (409) and a direct exit supersedes open requests", async () => {
+      const m = await join("rf-sched");
+      const req = await data(await request(m, {}));
+      await db.update(clubMembers).set({ leftAt: addDays(today(), 20) }).where(eq(clubMembers.id, m.clubMemberId));
+      const res = await call(founder, `/club-exit-requests/${req.id}/approve`, { method: "POST", body: {} });
+      expect(res.status).toBe(409);
+      expect(((await body(res)).error.details as Json).code).toBe("exit_already_scheduled");
+      await db.update(clubMembers).set({ leftAt: null }).where(eq(clubMembers.id, m.clubMemberId));
+
+      const direct = await call(founder, `/club-members/${m.clubMemberId}/transition`, { method: "POST", body: { toStatus: "ausgetreten", effectiveOn: addDays(today(), 10) } });
+      expect(direct.status).toBe(200);
+      const after = await db.query.clubExitRequests.findFirst({ where: eq(clubExitRequests.id, req.id) });
+      expect(after).toMatchObject({ status: "rejected", decisionNote: "Ersetzt durch direkte Statusänderung" });
+    });
+
+    it("the requester privilege only covers the own cancellation: a recorder who lost members:write can no longer withdraw", async () => {
+      const board = await join("rf-recorder", "schriftfuehrer");
+      const m = await join("rf-recorded");
+      const rec = await data(await request(board, { clubMemberId: m.clubMemberId, kind: "cancellation", effectiveOn: addDays(today(), 30) }));
+      await db.delete(clubRoles).where(eq(clubRoles.memberId, board.memberId));
+      expect((await call(board, `/club-exit-requests/${rec.id}/withdraw`, { method: "POST", body: {} })).status).toBe(404);
+      expect((await call(founder, `/club-exit-requests/${rec.id}/withdraw`, { method: "POST", body: {} })).status).toBe(200);
+    });
+
+    it("exclusion, approve, withdraw and direct transition in parallel on one member never fail with 500 (one lock order)", async () => {
+      for (let i = 0; i < 4; i++) {
+        const m = await join(`rf-lock${i}`);
+        const req = await data(await request(m, {}));
+        const results = await Promise.all([
+          call(founder, `/club-exit-requests/${req.id}/approve`, { method: "POST", body: { effectiveOn: addDays(today(), 5) } }),
+          call(m, `/club-exit-requests/${req.id}/withdraw`, { method: "POST", body: {} }),
+          request(founder, { clubMemberId: m.clubMemberId, kind: "exclusion", reason: "parallel" }),
+          call(founder, `/club-members/${m.clubMemberId}/transition`, { method: "POST", body: { toStatus: "ausgetreten", effectiveOn: addDays(today(), 7) } }),
+        ]);
+        for (const res of results) expect([200, 201, 403, 404, 409, 422], String(res.status)).toContain(res.status);
+      }
+    });
+  });
 });
