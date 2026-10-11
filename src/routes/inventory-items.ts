@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { clubSettings } from "../db/schema/club-settings.js";
 import { inventoryDamageReports, inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { locations } from "../db/schema/locations.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
@@ -206,6 +207,12 @@ inventoryItemRoutes.post(
     const body = c.req.valid("json");
 
     await loadClubInventoryItem(id, clubId);
+
+    // Self-service borrowing can be switched off per club (club_settings.allow_self_loans, default true); inventory:write holders are exempt.
+    const settings = await db.query.clubSettings.findFirst({ where: eq(clubSettings.clubId, clubId) });
+    if (settings && !settings.allowSelfLoans && !hasClubPermission(c.get("clubRoleTypes"), "inventory:write")) {
+      throw new ForbiddenError("Self-service borrowing is disabled for this club");
+    }
 
     const [row] = await db
       .insert(inventoryLoans)

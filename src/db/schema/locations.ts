@@ -3,6 +3,10 @@ import { pgTable, text, timestamp, uuid, numeric, index, uniqueIndex } from "dri
 
 import { member, organization } from "../../auth/auth-schema.js";
 
+/** Visibility level of a wifi network / link: gast < mitglied < vorstand (see routes/locations.ts). */
+export const LOCATION_VISIBILITIES = ["gast", "mitglied", "vorstand"] as const;
+export type LocationVisibility = (typeof LOCATION_VISIBILITIES)[number];
+
 /**
  * A physical venue owned/used by a club (clubhouse, sports field, storage
  * shed). See Data Model - MyVerein Backend §3 "locations".

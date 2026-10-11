@@ -115,6 +115,13 @@
       "breakpoints": true
     },
     {
+      "idx": 16,
+      "version": "7",
+      "when": 1791737171404,
+      "tag": "0016_roles-scoping",
+      "breakpoints": true
+    },
+    {
       "idx": 17,
       "version": "7",
       "when": 1791737365917,

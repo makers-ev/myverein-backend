@@ -1,5 +1,6 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, ne, or } from "drizzle-orm";
+import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 
@@ -7,7 +8,7 @@ import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
-import { meetingAttendance, meetingInvitees, meetingResolutions, meetings } from "../db/schema/meetings.js";
+import { MEETING_TYPES, meetingAttendance, meetingInvitees, meetingResolutions, meetings } from "../db/schema/meetings.js";
 import { computeAvailability, type AvailabilityInput } from "../lib/availability-match.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
@@ -21,10 +22,26 @@ meetingRoutes.use("*", rateLimit({ windowMs: 60_000, max: 60 }));
 meetingRoutes.use("*", sessionGuard);
 meetingRoutes.use("*", clubGuard);
 
-/** Loads a meeting scoped to `clubId`, 404s (not leaks) if it belongs to another club. */
-async function loadClubMeeting(id: string, clubId: string) {
+/** Board-level readers: meetings:write or meetings:read_board see every meeting of the club. */
+function canReadAllMeetings(roleTypes: readonly string[]) {
+  return hasClubPermission(roleTypes, "meetings:write") || hasClubPermission(roleTypes, "meetings:read_board");
+}
+
+/**
+ * Loads a meeting scoped to the caller's club AND to what the caller may read, 404s (never 403, never leaks
+ * existence) otherwise. Read scoping (B8): a `vorstandssitzung` is only visible to invitees and to
+ * meetings:write / meetings:read_board; `mitgliederversammlung` and `sonstige` are visible to every member.
+ */
+async function loadClubMeeting(c: Context<ClubEnv>, id: string) {
+  const clubId = c.get("clubId");
   const row = await db.query.meetings.findFirst({ where: and(eq(meetings.id, id), eq(meetings.clubId, clubId)) });
   if (!row) throw new NotFoundError("Meeting not found");
+  if (row.type === "vorstandssitzung" && !canReadAllMeetings(c.get("clubRoleTypes"))) {
+    const invited = await db.query.meetingInvitees.findFirst({
+      where: and(eq(meetingInvitees.meetingId, id), eq(meetingInvitees.memberId, c.get("membership").id)),
+    });
+    if (!invited) throw new NotFoundError("Meeting not found");
+  }
   return row;
 }
 
@@ -33,8 +50,19 @@ async function loadClubMeeting(id: string, clubId: string) {
 meetingRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
 
+  // Vorstandssitzungen are filtered out unless the caller is board-level or invited.
+  const visible = canReadAllMeetings(c.get("clubRoleTypes"))
+    ? undefined
+    : or(
+        ne(meetings.type, "vorstandssitzung"),
+        inArray(
+          meetings.id,
+          db.select({ id: meetingInvitees.meetingId }).from(meetingInvitees).where(eq(meetingInvitees.memberId, c.get("membership").id)),
+        ),
+      );
+
   const rows = await db.query.meetings.findMany({
-    where: eq(meetings.clubId, clubId),
+    where: and(eq(meetings.clubId, clubId), visible),
     // Postgres sorts NULLS LAST on ASC by default, so still-scheduling
     // meetings (scheduledAt = null, i.e. Terminfindung) land at the end.
     orderBy: (m, { asc }) => [asc(m.scheduledAt), asc(m.createdAt)],
@@ -44,14 +72,13 @@ meetingRoutes.get("/", async (c) => {
 });
 
 meetingRoutes.get("/:id", async (c) => {
-  const clubId = c.get("clubId");
   const id = c.req.param("id");
-  const row = await loadClubMeeting(id, clubId);
+  const row = await loadClubMeeting(c, id);
   return c.json({ data: row });
 });
 
 const createMeetingSchema = z.object({
-  type: z.string().min(1),
+  type: z.enum(MEETING_TYPES),
   title: z.string().min(1).max(300),
   scheduledAt: z.string().datetime({ offset: true }).optional(),
   agenda: z.string().optional(),
@@ -91,7 +118,7 @@ meetingRoutes.post(
 );
 
 const updateMeetingSchema = z.object({
-  type: z.string().min(1).optional(),
+  type: z.enum(MEETING_TYPES).optional(),
   title: z.string().min(1).max(300).optional(),
   scheduledAt: z.string().datetime({ offset: true }).nullable().optional(),
   agenda: z.string().nullable().optional(),
@@ -112,7 +139,7 @@ meetingRoutes.patch(
     }
     const id = c.req.param("id");
     const body = c.req.valid("json");
-    await loadClubMeeting(id, clubId);
+    await loadClubMeeting(c, id);
 
     const [row] = await db
       .update(meetings)
@@ -137,7 +164,7 @@ meetingRoutes.delete("/:id", async (c) => {
     throw new ForbiddenError("Missing meetings:write permission");
   }
   const id = c.req.param("id");
-  await loadClubMeeting(id, clubId);
+  await loadClubMeeting(c, id);
 
   await db.delete(meetings).where(eq(meetings.id, id));
   await db.insert(auditLog).values({ eventType: "meeting.delete", subjectId: id, payload: { clubId } });
@@ -150,9 +177,8 @@ meetingRoutes.delete("/:id", async (c) => {
 // (before scheduledAt is set) and zu-/absage tracking afterwards.
 
 meetingRoutes.get("/:id/invitees", async (c) => {
-  const clubId = c.get("clubId");
   const id = c.req.param("id");
-  await loadClubMeeting(id, clubId);
+  await loadClubMeeting(c, id);
 
   const rows = await db.query.meetingInvitees.findMany({ where: eq(meetingInvitees.meetingId, id) });
   return c.json({ data: rows });
@@ -172,7 +198,7 @@ meetingRoutes.post(
       throw new ForbiddenError("Missing meetings:write permission");
     }
     const id = c.req.param("id");
-    await loadClubMeeting(id, clubId);
+    await loadClubMeeting(c, id);
     const { memberId } = c.req.valid("json");
 
     const memberRow = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
@@ -199,7 +225,7 @@ meetingRoutes.delete("/:id/invitees/:memberId", async (c) => {
   }
   const id = c.req.param("id");
   const memberId = c.req.param("memberId");
-  await loadClubMeeting(id, clubId);
+  await loadClubMeeting(c, id);
 
   const existing = await db.query.meetingInvitees.findFirst({
     where: and(eq(meetingInvitees.meetingId, id), eq(meetingInvitees.memberId, memberId)),
@@ -227,7 +253,7 @@ meetingRoutes.patch(
     const clubId = c.get("clubId");
     const membership = c.get("membership");
     const id = c.req.param("id");
-    await loadClubMeeting(id, clubId);
+    await loadClubMeeting(c, id);
     const { response } = c.req.valid("json");
 
     const existing = await db.query.meetingInvitees.findFirst({
@@ -246,9 +272,8 @@ meetingRoutes.patch(
 // --- Terminfindung overlap: meeting-scoped convenience over /availability/overlap ---
 
 meetingRoutes.get("/:id/overlap", async (c) => {
-  const clubId = c.get("clubId");
   const id = c.req.param("id");
-  await loadClubMeeting(id, clubId);
+  await loadClubMeeting(c, id);
 
   const candidatesParam = c.req.query("candidates");
   if (!candidatesParam) throw new ValidationError("candidates query param is required");
@@ -296,19 +321,21 @@ meetingRoutes.get("/:id/overlap", async (c) => {
 // --- Attendance --------------------------------------------------------------
 
 meetingRoutes.get("/:id/attendance", async (c) => {
-  const clubId = c.get("clubId");
   const id = c.req.param("id");
-  await loadClubMeeting(id, clubId);
+  await loadClubMeeting(c, id);
 
   const rows = await db.query.meetingAttendance.findMany({ where: eq(meetingAttendance.meetingId, id) });
   return c.json({ data: rows });
 });
 
+// Partial-update semantics: only the fields an entry actually carries are written, and only the members
+// listed in the batch are touched -- re-saving never resets unlisted members or omitted fields (B17).
+// `proxyForMemberId: null` clears a proxy (Vollmacht).
 const attendanceEntrySchema = z.object({
   memberId: z.string().min(1),
-  present: z.boolean(),
+  present: z.boolean().optional(),
   hasVotingRight: z.boolean().optional(),
-  proxyForMemberId: z.string().min(1).optional(),
+  proxyForMemberId: z.string().min(1).nullable().optional(),
 });
 const attendanceBatchSchema = z.array(attendanceEntrySchema).min(1);
 
@@ -324,8 +351,14 @@ meetingRoutes.patch(
       throw new ForbiddenError("Missing meetings:write permission");
     }
     const id = c.req.param("id");
-    await loadClubMeeting(id, clubId);
+    await loadClubMeeting(c, id);
     const entries = c.req.valid("json");
+
+    for (const entry of entries) {
+      if (entry.proxyForMemberId && entry.proxyForMemberId === entry.memberId) {
+        throw new ValidationError("A member cannot be their own proxy (proxyForMemberId must differ from memberId)");
+      }
+    }
 
     // Verify every referenced member (attendee AND proxy-giver) belongs to
     // the caller's club BEFORE writing anything -- a bad entry in the batch
@@ -338,19 +371,18 @@ meetingRoutes.patch(
 
     await db.transaction(async (tx) => {
       for (const entry of entries) {
-        const hasVotingRight = entry.hasVotingRight ?? true;
+        const patch = {
+          ...(entry.present !== undefined ? { present: entry.present } : {}),
+          ...(entry.hasVotingRight !== undefined ? { hasVotingRight: entry.hasVotingRight } : {}),
+          ...(entry.proxyForMemberId !== undefined ? { proxyForMemberId: entry.proxyForMemberId } : {}),
+        };
         await tx
           .insert(meetingAttendance)
-          .values({
-            meetingId: id,
-            memberId: entry.memberId,
-            present: entry.present,
-            hasVotingRight,
-            proxyForMemberId: entry.proxyForMemberId ?? null,
-          })
+          .values({ meetingId: id, memberId: entry.memberId, ...patch })
           .onConflictDoUpdate({
             target: [meetingAttendance.meetingId, meetingAttendance.memberId],
-            set: { present: entry.present, hasVotingRight, proxyForMemberId: entry.proxyForMemberId ?? null },
+            // An entry without any field is a no-op on an existing row (set it to itself to keep the statement valid).
+            set: Object.keys(patch).length > 0 ? patch : { meetingId: id },
           });
       }
 
@@ -372,9 +404,8 @@ meetingRoutes.patch(
 // --- Resolutions (Beschluesse) ------------------------------------------------
 
 meetingRoutes.get("/:id/resolutions", async (c) => {
-  const clubId = c.get("clubId");
   const id = c.req.param("id");
-  await loadClubMeeting(id, clubId);
+  await loadClubMeeting(c, id);
 
   const rows = await db.query.meetingResolutions.findMany({ where: eq(meetingResolutions.meetingId, id) });
   return c.json({ data: rows });
@@ -400,7 +431,7 @@ meetingRoutes.post(
       throw new ForbiddenError("Missing meetings:write permission");
     }
     const id = c.req.param("id");
-    await loadClubMeeting(id, clubId);
+    await loadClubMeeting(c, id);
     const body = c.req.valid("json");
 
     const [row] = await db
@@ -417,5 +448,68 @@ meetingRoutes.post(
     });
 
     return c.json({ data: row }, 201);
+  },
+);
+
+// Correction instead of silent overwrite: a Berichtigungsvermerk is mandatory, the previous values go to the audit log.
+const correctResolutionSchema = z
+  .object({
+    description: z.string().min(1).optional(),
+    votesFor: z.number().int().min(0).optional(),
+    votesAgainst: z.number().int().min(0).optional(),
+    votesAbstain: z.number().int().min(0).optional(),
+    result: z.string().min(1).optional(),
+    correctionNote: z.string().trim().min(1).max(2000),
+  })
+  .refine((v) => Object.keys(v).some((k) => k !== "correctionNote"), { message: "At least one resolution field must be changed" });
+
+meetingRoutes.patch(
+  "/:id/resolutions/:rid",
+  zValidator("json", correctResolutionSchema, (result) => {
+    if (!result.success) throw new ValidationError("Invalid request body", { details: result.error.issues });
+  }),
+  async (c) => {
+    const clubId = c.get("clubId");
+    const roleTypes = c.get("clubRoleTypes");
+    if (!hasClubPermission(roleTypes, "meetings:write")) {
+      throw new ForbiddenError("Missing meetings:write permission");
+    }
+    const id = c.req.param("id");
+    const rid = c.req.param("rid");
+    await loadClubMeeting(c, id);
+    const { correctionNote, ...changes } = c.req.valid("json");
+
+    const uuidOk = z.string().uuid().safeParse(rid).success;
+    const existing = uuidOk
+      ? await db.query.meetingResolutions.findFirst({ where: and(eq(meetingResolutions.id, rid), eq(meetingResolutions.meetingId, id)) })
+      : undefined;
+    if (!existing) throw new NotFoundError("Resolution not found");
+
+    const [row] = await db
+      .update(meetingResolutions)
+      .set({ ...changes, correctionNote, correctedAt: new Date(), correctedBy: c.get("user").id })
+      .where(eq(meetingResolutions.id, rid))
+      .returning();
+
+    await db.insert(auditLog).values({
+      eventType: "meeting_resolution.correct",
+      subjectId: rid,
+      payload: {
+        clubId,
+        meetingId: id,
+        correctionNote,
+        before: {
+          description: existing.description,
+          votesFor: existing.votesFor,
+          votesAgainst: existing.votesAgainst,
+          votesAbstain: existing.votesAbstain,
+          result: existing.result,
+          correctionNote: existing.correctionNote,
+        },
+        after: changes,
+      },
+    });
+
+    return c.json({ data: row });
   },
 );

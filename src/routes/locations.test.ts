@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -25,6 +27,11 @@ app.onError((err, c) => {
   const appError = toAppError(err);
   return c.json(appError.toJSON(), appError.status as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 503);
 });
+
+// The in-memory rate limiter keys on x-forwarded-for; give every request its own bucket.
+const realRequest = app.request.bind(app);
+app.request = ((input: Parameters<typeof realRequest>[0], init?: RequestInit) =>
+  realRequest(input, { ...init, headers: { "x-forwarded-for": randomUUID(), ...(init?.headers as Record<string, string> | undefined) } })) as typeof app.request;
 
 const suffix = Date.now();
 
@@ -423,6 +430,87 @@ describe("locations routes", () => {
       const listRes = await app.request(`/locations/${locationId}/links?clubId=${clubAId}`, { headers: { cookie: cookieBoard } });
       const listBody = (await listRes.json()) as { data: Array<{ id: string }> };
       expect(listBody.data.some((l) => l.id === visibleLinkId)).toBe(false);
+    });
+  });
+
+  // --- Visibility levels + access info (B8) ------------------------------------------------
+
+  describe("visibility levels gast / mitglied / vorstand and access info", () => {
+    let scopedLocationId: string;
+    const ids: Record<string, string> = {};
+    const call = (path: string, cookie: string, method = "GET", body?: unknown) =>
+      app.request(`/locations${path}?clubId=${clubAId}`, {
+        method,
+        headers: { cookie, "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    const labels = async (path: string, cookie: string, key: "label" | "title") =>
+      ((await (await call(path, cookie)).json()) as { data: Array<Record<string, string>> }).data.map((r) => r[key]);
+
+    beforeAll(async () => {
+      const loc = await call("", cookieBoard, "POST", { name: "Scoped Haus", accessNote: "Tuercode 4711" });
+      scopedLocationId = ((await loc.json()) as { data: { id: string } }).data.id;
+      await call(`/${scopedLocationId}/key-holders`, cookieBoard, "POST", { memberId: memberPlainId });
+      for (const level of ["gast", "mitglied", "vorstand"] as const) {
+        const wifi = await call(`/${scopedLocationId}/wifi`, cookieBoard, "POST", { label: `wifi-${level}`, ssid: `ssid-${level}`, password: `pw-${level}`, visibility: level });
+        expect(wifi.status).toBe(201);
+        ids[`wifi-${level}`] = ((await wifi.json()) as { data: { id: string; visibility: string; visibleToGuests: boolean } }).data.id;
+        const link = await call(`/${scopedLocationId}/links`, cookieBoard, "POST", { title: `link-${level}`, url: `https://example.com/${level}`, visibility: level });
+        expect(link.status).toBe(201);
+      }
+    });
+
+    it("rejects an unknown visibility level (422)", async () => {
+      const res = await call(`/${scopedLocationId}/wifi`, cookieBoard, "POST", { label: "x", ssid: "x", password: "x", visibility: "geheim" });
+      expect(res.status).toBe(422);
+    });
+
+    it("maps the legacy visibleToGuests flag (true -> gast, false -> mitglied) and derives it in responses", async () => {
+      const res = await call(`/${scopedLocationId}/wifi/${ids["wifi-vorstand"]}`, cookieBoard, "PATCH", { visibleToGuests: false });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { data: { visibility: string; visibleToGuests: boolean } }).data).toMatchObject({ visibility: "mitglied", visibleToGuests: false });
+      // restore for the following tests
+      const back = await call(`/${scopedLocationId}/wifi/${ids["wifi-vorstand"]}`, cookieBoard, "PATCH", { visibility: "vorstand" });
+      expect(((await back.json()) as { data: { visibility: string } }).data.visibility).toBe("vorstand");
+    });
+
+    it("guests see only 'gast', members 'gast' + 'mitglied', locations:write 'vorstand' too", async () => {
+      expect(await labels(`/${scopedLocationId}/wifi`, cookieGuest, "label")).toEqual(["wifi-gast"]);
+      expect((await labels(`/${scopedLocationId}/wifi`, cookiePlain, "label")).sort()).toEqual(["wifi-gast", "wifi-mitglied"]);
+      expect((await labels(`/${scopedLocationId}/wifi`, cookieBoard, "label")).sort()).toEqual(["wifi-gast", "wifi-mitglied", "wifi-vorstand"]);
+      expect(await labels(`/${scopedLocationId}/links`, cookieGuest, "title")).toEqual(["link-gast"]);
+      expect((await labels(`/${scopedLocationId}/links`, cookiePlain, "title")).sort()).toEqual(["link-gast", "link-mitglied"]);
+      expect((await labels(`/${scopedLocationId}/links`, cookieBoard, "title")).sort()).toEqual(["link-gast", "link-mitglied", "link-vorstand"]);
+      const plainBody = JSON.stringify(await (await call(`/${scopedLocationId}/wifi`, cookiePlain)).json());
+      expect(plainBody).not.toContain("pw-vorstand");
+    });
+
+    it("shows 'vorstand' entries with locations:read_access (abteilungsleitung) but without write rights", async () => {
+      const plainMember = await db.query.member.findFirst({ where: (m, { and, eq }) => and(eq(m.organizationId, clubAId), eq(m.userId, userPlainId)) });
+      await db.insert(clubRoles).values({ memberId: plainMember!.id, roleType: "abteilungsleitung" });
+      try {
+        expect((await labels(`/${scopedLocationId}/wifi`, cookiePlain, "label")).sort()).toEqual(["wifi-gast", "wifi-mitglied", "wifi-vorstand"]);
+        const detail = (await (await call(`/${scopedLocationId}`, cookiePlain)).json()) as { data: { accessNote: string; accessRestricted: boolean } };
+        expect(detail.data).toMatchObject({ accessNote: "Tuercode 4711", accessRestricted: false });
+      } finally {
+        await db.delete(clubRoles).where(eq(clubRoles.memberId, plainMember!.id));
+      }
+    });
+
+    it("hides access note and key holders from members without access rights (list and detail)", async () => {
+      const detail = (await (await call(`/${scopedLocationId}`, cookiePlain)).json()) as {
+        data: { accessNote: string | null; accessRestricted: boolean; keyHolders: unknown[] };
+      };
+      expect(detail.data).toMatchObject({ accessNote: null, accessRestricted: true, keyHolders: [] });
+      const guestDetail = (await (await call(`/${scopedLocationId}`, cookieGuest)).json()) as { data: { accessNote: string | null; keyHolders: unknown[] } };
+      expect(guestDetail.data).toMatchObject({ accessNote: null, keyHolders: [] });
+      const list = (await (await call("", cookiePlain)).json()) as { data: Array<{ id: string; accessNote: string | null }> };
+      expect(list.data.find((l) => l.id === scopedLocationId)!.accessNote).toBeNull();
+      expect(JSON.stringify(list)).not.toContain("Tuercode 4711");
+
+      const board = (await (await call(`/${scopedLocationId}`, cookieBoard)).json()) as { data: { accessNote: string; keyHolders: unknown[] } };
+      expect(board.data.accessNote).toBe("Tuercode 4711");
+      expect(board.data.keyHolders).toHaveLength(1);
     });
   });
 

@@ -1,6 +1,6 @@
 {
   "id": "34452243-5282-4886-a4f4-480b595d82b7",
-  "prevId": "b89ffeeb-9a82-4983-a0b5-ddae4ac467bc",
+  "prevId": "7a027f71-dce5-49dc-a3ea-5355f80156ee",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3754,12 +3754,12 @@
           "primaryKey": false,
           "notNull": false
         },
-        "visible_to_guests": {
-          "name": "visible_to_guests",
-          "type": "boolean",
+        "visibility": {
+          "name": "visibility",
+          "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": false
+          "default": "'mitglied'"
         },
         "created_at": {
           "name": "created_at",
@@ -3842,12 +3842,12 @@
           "primaryKey": false,
           "notNull": true
         },
-        "visible_to_guests": {
-          "name": "visible_to_guests",
-          "type": "boolean",
+        "visibility": {
+          "name": "visibility",
+          "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": false
+          "default": "'mitglied'"
         },
         "created_at": {
           "name": "created_at",
@@ -4345,6 +4345,24 @@
           "primaryKey": false,
           "notNull": true
         },
+        "correction_note": {
+          "name": "correction_note",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "corrected_at": {
+          "name": "corrected_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "corrected_by": {
+          "name": "corrected_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -4382,6 +4400,19 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "meeting_resolutions_corrected_by_user_id_fk": {
+          "name": "meeting_resolutions_corrected_by_user_id_fk",
+          "tableFrom": "meeting_resolutions",
+          "tableTo": "user",
+          "columnsFrom": [
+            "corrected_by"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
