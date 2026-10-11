@@ -271,11 +271,11 @@ describe("club registrations (Wave 6)", () => {
       const reg = await create(who, "Patch Verein", { legalForm: "e_v", registerCourt: "AG Hanau", registerNumber: "VR 9" });
       const patch = (body: object) => req(who, `/club-registrations/${reg.id}`, { method: "PATCH", headers: json, body: JSON.stringify(body) });
 
-      const ok = await patch({ city: "Gelnhausen", claimedRole: "schriftfuehrer" });
+      const ok = await patch({ city: "Gelnhausen", claimedRole: "stellv_vorsitz" });
       expect(ok.status).toBe(200);
       expect(((await ok.json()) as { data: { registration: Reg & { city: string; claimedRole: string; clubName: string } } }).data.registration).toMatchObject({
         city: "Gelnhausen",
-        claimedRole: "schriftfuehrer",
+        claimedRole: "stellv_vorsitz",
         clubName: "Patch Verein",
       });
       expect((await patch({ registerNumber: null })).status).toBe(422); // e_v still needs it

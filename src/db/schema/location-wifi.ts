@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, uuid, boolean, index } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, uuid, index } from "drizzle-orm/pg-core";
 
 import { locations } from "./locations.js";
 
@@ -21,7 +21,8 @@ export const locationWifiNetworks = pgTable(
     label: text("label").notNull(),
     ssid: text("ssid").notNull(),
     password: text("password").notNull(),
-    visibleToGuests: boolean("visible_to_guests").notNull().default(false),
+    // One of LOCATION_VISIBILITIES (Zod-validated). Replaces the old boolean visible_to_guests (migration 0016).
+    visibility: text("visibility").notNull().default("mitglied"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("location_wifi_networks_location_id_idx").on(table.locationId)],

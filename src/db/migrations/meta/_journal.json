@@ -113,6 +113,13 @@
       "when": 1791736670635,
       "tag": "0015_member-lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1791737171404,
+      "tag": "0016_roles-scoping",
+      "breakpoints": true
     }
   ]
 }

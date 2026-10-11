@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -26,6 +28,11 @@ app.onError((err, c) => {
   const appError = toAppError(err);
   return c.json(appError.toJSON(), appError.status as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 503);
 });
+
+// The in-memory rate limiter keys on x-forwarded-for; give every request its own bucket.
+const realRequest = app.request.bind(app);
+app.request = ((input: Parameters<typeof realRequest>[0], init?: RequestInit) =>
+  realRequest(input, { ...init, headers: { "x-forwarded-for": randomUUID(), ...(init?.headers as Record<string, string> | undefined) } })) as typeof app.request;
 
 const suffix = Date.now();
 
@@ -429,11 +436,228 @@ describe("meetings routes", () => {
       const body = (await res.json()) as { data: { id: string; result: string } };
       expect(body.data.result).toBe("angenommen");
 
-      const listRes = await app.request(`/meetings/${meetingId}/resolutions?clubId=${clubAId}`, { headers: { cookie: cookieSecond } });
+      const listRes = await app.request(`/meetings/${meetingId}/resolutions?clubId=${clubAId}`, { headers: { cookie: cookieA } });
       expect(listRes.status).toBe(200);
       const listBody = (await listRes.json()) as { data: Array<{ id: string }> };
       expect(listBody.data.some((r) => r.id === body.data.id)).toBe(true);
     });
+  });
+
+  // --- Type validation (B8/B17) -------------------------------------------------
+
+  it("rejects a free-text meeting type with 422 (controlled values only)", async () => {
+    const res = await app.request(`/meetings?clubId=${clubAId}`, {
+      method: "POST",
+      headers: { cookie: cookieA, "content-type": "application/json" },
+      body: JSON.stringify({ type: "ausschusssitzung", title: "Free text type" }),
+    });
+    expect(res.status).toBe(422);
+  });
+
+  // --- Read scoping (B8) ----------------------------------------------------------
+
+  describe("read scoping of Vorstandssitzungen", () => {
+    let mvId: string;
+    let sonstigeId: string;
+    let boardOnlyId: string;
+
+    async function post(path: string, cookie: string, method: string, body?: unknown) {
+      return app.request(`/meetings${path}?clubId=${clubAId}`, {
+        method,
+        headers: { cookie, "content-type": "application/json" },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    }
+
+    beforeAll(async () => {
+      const mv = await post("", cookieA, "POST", { type: "mitgliederversammlung", title: "Scoping MV" });
+      mvId = ((await mv.json()) as { data: { id: string } }).data.id;
+      const other = await post("", cookieA, "POST", { type: "sonstige", title: "Scoping Sonstige" });
+      sonstigeId = ((await other.json()) as { data: { id: string } }).data.id;
+      const board = await post("", cookieA, "POST", { type: "vorstandssitzung", title: "Scoping Vorstand (nobody invited)" });
+      boardOnlyId = ((await board.json()) as { data: { id: string } }).data.id;
+    });
+
+    it("hides a Vorstandssitzung from a plain member with 404 on detail and every sub-resource", async () => {
+      for (const path of ["", "/invitees", "/attendance", "/resolutions", "/overlap?candidates=2026-11-02T18:00:00Z"]) {
+        const sep = path.includes("?") ? "&" : "?";
+        const res = await app.request(`/meetings/${boardOnlyId}${path}${sep}clubId=${clubAId}`, { headers: { cookie: cookieSecond } });
+        expect(res.status, path).toBe(404);
+      }
+      const rsvp = await post(`/${boardOnlyId}/invitees/me`, cookieSecond, "PATCH", { response: "zugesagt" });
+      expect(rsvp.status).toBe(404);
+    });
+
+    it("filters the list: plain member sees Mitgliederversammlung + sonstige but no Vorstandssitzung", async () => {
+      const res = await app.request(`/meetings?clubId=${clubAId}`, { headers: { cookie: cookieSecond } });
+      expect(res.status).toBe(200);
+      const ids = ((await res.json()) as { data: Array<{ id: string; type: string }> }).data;
+      expect(ids.some((m) => m.id === mvId)).toBe(true);
+      expect(ids.some((m) => m.id === sonstigeId)).toBe(true);
+      expect(ids.some((m) => m.id === boardOnlyId)).toBe(false);
+    });
+
+    it("lets a plain member read a Mitgliederversammlung incl. attendance/resolutions", async () => {
+      for (const path of ["", "/attendance", "/resolutions", "/invitees"]) {
+        const res = await app.request(`/meetings/${mvId}${path}?clubId=${clubAId}`, { headers: { cookie: cookieSecond } });
+        expect(res.status, path).toBe(200);
+      }
+    });
+
+    it("shows the meeting writer everything and an invited member their invited Vorstandssitzung", async () => {
+      const writerList = await app.request(`/meetings?clubId=${clubAId}`, { headers: { cookie: cookieA } });
+      const writerIds = ((await writerList.json()) as { data: Array<{ id: string }> }).data.map((m) => m.id);
+      expect(writerIds).toContain(boardOnlyId);
+
+      const invite = await post(`/${boardOnlyId}/invitees`, cookieA, "POST", { memberId: memberSecondId });
+      expect(invite.status).toBe(201);
+
+      const detail = await app.request(`/meetings/${boardOnlyId}?clubId=${clubAId}`, { headers: { cookie: cookieSecond } });
+      expect(detail.status).toBe(200);
+      const list = await app.request(`/meetings?clubId=${clubAId}`, { headers: { cookie: cookieSecond } });
+      expect(((await list.json()) as { data: Array<{ id: string }> }).data.map((m) => m.id)).toContain(boardOnlyId);
+      const rsvp = await post(`/${boardOnlyId}/invitees/me`, cookieSecond, "PATCH", { response: "zugesagt" });
+      expect(rsvp.status).toBe(200);
+
+      const removed = await app.request(`/meetings/${boardOnlyId}/invitees/${memberSecondId}?clubId=${clubAId}`, {
+        method: "DELETE",
+        headers: { cookie: cookieA },
+      });
+      expect(removed.status).toBe(204);
+      const again = await app.request(`/meetings/${boardOnlyId}?clubId=${clubAId}`, { headers: { cookie: cookieSecond } });
+      expect(again.status).toBe(404);
+    });
+
+    it("lets meetings:read_board (beisitzer) read Vorstandssitzungen without writing", async () => {
+      await db.insert(clubRoles).values({ memberId: memberSecondId, roleType: "beisitzer" });
+      try {
+        const detail = await app.request(`/meetings/${boardOnlyId}?clubId=${clubAId}`, { headers: { cookie: cookieSecond } });
+        expect(detail.status).toBe(200);
+        const res = await post(`/${boardOnlyId}`, cookieSecond, "PATCH", { title: "nope" });
+        expect(res.status).toBe(403);
+      } finally {
+        await db.delete(clubRoles).where(eq(clubRoles.memberId, memberSecondId));
+      }
+    });
+
+    it("does not leak a meeting of another club (404)", async () => {
+      const res = await app.request(`/meetings/${boardOnlyId}?clubId=${clubBId}`, { headers: { cookie: cookieB } });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // --- Attendance: partial update + proxy (B17) ---------------------------------------
+
+  describe("attendance partial updates and proxies", () => {
+    let attMeetingId: string;
+    const att = (body: unknown, cookie = cookieA) =>
+      app.request(`/meetings/${attMeetingId}/attendance?clubId=${clubAId}`, {
+        method: "PATCH",
+        headers: { cookie, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const load = async () =>
+      ((await (await app.request(`/meetings/${attMeetingId}/attendance?clubId=${clubAId}`, { headers: { cookie: cookieA } })).json()) as {
+        data: Array<{ memberId: string; present: boolean; hasVotingRight: boolean; proxyForMemberId: string | null }>;
+      }).data;
+
+    beforeAll(async () => {
+      const res = await app.request(`/meetings?clubId=${clubAId}`, {
+        method: "POST",
+        headers: { cookie: cookieA, "content-type": "application/json" },
+        body: JSON.stringify({ type: "mitgliederversammlung", title: "Attendance partial" }),
+      });
+      attMeetingId = ((await res.json()) as { data: { id: string } }).data.id;
+    });
+
+    it("returns stored attendance on GET and only touches the members/fields that are sent", async () => {
+      expect((await att([{ memberId: memberAId, present: true, hasVotingRight: false }, { memberId: memberSecondId, present: true }])).status).toBe(200);
+      // Re-save only one member, only the present flag: the other member and the voting right stay untouched.
+      expect((await att([{ memberId: memberSecondId, present: false }])).status).toBe(200);
+
+      const rows = await load();
+      const a = rows.find((r) => r.memberId === memberAId)!;
+      const second = rows.find((r) => r.memberId === memberSecondId)!;
+      expect(a).toMatchObject({ present: true, hasVotingRight: false });
+      expect(second).toMatchObject({ present: false, hasVotingRight: true });
+    });
+
+    it("keeps an existing proxy when it is omitted, sets it, and clears it with null", async () => {
+      expect((await att([{ memberId: memberAId, proxyForMemberId: memberSecondId }])).status).toBe(200);
+      expect((await load()).find((r) => r.memberId === memberAId)).toMatchObject({ present: true, proxyForMemberId: memberSecondId });
+
+      expect((await att([{ memberId: memberAId, present: true }])).status).toBe(200);
+      expect((await load()).find((r) => r.memberId === memberAId)!.proxyForMemberId).toBe(memberSecondId);
+
+      expect((await att([{ memberId: memberAId, proxyForMemberId: null }])).status).toBe(200);
+      expect((await load()).find((r) => r.memberId === memberAId)!.proxyForMemberId).toBeNull();
+    });
+
+    it("rejects a self-proxy (422), a proxy from another club (404) and non-writers (403)", async () => {
+      expect((await att([{ memberId: memberAId, proxyForMemberId: memberAId }])).status).toBe(422);
+      expect((await att([{ memberId: memberAId, proxyForMemberId: memberBId }])).status).toBe(404);
+      expect((await att([{ memberId: memberAId, present: true }], cookieSecond)).status).toBe(403);
+    });
+  });
+
+  // --- Resolution correction (B17) -------------------------------------------------------
+
+  describe("PATCH /:id/resolutions/:rid", () => {
+    let resId: string;
+    const patchRes = (body: unknown, cookie = cookieA, rid = resId) =>
+      app.request(`/meetings/${meetingId}/resolutions/${rid}?clubId=${clubAId}`, {
+        method: "PATCH",
+        headers: { cookie, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+    beforeAll(async () => {
+      const res = await app.request(`/meetings/${meetingId}/resolutions?clubId=${clubAId}`, {
+        method: "POST",
+        headers: { cookie: cookieA, "content-type": "application/json" },
+        body: JSON.stringify({ description: "Satzungsaenderung", votesFor: 5, votesAgainst: 3, votesAbstain: 0, result: "abgelehnt" }),
+      });
+      resId = ((await res.json()) as { data: { id: string } }).data.id;
+    });
+
+    it("requires meetings:write (403), a correction note and at least one changed field (422)", async () => {
+      expect((await patchRes({ result: "angenommen", correctionNote: "Zaehlfehler" }, cookieSecond)).status).toBe(403);
+      expect((await patchRes({ result: "angenommen" })).status).toBe(422);
+      expect((await patchRes({ correctionNote: "nur Vermerk" })).status).toBe(422);
+      expect((await patchRes({ result: "angenommen", correctionNote: "Zaehlfehler" }, cookieA, "00000000-0000-4000-8000-000000000000")).status).toBe(404);
+    });
+
+    it("corrects the resolution, stamps the Berichtigungsvermerk and audits the previous values", async () => {
+      const res = await patchRes({ votesFor: 6, votesAgainst: 2, result: "angenommen", correctionNote: "Zaehlfehler im Protokoll" });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        data: { votesFor: number; result: string; correctionNote: string; correctedAt: string; correctedBy: string; description: string };
+      };
+      expect(body.data).toMatchObject({ votesFor: 6, result: "angenommen", correctionNote: "Zaehlfehler im Protokoll", correctedBy: userAId });
+      expect(body.data.description).toBe("Satzungsaenderung");
+      expect(body.data.correctedAt).toBeTruthy();
+
+      const audit = await db.query.auditLog.findFirst({ where: (a, { and, eq }) => and(eq(a.eventType, "meeting_resolution.correct"), eq(a.subjectId, resId)) });
+      expect((audit!.payload as { before: { result: string; votesFor: number } }).before).toMatchObject({ result: "abgelehnt", votesFor: 5 });
+    });
+  });
+
+  // --- scheduledAt via PATCH ---------------------------------------------------------------
+
+  it("lets meetings:write change scheduledAt via PATCH and rejects a plain member", async () => {
+    const res = await app.request(`/meetings/${meetingId}?clubId=${clubAId}`, {
+      method: "PATCH",
+      headers: { cookie: cookieA, "content-type": "application/json" },
+      body: JSON.stringify({ scheduledAt: "2027-01-15T19:00:00Z" }),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { data: { scheduledAt: string } }).data.scheduledAt).toBe("2027-01-15T19:00:00.000Z");
+    const denied = await app.request(`/meetings/${meetingId}?clubId=${clubAId}`, {
+      method: "PATCH",
+      headers: { cookie: cookieSecond, "content-type": "application/json" },
+      body: JSON.stringify({ scheduledAt: "2027-01-16T19:00:00Z" }),
+    });
+    expect(denied.status).toBe(403);
   });
 
   // --- Delete ----------------------------------------------------------------
@@ -445,7 +669,7 @@ describe("meetings routes", () => {
       const res = await app.request(`/meetings?clubId=${clubAId}`, {
         method: "POST",
         headers: { cookie: cookieA, "content-type": "application/json" },
-        body: JSON.stringify({ type: "ausschusssitzung", title: "To be deleted" }),
+        body: JSON.stringify({ type: "sonstige", title: "To be deleted" }),
       });
       const body = (await res.json()) as { data: { id: string } };
       deleteMeetingId = body.data.id;

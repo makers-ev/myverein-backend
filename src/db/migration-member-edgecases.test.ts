@@ -105,7 +105,7 @@ describe("migrations 0014/0015 edge cases", () => {
     await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS });
     expect(await snapshot()).toEqual(before);
     expect((await pool.query(`SELECT count(*) AS n FROM member_categories`)).rows[0].n).toBe(categories);
-    expect((await pool.query(`SELECT count(*) AS n FROM drizzle.__drizzle_migrations`)).rows[0].n).toBe("16");
+    expect((await pool.query(`SELECT count(*) AS n FROM drizzle.__drizzle_migrations`)).rows[0].n).toBe("17");
   });
 
   it("rolls back completely when the migration fails half-way (nothing is left half-migrated)", async () => {

@@ -18,7 +18,7 @@ import {
 import { clubRoles } from "../db/schema/club-roles.js";
 import { departments } from "../db/schema/departments.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
-import { CLUB_ROLE_TYPES, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
+import { ASSIGNABLE_ROLE_TYPES, IMPLICIT_ROLE_TYPE, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
 import { ensureClubMember, ensureDefaultCategories, findCategoryByKey, isUuid, markDetachedMembersLeft, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
@@ -497,7 +497,8 @@ clubMemberRoutes.delete("/:id/departments/:departmentId", async (c) => {
 // --- Role assignment (needs a linked account) ----------------------------------
 
 const assignRoleSchema = z.object({
-  roleType: z.enum(CLUB_ROLE_TYPES),
+  // `mitglied` is implicit (clubGuard) and cannot be assigned -> 422 via enum validation.
+  roleType: z.enum(ASSIGNABLE_ROLE_TYPES),
   departmentId: z.string().uuid().optional(),
   termEndsAt: z.string().date().optional(),
 });
@@ -505,7 +506,8 @@ const assignRoleSchema = z.object({
 clubMemberRoutes.get("/:id/roles", async (c) => {
   const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
   const rows = await db.query.clubRoles.findMany({ where: eq(clubRoles.memberId, requireAccount(row)) });
-  return c.json({ data: rows });
+  // `data` = stored (revocable) club_roles rows only; the implicit base role is listed separately.
+  return c.json({ data: rows, implicit: [IMPLICIT_ROLE_TYPE] });
 });
 
 clubMemberRoutes.post("/:id/roles", zValidator("json", assignRoleSchema, validationHook), async (c) => {
@@ -543,6 +545,7 @@ clubMemberRoutes.delete("/:id/roles/:roleId", async (c) => {
 
   const existing = isUuid(roleId) ? await db.query.clubRoles.findFirst({ where: and(eq(clubRoles.id, roleId), eq(clubRoles.memberId, memberId)) }) : undefined;
   if (!existing) throw new NotFoundError("Role assignment not found");
+  if (existing.roleType === IMPLICIT_ROLE_TYPE) throw new ConflictError("The implicit role mitglied cannot be revoked");
 
   await db.delete(clubRoles).where(eq(clubRoles.id, roleId));
 

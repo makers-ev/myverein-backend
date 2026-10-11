@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { IMPLICIT_ROLE_TYPE } from "../lib/club-permissions.js";
 import { BadRequestError, NotFoundError } from "../lib/errors.js";
 import type { SessionEnv } from "./session-guard.js";
 
@@ -28,7 +29,8 @@ export type ClubEnv = SessionEnv & {
  * `clubId` is read from (in order) a `:clubId` route param, an
  * `X-Club-Id` header, or a `clubId` query param -- routes mounted under a
  * club-scoped path use the param, one-off lookups can use the header/query.
- * A user who isn't a member of the requested club gets 404, never 403 --
+ * `clubRoleTypes` always starts with the implicit `mitglied` role (see
+ * club-permissions.ts). A user who isn't a member of the requested club gets 404, never 403 --
  * same "don't leak existence" convention as the rest of this backend (see
  * accounts.ts's ownership-scoping precedent).
  */
@@ -54,7 +56,13 @@ export const clubGuard = createMiddleware<ClubEnv>(async (c: Context, next: Next
 
   c.set("clubId", clubId);
   c.set("membership", membership);
-  c.set("clubRoleTypes", roleRows.map((row) => row.roleType));
+  // The implicit base role `mitglied` is added for every account member except
+  // external guests (guardians etc.); it is never stored in club_roles.
+  const roleTypes = new Set(roleRows.map((row) => row.roleType));
+  roleTypes.delete(IMPLICIT_ROLE_TYPE);
+  const effective = [...roleTypes];
+  if (membership.role !== "guest") effective.unshift(IMPLICIT_ROLE_TYPE);
+  c.set("clubRoleTypes", effective);
 
   await next();
 });

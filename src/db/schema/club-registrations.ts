@@ -6,8 +6,12 @@ import { organization, user } from "../../auth/auth-schema.js";
 export const CLUB_LEGAL_FORMS = ["e_v", "nicht_eingetragen", "sonstige"] as const;
 export type ClubLegalForm = (typeof CLUB_LEGAL_FORMS)[number];
 
-/** Board roles an applicant may claim; all hold members:write + roles:write (see lib/club-permissions.ts). */
-export const CLAIMABLE_ROLES = ["vorsitz", "stellv_vorsitz", "schriftfuehrer"] as const;
+/**
+ * Board roles an applicant may claim; all hold members:write + roles:write (see lib/club-permissions.ts).
+ * `schriftfuehrer` is deliberately NOT claimable: it lacks roles:write, so the approval would always
+ * fail with 422 after the review (B16). Decision: remove it here instead of widening its rights.
+ */
+export const CLAIMABLE_ROLES = ["vorsitz", "stellv_vorsitz"] as const;
 export type ClaimableRole = (typeof CLAIMABLE_ROLES)[number];
 
 export const REGISTRATION_STATUSES = ["draft", "pending", "needs_info", "approved", "rejected"] as const;

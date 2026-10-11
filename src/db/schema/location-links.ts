@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, uuid, boolean, index } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, uuid, index } from "drizzle-orm/pg-core";
 
 import { locations } from "./locations.js";
 
@@ -17,7 +17,8 @@ export const locationLinks = pgTable(
     title: text("title").notNull(),
     url: text("url").notNull(),
     icon: text("icon"),
-    visibleToGuests: boolean("visible_to_guests").notNull().default(false),
+    // One of LOCATION_VISIBILITIES (Zod-validated). Replaces the old boolean visible_to_guests (migration 0016).
+    visibility: text("visibility").notNull().default("mitglied"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("location_links_location_id_idx").on(table.locationId)],

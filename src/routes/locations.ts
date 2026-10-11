@@ -1,5 +1,6 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
+import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 
@@ -8,7 +9,7 @@ import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { locationLinks } from "../db/schema/location-links.js";
 import { locationWifiNetworks } from "../db/schema/location-wifi.js";
-import { locationKeyHolders, locations } from "../db/schema/locations.js";
+import { LOCATION_VISIBILITIES, locationKeyHolders, locations, type LocationRow, type LocationVisibility } from "../db/schema/locations.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
@@ -34,6 +35,40 @@ function requireLocationsWrite(roleTypes: readonly string[]) {
   }
 }
 
+/** True for roles that may see access info (key holders, access notes) and 'vorstand'-level wifi/links. */
+function canReadAccess(roleTypes: readonly string[]) {
+  return hasClubPermission(roleTypes, "locations:write") || hasClubPermission(roleTypes, "locations:read_access");
+}
+
+/**
+ * Visibility levels the caller may read: external guests only 'gast'; members 'gast' + 'mitglied';
+ * 'vorstand' additionally needs locations:write / locations:read_access (B8).
+ */
+function readableVisibilities(c: Context<ClubEnv>): LocationVisibility[] {
+  if (c.get("membership").role === "guest") return ["gast"];
+  return canReadAccess(c.get("clubRoleTypes")) ? [...LOCATION_VISIBILITIES] : ["gast", "mitglied"];
+}
+
+/** API shape of a wifi network / link: `visibility` is the source of truth, `visibleToGuests` is a derived legacy flag. */
+function withLegacyGuestFlag<T extends { visibility: string }>(row: T) {
+  return { ...row, visibleToGuests: row.visibility === "gast" };
+}
+
+/** Legacy clients send `visibleToGuests`; `visibility` wins if both are present. */
+function resolveVisibility(body: { visibility?: LocationVisibility; visibleToGuests?: boolean }): LocationVisibility | undefined {
+  if (body.visibility !== undefined) return body.visibility;
+  if (body.visibleToGuests === undefined) return undefined;
+  return body.visibleToGuests ? "gast" : "mitglied";
+}
+
+const visibilityField = z.enum(LOCATION_VISIBILITIES);
+
+/** Strips access info (access note) from a location when the caller lacks access rights; shape stays stable. */
+function shapeLocation(row: LocationRow, roleTypes: readonly string[]) {
+  if (canReadAccess(roleTypes)) return { ...row, accessRestricted: false };
+  return { ...row, accessNote: null, accessRestricted: true };
+}
+
 // --- Location CRUD -----------------------------------------------------------
 
 locationRoutes.get("/", async (c) => {
@@ -42,7 +77,7 @@ locationRoutes.get("/", async (c) => {
     where: eq(locations.clubId, clubId),
     orderBy: (l, { asc }) => [asc(l.name)],
   });
-  return c.json({ data: rows });
+  return c.json({ data: rows.map((row) => shapeLocation(row, c.get("clubRoleTypes"))) });
 });
 
 locationRoutes.get("/:id", async (c) => {
@@ -50,9 +85,13 @@ locationRoutes.get("/:id", async (c) => {
   const id = c.req.param("id");
 
   const row = await loadClubLocation(id, clubId);
-  const keyHolders = await db.query.locationKeyHolders.findMany({ where: eq(locationKeyHolders.locationId, id) });
+  const roleTypes = c.get("clubRoleTypes");
+  // Key holders are access info: only with locations:write / locations:read_access (otherwise an empty list + accessRestricted).
+  const keyHolders = canReadAccess(roleTypes)
+    ? await db.query.locationKeyHolders.findMany({ where: eq(locationKeyHolders.locationId, id) })
+    : [];
 
-  return c.json({ data: { ...row, keyHolders } });
+  return c.json({ data: { ...shapeLocation(row, roleTypes), keyHolders } });
 });
 
 const createLocationSchema = z.object({
@@ -225,23 +264,22 @@ locationRoutes.delete("/:id/key-holders/:memberId", async (c) => {
 
 locationRoutes.get("/:id/wifi", async (c) => {
   const clubId = c.get("clubId");
-  const membership = c.get("membership");
   const id = c.req.param("id");
 
   await loadClubLocation(id, clubId);
 
-  const conditions = [eq(locationWifiNetworks.locationId, id)];
-  if (membership.role === "guest") conditions.push(eq(locationWifiNetworks.visibleToGuests, true));
-
-  const rows = await db.query.locationWifiNetworks.findMany({ where: and(...conditions) });
-  return c.json({ data: rows });
+  const rows = await db.query.locationWifiNetworks.findMany({
+    where: and(eq(locationWifiNetworks.locationId, id), inArray(locationWifiNetworks.visibility, readableVisibilities(c))),
+  });
+  return c.json({ data: rows.map(withLegacyGuestFlag) });
 });
 
 const createWifiSchema = z.object({
   label: z.string().min(1).max(200),
   ssid: z.string().min(1).max(200),
   password: z.string().default(""), // empty = open network (QR uses T:nopass)
-  visibleToGuests: z.boolean().optional(),
+  visibility: visibilityField.optional(),
+  visibleToGuests: z.boolean().optional(), // legacy alias: true -> gast, false -> mitglied
 });
 
 locationRoutes.post(
@@ -265,7 +303,7 @@ locationRoutes.post(
         label: body.label,
         ssid: body.ssid,
         password: body.password,
-        visibleToGuests: body.visibleToGuests,
+        visibility: resolveVisibility(body),
       })
       .returning();
 
@@ -275,7 +313,7 @@ locationRoutes.post(
       payload: { clubId, locationId: id, label: row.label },
     });
 
-    return c.json({ data: row }, 201);
+    return c.json({ data: withLegacyGuestFlag(row) }, 201);
   },
 );
 
@@ -283,6 +321,7 @@ const updateWifiSchema = z.object({
   label: z.string().min(1).max(200).optional(),
   ssid: z.string().min(1).max(200).optional(),
   password: z.string().optional(),
+  visibility: visibilityField.optional(),
   visibleToGuests: z.boolean().optional(),
 });
 
@@ -308,7 +347,7 @@ locationRoutes.patch(
 
     const [row] = await db
       .update(locationWifiNetworks)
-      .set(body)
+      .set({ label: body.label, ssid: body.ssid, password: body.password, visibility: resolveVisibility(body) })
       .where(eq(locationWifiNetworks.id, wifiId))
       .returning();
 
@@ -318,7 +357,7 @@ locationRoutes.patch(
       payload: { clubId, locationId: id, label: row.label },
     });
 
-    return c.json({ data: row });
+    return c.json({ data: withLegacyGuestFlag(row) });
   },
 );
 
@@ -350,22 +389,21 @@ locationRoutes.delete("/:id/wifi/:wifiId", async (c) => {
 
 locationRoutes.get("/:id/links", async (c) => {
   const clubId = c.get("clubId");
-  const membership = c.get("membership");
   const id = c.req.param("id");
 
   await loadClubLocation(id, clubId);
 
-  const conditions = [eq(locationLinks.locationId, id)];
-  if (membership.role === "guest") conditions.push(eq(locationLinks.visibleToGuests, true));
-
-  const rows = await db.query.locationLinks.findMany({ where: and(...conditions) });
-  return c.json({ data: rows });
+  const rows = await db.query.locationLinks.findMany({
+    where: and(eq(locationLinks.locationId, id), inArray(locationLinks.visibility, readableVisibilities(c))),
+  });
+  return c.json({ data: rows.map(withLegacyGuestFlag) });
 });
 
 const createLinkSchema = z.object({
   title: z.string().min(1).max(200),
   url: z.string().url(),
   icon: z.string().optional(),
+  visibility: visibilityField.optional(),
   visibleToGuests: z.boolean().optional(),
 });
 
@@ -390,7 +428,7 @@ locationRoutes.post(
         title: body.title,
         url: body.url,
         icon: body.icon,
-        visibleToGuests: body.visibleToGuests,
+        visibility: resolveVisibility(body),
       })
       .returning();
 
@@ -400,7 +438,7 @@ locationRoutes.post(
       payload: { clubId, locationId: id, title: row.title },
     });
 
-    return c.json({ data: row }, 201);
+    return c.json({ data: withLegacyGuestFlag(row) }, 201);
   },
 );
 
@@ -408,6 +446,7 @@ const updateLinkSchema = z.object({
   title: z.string().min(1).max(200).optional(),
   url: z.string().url().optional(),
   icon: z.string().nullable().optional(),
+  visibility: visibilityField.optional(),
   visibleToGuests: z.boolean().optional(),
 });
 
@@ -431,7 +470,11 @@ locationRoutes.patch(
     });
     if (!existing) throw new NotFoundError("Link not found");
 
-    const [row] = await db.update(locationLinks).set(body).where(eq(locationLinks.id, linkId)).returning();
+    const [row] = await db
+      .update(locationLinks)
+      .set({ title: body.title, url: body.url, icon: body.icon, visibility: resolveVisibility(body) })
+      .where(eq(locationLinks.id, linkId))
+      .returning();
 
     await db.insert(auditLog).values({
       eventType: "location_link.update",
@@ -439,7 +482,7 @@ locationRoutes.patch(
       payload: { clubId, locationId: id, changes: body },
     });
 
-    return c.json({ data: row });
+    return c.json({ data: withLegacyGuestFlag(row) });
   },
 );
 
