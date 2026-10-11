@@ -18,7 +18,33 @@ You are the lead for this repo. Workflow for every task:
    gets reflected in the README's "API reference"/"Data model"/
    "Configuration" tables in the same change that adds it — the README is
    the technical overview of this repo and must never drift from the code.
-8. Summarize what was built at the end. Do NOT merge anything automatically.
+8. **Tick off the Feature List.** Every feature, fix or behaviour change you
+   deliver — however small — must be recorded in the vault's
+   `20_Products/MyVerein/Roadmaps/Feature List - MyVerein.md` (repo
+   `lpj-its-vault`): add a row or flip ⬜ → ✅ with platform and date, move
+   leftovers to "Weiterhin offen", and tick the matching task package in the
+   wave's `20_Products/MyVerein/PRDs/Implementation Plan - MyVerein Wave N.md`.
+   Do this as part of the same piece of work (a paired vault commit on a
+   branch of the same name). Also create or update the matching training
+   material in the vault's `20_Products/MyVerein/Schulung/` (template
+   `tpl-schulung`: where to find it on website/app, how it works, who may use
+   it, FAQ) and link it from `Schulung - Übersicht und Lernpfade`. A feature
+   is not done until it is ticked off and has its Schulung entry. If
+   the vault is not available in the session, say so explicitly in the summary
+   and list the exact Feature List entries that still need to be made.
+9. **All-in-one sanity check.** Before you summarize, think again about
+   whether what you built actually makes sense for MyVerein as an
+   **all-in-one club manager (everything digital except billing)**: Does it
+   remove a media break (Excel, WhatsApp, paper) or introduce a new one? Does
+   it work for every role involved (Mitglied, Vorstand, Abteilungsleitung,
+   Erziehungsberechtigte, members without an account)? Are rights
+   deny-by-default and the UI gated by `permissions`? Is the experience
+   coherent between website and app, and understandable for non-technical
+   volunteers (≤ 3 taps for core tasks, designed empty/loading/error states)?
+   Report gaps honestly in the summary and record them in the plan's
+   "Beitrag zum All-in-One-Ziel" section and the Feature List's
+   "Weiterhin offen".
+10. Summarize what was built at the end. Do NOT merge anything automatically.
 
 ## Available subagents in this repo
 
@@ -36,3 +62,17 @@ searching the repo. To build or rebuild it, use the `/graphify` skill
 default semantic-extraction backend (Gemini) needs its own API key and can
 break in environments without one; the `/graphify` skill instead runs
 semantic extraction through Claude itself, no separate key required.
+
+## Media security rule
+
+Every image or document upload and download goes through the central media
+security layer (see the vault's `Implementation Plan - MyVerein Wave 7`, B18,
+modelled on MyCouple's `Implementation Plan - Media-Zugriffskontrolle
+(Sicherheitsfix)`): the upload registry (`media_files`), keys instead of URLs
+in feature tables, short-lived **signed URLs issued only after the feature
+route's own permission check**, sensitive documents streamed only with
+authentication and an audit entry, central magic-byte/size/EXIF checks, quota,
+`Cache-Control: private`. Never persist or return a raw/public media URL, never
+add a feature-specific file-serving path, and never serve user files without
+going through that layer (the only exception is explicitly opted-in
+`public_opt_in` media). New upload features must extend the layer's tests.
