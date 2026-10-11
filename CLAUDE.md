@@ -18,6 +18,9 @@ You are the lead for this repo. Workflow for every task:
    gets reflected in the README's "API reference"/"Data model"/
    "Configuration" tables in the same change that adds it — the README is
    the technical overview of this repo and must never drift from the code.
+   This applies to **every work package, in the same commit** — not only at the
+   end of a wave. If the README does not yet describe your change, the work is
+   not done.
 8. **Tick off the Feature List.** Every feature, fix or behaviour change you
    deliver — however small — must be recorded in the vault's
    `20_Products/MyVerein/Roadmaps/Feature List - MyVerein.md` (repo
