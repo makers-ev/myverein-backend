@@ -10,6 +10,7 @@ import { organization as organizationTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { assertRejoinAllowed, ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
+import { recordKeyReturnsForRemovedAccount } from "../lib/key-returns.js";
 import { ConflictError } from "../lib/errors.js";
 import { inviteLinkContext } from "../lib/invite-context.js";
 import { logger } from "../lib/logger.js";
@@ -176,6 +177,14 @@ export const auth = betterAuth({
         // Removing the account membership keeps the person as club member (FK ON DELETE SET NULL) but closes it
         // (status ausgetreten + history) so no ghost "aktiv" member without account remains. /leave and user deletion
         // fire no hook; there the same closing happens lazily (resolveClubMember, GET /club-members).
+        // Keys the removed account still holds leave a `returned` history entry (the holder rows cascade away).
+        beforeRemoveMember: async ({ member: removing }) => {
+          try {
+            await recordKeyReturnsForRemovedAccount(db, removing.id, null);
+          } catch (err) {
+            logger.error({ err, memberId: removing.id }, "[auth] could not record key returns of removed member");
+          }
+        },
         afterRemoveMember: async ({ organization: org }) => {
           try {
             await markDetachedMembersLeft(db, org.id);

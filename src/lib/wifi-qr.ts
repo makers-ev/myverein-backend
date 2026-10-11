@@ -2,7 +2,9 @@ import type { WifiSecurity } from "../db/schema/location-wifi.js";
 
 /** Escapes the characters that have a meaning in the `WIFI:` QR payload (backslash, semicolon, comma, colon, quote). */
 function escapeWifiField(value: string): string {
-  return value.replace(/([\\;,:"])/g, "\\$1");
+  const escaped = value.replace(/([\\;,:"])/g, "\\$1");
+  // An all-hex value would be read as a raw hex key/SSID by the scanner; the spec wants it quoted to mean literal text.
+  return /^[0-9a-fA-F]+$/.test(value) ? `"${escaped}"` : escaped;
 }
 
 /**

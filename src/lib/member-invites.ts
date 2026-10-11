@@ -22,6 +22,7 @@ import { guardianLinks } from "../db/schema/guardian-links.js";
 import { meetingInvitees, meetings } from "../db/schema/meetings.js";
 import { clubMembers, clubMemberStatusHistory, type ClubMemberRow } from "../db/schema/club-members.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
+import { recordKeyReturnsForRemovedAccount } from "./key-returns.js";
 import { locationKeyHolders, locations } from "../db/schema/locations.js";
 import { accountLinkLockKey, assertRejoinAllowed, type DbExecutor } from "./club-members.js";
 import { hasClubPermission } from "./club-permissions.js";
@@ -306,6 +307,7 @@ export async function unlinkAccount(clubId: string, clubMemberId: string, actorM
     }
 
     const [updated] = await tx.update(clubMembers).set({ accountUnlinkedAt: new Date(), updatedAt: new Date() }).where(eq(clubMembers.id, row.id)).returning();
+    await recordKeyReturnsForRemovedAccount(tx, account.id, actorMemberId);
     await tx.delete(member).where(eq(member.id, account.id));
     await tx.update(session).set({ activeOrganizationId: null }).where(and(eq(session.userId, account.userId), eq(session.activeOrganizationId, clubId)));
     await tx.insert(clubMemberStatusHistory).values({

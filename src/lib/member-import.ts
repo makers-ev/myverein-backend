@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import { and, eq, isNotNull } from "drizzle-orm";
 
@@ -7,6 +7,7 @@ import { clubMembers, memberCategories, type MemberCategoryRow } from "../db/sch
 import { DEFAULT_CATEGORY_KEY, type DbExecutor } from "./club-members.js";
 import { ValidationError } from "./errors.js";
 import {
+  CsvLimitError,
   CsvParseError,
   detectDelimiter,
   importMaxBytes,
@@ -163,7 +164,22 @@ export interface ImportOptions {
 const squash = (v: string) => v.trim().replace(/\s+/g, " ");
 const nameKey = (v: string) => squash(v).toLowerCase();
 const controlChars = (v: string) => [...v].some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127);
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/**
+ * Linear-time e-mail plausibility check (no regex: nothing to backtrack on hostile input). Length is capped first;
+ * exactly one `@`, no whitespace, a non-empty local part and a domain with a dot that is neither first nor last.
+ */
+export function isPlausibleEmail(value: string): boolean {
+  if (value.length > 320 || value.length < 5) return false;
+  const at = value.indexOf("@");
+  if (at < 1 || at !== value.lastIndexOf("@")) return false;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 32 || code === 127 || code === 0xa0) return false;
+  }
+  const domain = value.slice(at + 1);
+  const dot = domain.lastIndexOf(".");
+  return dot > 0 && dot < domain.length - 1 && domain.indexOf("..") === -1;
+}
 
 /** Maps the header row to fields (explicit mapping first, then aliases); a field is only mapped once (first column wins). */
 export function mapColumns(headers: string[], mapping?: ImportOptions["mapping"]): ImportAnalysis["columns"] {
@@ -175,7 +191,8 @@ export function mapColumns(headers: string[], mapping?: ImportOptions["mapping"]
   }
   const used = new Set<ImportField>();
   return headers.map((header) => {
-    const explicit = mapping?.[header];
+    const explicit = mapping && Object.hasOwn(mapping, header) ? mapping[header] : undefined;
+    if (explicit !== undefined && explicit !== "ignore" && !(IMPORT_FIELDS as readonly string[]).includes(explicit)) return { header, field: null };
     const field = explicit !== undefined ? (explicit === "ignore" ? null : explicit) : (aliasToField.get(normalizeHeader(header)) ?? null);
     if (field === null || used.has(field)) return { header, field: null };
     used.add(field);
@@ -194,8 +211,9 @@ export async function analyzeImport(executor: DbExecutor, clubId: string, csv: s
   const delimiter = detectDelimiter(csv);
   let table: string[][];
   try {
-    table = parseCsv(csv, delimiter);
+    table = parseCsv(csv, delimiter, { maxRows: importMaxRows() + 2, maxColumns: MAX_COLUMNS + 1, maxCell: MAX_CELL * 4 });
   } catch (err) {
+    if (err instanceof CsvLimitError) throw new ValidationError(err.message, { details: { code: err.code, maxRows: importMaxRows() } });
     if (err instanceof CsvParseError) throw new ValidationError("The CSV file is malformed (unterminated quote)", { details: { code: "csv_malformed" } });
     throw err;
   }
@@ -300,7 +318,7 @@ export async function analyzeImport(executor: DbExecutor, clubId: string, csv: s
     }
 
     const email = raw.contactEmail?.toLowerCase();
-    if (raw.contactEmail && !EMAIL_RE.test(raw.contactEmail)) issue("contactEmail", "invalid_email", "Not a valid e-mail address");
+    if (raw.contactEmail && !isPlausibleEmail(raw.contactEmail)) issue("contactEmail", "invalid_email", "Not a valid e-mail address");
 
     if (raw.memberNumber) {
       if (numbers.has(raw.memberNumber)) issue("memberNumber", "member_number_taken", "Member number is already in use in this club");
@@ -316,7 +334,7 @@ export async function analyzeImport(executor: DbExecutor, clubId: string, csv: s
         if (existingId) duplicates.push({ reason: "name_birthdate", clubMemberId: existingId, line: null });
         else if (earlier !== undefined) duplicates.push({ reason: "name_birthdate", clubMemberId: null, line: earlier });
       }
-      if (email && EMAIL_RE.test(email)) {
+      if (email && isPlausibleEmail(email)) {
         const existingId = byEmail.get(email);
         const earlier = seenEmail.get(email);
         if (existingId) duplicates.push({ reason: "email", clubMemberId: existingId, line: null });
@@ -389,9 +407,10 @@ export function importFingerprint(csv: string, options: ImportOptions): string {
 const tokenSignature = (payload: string) => createHmac("sha256", tokenSecret()).update(`member-import:${payload}`).digest("base64url");
 
 /** Stateless token `<payload>.<hmac>` binding club + user + file fingerprint + expiry; issued by the dry run, required by the commit. */
-export function createImportToken(clubId: string, userId: string, fingerprint: string, now = Date.now()): { token: string; expiresAt: Date } {
+export function createImportToken(clubId: string, userId: string, fingerprint: string, now = Date.now(), duplicates = 0): { token: string; expiresAt: Date } {
   const expiresAtMs = now + TOKEN_TTL_MS;
-  const payload = Buffer.from(JSON.stringify({ c: clubId, u: userId, f: fingerprint, e: expiresAtMs })).toString("base64url");
+  // `n` makes every dry run's token unique, so "used" can be tracked per token (see tokenId).
+  const payload = Buffer.from(JSON.stringify({ c: clubId, u: userId, f: fingerprint, e: expiresAtMs, n: randomBytes(9).toString("base64url"), d: duplicates })).toString("base64url");
   return { token: `${payload}.${tokenSignature(payload)}`, expiresAt: new Date(expiresAtMs) };
 }
 
@@ -408,4 +427,19 @@ export function verifyImportToken(token: string, clubId: string, userId: string,
   } catch {
     return false;
   }
+}
+
+/** Duplicates the dry run reported for the file the token was issued for (0 for a token that cannot be read). */
+export function importTokenDuplicates(token: string): number {
+  try {
+    const parsed = JSON.parse(Buffer.from(token.split(".")[0] ?? "", "base64url").toString("utf8")) as { d?: unknown };
+    return typeof parsed.d === "number" && parsed.d >= 0 ? parsed.d : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Stable id of a token for the single-use bookkeeping (SHA-256 of the whole token; stored in the audit entry, not the token). */
+export function importTokenId(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }

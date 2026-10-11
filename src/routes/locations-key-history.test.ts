@@ -9,7 +9,9 @@ import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubRoles } from "../db/schema/club-roles.js";
-import { locationKeyHistory } from "../db/schema/locations.js";
+import { clubMembers } from "../db/schema/club-members.js";
+import { locationKeyHistory, locationKeyHolders } from "../db/schema/locations.js";
+import { unlinkAccount } from "../lib/member-invites.js";
 import { toAppError } from "../lib/errors.js";
 import { locationRoutes } from "./locations.js";
 
@@ -177,6 +179,22 @@ describe("location key history and wifi security (B14)", () => {
       expect((await history()).total).toBe(4);
     });
 
+    it("rejects an oversized DELETE body", async () => {
+      const res = await call(board, `/${locationId}/key-holders/${holder.memberId}`, { method: "DELETE", body: JSON.stringify({ note: "x".repeat(10_000) }) });
+      expect(res.status).toBe(422);
+    });
+
+    it("writes a 'returned' entry (note 'Konto entfernt') when an account is unlinked while it holds a key", async () => {
+      const keeper = await join("keeper", "member");
+      await call(board, `/${locationId}/key-holders`, { method: "POST", body: { memberId: keeper.memberId, keyLabel: "Nr. 9" } });
+      const clubMember = (await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, keeper.memberId) }))!;
+      await unlinkAccount(clubId, clubMember.id, board.memberId, true, ["vorsitz"]);
+      const rows = (await db.select().from(locationKeyHistory).where(eq(locationKeyHistory.locationId, locationId))).filter((r) => r.memberName === "Name keeper");
+      expect(rows.map((r) => r.action).sort()).toEqual(["issued", "returned"]);
+      expect(rows.find((r) => r.action === "returned")).toMatchObject({ note: "Konto entfernt", keyLabel: "Nr. 9", recordedBy: board.memberId });
+      expect(await db.query.locationKeyHolders.findFirst({ where: eq(locationKeyHolders.memberId, keeper.memberId) })).toBeUndefined();
+    });
+
     it("keeps history entries when the account is removed (names are snapshots), and drops them with the location", async () => {
       const temp = await join("temp", "member");
       await call(board, `/${locationId}/key-holders`, { method: "POST", body: { memberId: temp.memberId } });
@@ -209,7 +227,7 @@ describe("location key history and wifi security (B14)", () => {
       const wpa3 = await json(await wifi({ label: "Neu", ssid: "Neu;Netz", password: "p:w", security: "wpa3" }));
       expect(wpa3.data).toMatchObject({ security: "wpa3", qrPayload: "WIFI:T:SAE;S:Neu\\;Netz;P:p\\:w;;" });
       const wep = await json(await wifi({ label: "Alt", ssid: "Alt", password: "12345", security: "wep" }));
-      expect(wep.data.qrPayload).toBe("WIFI:T:WEP;S:Alt;P:12345;;");
+      expect(wep.data.qrPayload).toBe('WIFI:T:WEP;S:Alt;P:"12345";;'); // all-hex value is quoted
     });
 
     it("validates: unknown type 422, password required unless open, open never keeps a password", async () => {

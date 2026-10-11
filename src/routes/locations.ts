@@ -2,6 +2,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, count, desc, eq, inArray } from "drizzle-orm";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { member, user } from "../auth/auth-schema.js";
@@ -327,7 +328,15 @@ locationRoutes.post(
   },
 );
 
-locationRoutes.delete("/:id/key-holders/:memberId", async (c) => {
+// The optional return note is tiny; a hard cap keeps a hostile body from being buffered.
+const returnBodyLimit = bodyLimit({
+  maxSize: 4 * 1024,
+  onError: () => {
+    throw new ValidationError("Request body too large");
+  },
+});
+
+locationRoutes.delete("/:id/key-holders/:memberId", returnBodyLimit, async (c) => {
   const clubId = c.get("clubId");
   const roleTypes = c.get("clubRoleTypes");
   requireLocationsWrite(roleTypes);

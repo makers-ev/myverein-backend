@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { buildCsv, CSV_BOM, csvCell, detectDelimiter, escapeFormula, parseCsv, parseFlexibleDate, unescapeFormula } from "./member-csv.js";
-import { createImportToken, importFingerprint, mapColumns, verifyImportToken } from "./member-import.js";
+import { CsvLimitError, buildCsv, CSV_BOM, csvCell, detectDelimiter, escapeFormula, parseCsv, parseFlexibleDate, unescapeFormula } from "./member-csv.js";
+import { createImportToken, importFingerprint, importTokenDuplicates, importTokenId, isPlausibleEmail, mapColumns, verifyImportToken } from "./member-import.js";
 import { wifiQrPayload } from "./wifi-qr.js";
 
 describe("csv parsing", () => {
@@ -101,8 +101,46 @@ describe("wifi QR payload", () => {
   it("maps the security type to the WIFI: scheme and escapes special characters", () => {
     expect(wifiQrPayload({ ssid: "Vereinsheim", password: "geheim", security: "wpa" })).toBe("WIFI:T:WPA;S:Vereinsheim;P:geheim;;");
     expect(wifiQrPayload({ ssid: "Heim", password: "pw", security: "wpa3" })).toBe("WIFI:T:SAE;S:Heim;P:pw;;");
-    expect(wifiQrPayload({ ssid: "Alt", password: "12345", security: "wep" })).toBe("WIFI:T:WEP;S:Alt;P:12345;;");
+    expect(wifiQrPayload({ ssid: "Alt", password: "12345", security: "wep" })).toBe('WIFI:T:WEP;S:Alt;P:"12345";;');
+    // all-hex SSIDs / passwords are quoted so scanners read them as text, not as raw hex keys
+    expect(wifiQrPayload({ ssid: "CAFE", password: "deadBEEF", security: "wpa" })).toBe('WIFI:T:WPA;S:"CAFE";P:"deadBEEF";;');
     expect(wifiQrPayload({ ssid: "Gast", password: "ignored", security: "open" })).toBe("WIFI:T:nopass;S:Gast;;");
     expect(wifiQrPayload({ ssid: String.raw`a;b:c,d"e\f`, password: "p;w", security: "wpa" })).toBe(String.raw`WIFI:T:WPA;S:a\;b\:c\,d\"e\\f;P:p\;w;;`);
+  });
+});
+
+describe("hardening", () => {
+  it("checks e-mail plausibility in linear time (no ReDoS)", () => {
+    for (const evil of [`a@${".".repeat(200_000)}@`, `${"a@".repeat(100_000)}`, `a@${"a.".repeat(100_000)}`, `${" ".repeat(100_000)}@a.b`]) {
+      const started = Date.now();
+      expect(isPlausibleEmail(evil)).toBe(false);
+      expect(Date.now() - started).toBeLessThan(200);
+    }
+    expect(isPlausibleEmail("max.muster@example.com")).toBe(true);
+    for (const bad of ["", "a@b", "a@.b", "a@b.", "@b.de", "a b@c.de", "a@@b.de", "a@b..de", `${"a".repeat(320)}@b.de`]) expect(isPlausibleEmail(bad), bad).toBe(false);
+  });
+
+  it("stops parsing at the row, column and cell limits", () => {
+    expect(() => parseCsv("h\n1\n2\n3\n4", ";", { maxRows: 3 })).toThrow(CsvLimitError);
+    expect(parseCsv("h\n1\n2", ";", { maxRows: 3 })).toHaveLength(3);
+    expect(() => parseCsv("a;b;c;d", ";", { maxColumns: 3 })).toThrow(CsvLimitError);
+    expect(() => parseCsv(`h\n${"x".repeat(50)}`, ";", { maxCell: 10 })).toThrow(CsvLimitError);
+    expect(() => parseCsv(`h\n"${"x".repeat(50)}`, ";", { maxCell: 10 })).toThrow(CsvLimitError);
+  });
+
+  it("ignores prototype keys in an explicit mapping", () => {
+    const cols = mapColumns(["__proto__", "constructor", "toString", "Name"], { phone: "ignore" });
+    expect(cols.map((c) => c.field)).toEqual([null, null, null, "displayName"]);
+    expect(mapColumns(["hasOwnProperty"], { hasOwnProperty: "bogus" as "ignore" })[0]!.field).toBeNull();
+  });
+
+  it("gives every dry run its own token and carries the dry-run duplicate count", () => {
+    const fp = importFingerprint("a", {});
+    const a = createImportToken("c", "u", fp, Date.now(), 4);
+    const b = createImportToken("c", "u", fp, Date.now(), 4);
+    expect(a.token).not.toBe(b.token);
+    expect(importTokenId(a.token)).not.toBe(importTokenId(b.token));
+    expect(importTokenDuplicates(a.token)).toBe(4);
+    expect(importTokenDuplicates("garbage")).toBe(0);
   });
 });

@@ -27,9 +27,26 @@ export function detectDelimiter(text: string): CsvDelimiter {
 }
 
 export class CsvParseError extends Error {}
+/** Thrown as soon as a parse limit is exceeded, so a hostile file is never parsed to the end. */
+export class CsvLimitError extends Error {
+  constructor(
+    message: string,
+    readonly code: "csv_too_many_rows" | "csv_too_many_columns" | "csv_cell_too_long",
+  ) {
+    super(message);
+  }
+}
+
+export interface CsvLimits {
+  /** Stops with a CsvLimitError once more than this many rows were read (header included). */
+  maxRows?: number;
+  maxColumns?: number;
+  /** Characters per cell. */
+  maxCell?: number;
+}
 
 /** Parses CSV text into rows of cells. Handles quoted fields (`""` escape, embedded delimiters/newlines), CRLF/LF/CR, a BOM and blank lines (skipped). */
-export function parseCsv(input: string, delimiter: CsvDelimiter): string[][] {
+export function parseCsv(input: string, delimiter: CsvDelimiter, limits: CsvLimits = {}): string[][] {
   const text = input.startsWith(CSV_BOM) ? input.slice(1) : input;
   const rows: string[][] = [];
   let row: string[] = [];
@@ -38,13 +55,16 @@ export function parseCsv(input: string, delimiter: CsvDelimiter): string[][] {
   let cellStarted = false;
 
   const endCell = () => {
+    if (limits.maxCell !== undefined && cell.length > limits.maxCell) throw new CsvLimitError("A cell is too long", "csv_cell_too_long");
     row.push(cell);
+    if (limits.maxColumns !== undefined && row.length > limits.maxColumns) throw new CsvLimitError("Too many columns", "csv_too_many_columns");
     cell = "";
     cellStarted = false;
   };
   const endRow = () => {
     endCell();
     if (row.length > 1 || row[0]!.trim() !== "") rows.push(row);
+    if (limits.maxRows !== undefined && rows.length > limits.maxRows) throw new CsvLimitError("Too many rows", "csv_too_many_rows");
     row = [];
   };
 
@@ -60,6 +80,7 @@ export function parseCsv(input: string, delimiter: CsvDelimiter): string[][] {
         }
       } else {
         cell += ch;
+        if (limits.maxCell !== undefined && cell.length > limits.maxCell) throw new CsvLimitError("A cell is too long", "csv_cell_too_long");
       }
     } else if (ch === '"' && !cellStarted) {
       quoted = true;

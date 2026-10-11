@@ -36,7 +36,7 @@ import { COUNTED_STATUSES, effectiveStatus, isLeftStatus, subtractYears, suggest
 import { findMemberPhotoMedia, canSeeMemberPhoto, isMinor, memberPhotoUrls, removeMemberPhoto, replaceMemberPhoto, type PhotoCaller } from "../lib/member-photos.js";
 import { MAX_PHOTO_BYTES, streamMedia } from "../lib/media.js";
 import { buildCsv, importMaxBytes } from "../lib/member-csv.js";
-import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADERS, importFingerprint, verifyImportToken } from "../lib/member-import.js";
+import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADERS, importFingerprint, importTokenDuplicates, importTokenId, verifyImportToken } from "../lib/member-import.js";
 import { nextMemberNumber } from "../lib/member-number.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -737,7 +737,7 @@ clubMemberRoutes.post("/import", csvWriteLimiter, requireMembersWriteMiddleware,
   if (body.dryRun) {
     await ensureDefaultCategories(clubId);
     const analysis = await analyzeImport(db, clubId, body.csv, options);
-    const { token, expiresAt } = createImportToken(clubId, userId, fingerprint);
+    const { token, expiresAt } = createImportToken(clubId, userId, fingerprint, Date.now(), analysis.summary.duplicates);
     return c.json({
       data: {
         dryRun: true,
@@ -756,11 +756,21 @@ clubMemberRoutes.post("/import", csvWriteLimiter, requireMembersWriteMiddleware,
     throw new ValidationError("A valid confirmToken from a dry run of exactly this file is required to import", { details: { code: "import_not_confirmed" } });
   }
 
+  const tokenId = importTokenId(body.confirmToken);
+  const dryRunDuplicates = importTokenDuplicates(body.confirmToken);
   const result = await db.transaction(async (tx) => {
     await ensureDefaultCategories(clubId, tx);
     // Lock order as everywhere: categories -> member rows -> organization row.
     await lockClubCategories(tx, clubId, "share");
     await tx.execute(sql`SELECT 1 FROM organization WHERE id = ${clubId} FOR UPDATE`);
+    // Single use: a token whose commit already went through (recorded in its audit entry, checked under the organization
+    // lock so two parallel commits cannot both pass) is refused.
+    const [used] = await tx
+      .select({ id: auditLog.id })
+      .from(auditLog)
+      .where(and(eq(auditLog.eventType, "club_member.import"), eq(auditLog.subjectId, clubId), sql`${auditLog.payload}->>'tokenId' = ${tokenId}`))
+      .limit(1);
+    if (used) throw new ConflictError("This confirmation token was already used; run a new dry run", { details: { code: "import_already_applied" } });
     const analysis = await analyzeImport(tx, clubId, body.csv, options);
     if (analysis.summary.errors > 0) {
       throw new ValidationError("The file contains errors; fix them and run the dry run again", { details: { code: "import_has_errors", summary: analysis.summary, rows: analysis.rows.filter((r) => r.status === "error") } });
@@ -787,12 +797,12 @@ clubMemberRoutes.post("/import", csvWriteLimiter, requireMembersWriteMiddleware,
     await tx.insert(auditLog).values({
       eventType: "club_member.import",
       subjectId: clubId,
-      payload: { clubId, created: created.length, skippedDuplicates: analysis.summary.duplicates, rows: analysis.summary.rows, importedBy: actor.id, fileSha256: fingerprint },
+      payload: { clubId, created: created.length, skippedDuplicates: analysis.summary.duplicates, rows: analysis.summary.rows, importedBy: actor.id, fileSha256: fingerprint, tokenId },
     });
     return { analysis, created: created.length };
   });
 
-  return c.json({ data: { dryRun: false, created: result.created, skippedDuplicates: result.analysis.summary.duplicates, summary: result.analysis.summary, rows: result.analysis.rows } }, 201);
+  return c.json({ data: { dryRun: false, created: result.created, skippedDuplicates: result.analysis.summary.duplicates, skippedSinceDryRun: Math.max(0, result.analysis.summary.duplicates - dryRunDuplicates), summary: result.analysis.summary, rows: result.analysis.rows } }, 201);
 });
 
 type ExportRow = { row: ClubMemberRow; categoryKey: string | null; accountEmail: string | null; departments: string };
@@ -904,7 +914,7 @@ async function exportMembers(c: Context<ClubEnv>) {
       .select({ clubMemberId: clubMemberDepartments.clubMemberId, name: departments.name })
       .from(clubMemberDepartments)
       .innerJoin(departments, eq(departments.id, clubMemberDepartments.departmentId))
-      .where(and(eq(departments.clubId, clubId), or(isNull(clubMemberDepartments.until), gt(clubMemberDepartments.until, today))))
+      .where(and(inArray(clubMemberDepartments.clubMemberId, rows.map((r) => r.row.id)), eq(departments.clubId, clubId), or(isNull(clubMemberDepartments.until), gt(clubMemberDepartments.until, today))))
       .orderBy(asc(departments.name));
     for (const d of deptRows) departmentsByMember.set(d.clubMemberId, [...(departmentsByMember.get(d.clubMemberId) ?? []), d.name]);
   }

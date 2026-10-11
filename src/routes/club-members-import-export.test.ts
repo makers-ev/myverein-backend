@@ -191,6 +191,10 @@ describe("member CSV import and export (B10)", () => {
         expect(res.status).toBe(422);
         expect((await json(res)).error.details).toMatchObject({ code: "csv_too_many_rows", maxRows: 3 });
         expect((await dry(founder, "Name\nA\nB\nC")).status).toBe(200);
+        // far over the cap: the parser stops early with the same error
+        const huge = await dry(founder, `Name\n${"A\n".repeat(500)}`);
+        expect(huge.status).toBe(422);
+        expect((await json(huge)).error.details.code).toBe("csv_too_many_rows");
       } finally {
         if (previousRows === undefined) delete process.env.MEMBER_IMPORT_MAX_ROWS;
         else process.env.MEMBER_IMPORT_MAX_ROWS = previousRows;
@@ -205,6 +209,14 @@ describe("member CSV import and export (B10)", () => {
         if (previousBytes === undefined) delete process.env.MEMBER_IMPORT_MAX_BYTES;
         else process.env.MEMBER_IMPORT_MAX_BYTES = previousBytes;
       }
+    });
+
+    it("is fast on a hostile e-mail cell", async () => {
+      const started = Date.now();
+      const res = await dry(founder, `Name;E-Mail\nEvil;a@${".".repeat(1500)}@`);
+      expect(res.status).toBe(200);
+      expect((await json(res)).data.rows[0].status).toBe("error");
+      expect(Date.now() - started).toBeLessThan(2000);
     });
 
     it("applies an explicit column mapping", async () => {
@@ -268,20 +280,36 @@ describe("member CSV import and export (B10)", () => {
       expect(audits[0]!.payload).toMatchObject({ clubId: club, created: 3, skippedDuplicates: 1, rows: 4 });
       expect(JSON.stringify(audits[0]!.payload)).not.toMatch(/Carla|Dirk|carla\.commit|Commit/);
 
-      // Replaying the same commit creates nothing: the explicit member number is taken now (and the rest are duplicates).
+      expect(body.skippedSinceDryRun).toBe(0);
+      // The token is single use: replaying the same commit is a 409 and creates nothing.
       const total = await countMembers();
       const again = await commit(founder, csv, data.confirmToken);
-      expect(again.status).toBe(422);
-      expect((await json(again)).error.details.code).toBe("import_has_errors");
+      expect(again.status).toBe(409);
+      expect((await json(again)).error.details.code).toBe("import_already_applied");
       expect(await countMembers()).toBe(total);
+      // A fresh dry run of the same file gets a fresh token, but nothing is left to create (explicit number taken).
+      const second = (await json(await dry(founder, csv))).data;
+      expect((await commit(founder, csv, second.confirmToken)).status).toBe(422);
 
       // Without an explicit number a replay finds only duplicates: nothing to do.
       const plainCsv = "Name;Geburtsdatum\nReplay Rita;04.04.1994";
       const plainDry = (await json(await dry(founder, plainCsv))).data;
       expect((await commit(founder, plainCsv, plainDry.confirmToken)).status).toBe(201);
-      const replay = await commit(founder, plainCsv, plainDry.confirmToken);
+      expect((await commit(founder, plainCsv, plainDry.confirmToken)).status).toBe(409);
+      const replayDry = (await json(await dry(founder, plainCsv))).data;
+      const replay = await commit(founder, plainCsv, replayDry.confirmToken);
       expect(replay.status).toBe(422);
       expect((await json(replay)).error.details.code).toBe("import_nothing_to_do");
+    });
+
+    it("reports duplicates that appeared between dry run and commit (skippedSinceDryRun)", async () => {
+      const csv = "Name;Geburtsdatum\nSince Dry;07.07.1977\nSince Other;08.08.1978";
+      const { data } = await json(await dry(founder, csv));
+      expect(data.summary.duplicates).toBe(0);
+      await call(founder, "/club-members", { method: "POST", body: { displayName: "Since Dry", categoryKey: "aktiv", birthDate: "1977-07-07" } });
+      const res = await commit(founder, csv, data.confirmToken);
+      expect(res.status).toBe(201);
+      expect((await json(res)).data).toMatchObject({ created: 1, skippedDuplicates: 1, skippedSinceDryRun: 1 });
     });
 
     it("rolls back completely if the file has errors at commit time (state changed after the dry run)", async () => {
