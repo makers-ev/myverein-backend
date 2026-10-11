@@ -13,8 +13,8 @@ import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
 
 /**
- * Club-wide parameters (Wave 7 B6). Every member reads the three values that concern them (notice period/mode for the
- * cancellation hint, self loans for the inventory UI); only `members:write` changes anything.
+ * Club-wide parameters (Wave 7 B6). Every member reads the values that concern them (notice period/mode for the
+ * cancellation hint, member number prefix, self loans for the inventory UI); only `members:write` changes anything.
  */
 export const clubSettingsRoutes = new Hono<ClubEnv>();
 
@@ -24,7 +24,7 @@ clubSettingsRoutes.use("*", clubGuard);
 
 clubSettingsRoutes.get("/", async (c) => {
   const settings = await loadClubSettings(db, c.get("clubId"));
-  return c.json({ data: { noticePeriodDays: settings.noticePeriodDays, noticeMode: settings.noticeMode, allowSelfLoans: settings.allowSelfLoans } });
+  return c.json({ data: { noticePeriodDays: settings.noticePeriodDays, noticeMode: settings.noticeMode, memberNumberPrefix: settings.memberNumberPrefix, allowSelfLoans: settings.allowSelfLoans } });
 });
 
 const updateSettingsSchema = z.object({

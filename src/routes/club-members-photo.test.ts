@@ -292,26 +292,35 @@ describe("member profile photos (B13)", () => {
   });
 
   describe("club-info board list", () => {
-    it("shows adult board members' photos to every club member, never a minor's, and nothing for members without a photo", async () => {
+    it("shows board photos only to members:write / members:read_sensitive and to the person themselves -- never to other members, adults or minors", async () => {
       expect((await putPhoto(board, "/club-members/me/photo")).status).toBe(200);
+      expect((await putPhoto(plain2, "/club-members/me/photo")).status).toBe(200);
       await db.insert(clubRoles).values({ memberId: plain2.memberId, roleType: "beisitzer" });
       await db.insert(clubRoles).values({ memberId: plain.memberId, roleType: "schriftfuehrer" });
 
-      const info = async (viewer: Actor) => ((await json(await call(viewer, "/club-info"))).data.board as Json[]);
-      for (const viewer of [plain, guardian]) {
-        const rows = await info(viewer);
-        const byMember = new Map(rows.map((r) => [r.memberId, r]));
-        expect(byMember.get(board.memberId)?.photoUrl).toContain("/media/");
-        expect(byMember.get(plain2.memberId)?.photoUrl).toContain("/media/"); // adult with photo
-        expect(byMember.get(plain.memberId)?.photoUrl).toBeNull(); // no photo
-      }
-      // Minor on the board list: no photo for anybody.
+      const info = async (viewer: Actor) => new Map(((await json(await call(viewer, "/club-info"))).data.board as Json[]).map((r) => [r.memberId as string, r.photoUrl as string | null]));
+
+      // an unrelated viewer (external guest)
+      const guestView = await info(guardian);
+      expect(guestView.get(board.memberId)).toBeNull();
+      expect(guestView.get(plain2.memberId)).toBeNull();
+
+      // the person sees their own photo only
+      const own = await info(plain2);
+      expect(own.get(plain2.memberId)).toContain("/media/");
+      expect(own.get(board.memberId)).toBeNull();
+
+      // members:write sees everyone's, including a minor's and one with unknown birth date
       await db.update(clubMembers).set({ birthDate: `${new Date().getFullYear() - 16}-06-06` }).where(eq(clubMembers.id, plain2.clubMemberId));
-      const rows = await info(plain);
-      expect(rows.find((r) => r.memberId === plain2.memberId)?.photoUrl).toBeNull();
-      expect(rows.find((r) => r.memberId === board.memberId)?.photoUrl).toContain("/media/");
-      // The signed URL of the board photo loads without a cookie.
-      const url = rows.find((r) => r.memberId === board.memberId)!.photoUrl as string;
+      const asBoard = await info(board);
+      expect(asBoard.get(board.memberId)).toContain("/media/");
+      expect(asBoard.get(plain2.memberId)).toContain("/media/");
+      expect(asBoard.get(plain.memberId)).toBeNull(); // no photo
+      // a minor still sees the own photo (set by the board) -- but no third party does
+      expect((await info(plain2)).get(plain2.memberId)).toContain("/media/");
+      expect((await info(guardian)).get(plain2.memberId)).toBeNull();
+      // the signed URL loads without a cookie
+      const url = asBoard.get(board.memberId)!;
       expect((await app.request(localUrl(url))).status).toBe(200);
     });
   });

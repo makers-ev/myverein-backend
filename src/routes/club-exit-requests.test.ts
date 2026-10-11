@@ -112,11 +112,11 @@ describe("exit workflow (B6)", () => {
   // --- club settings -------------------------------------------------------------------------
 
   describe("club settings", () => {
-    it("GET gives every member exactly the three public values (defaults without a row)", async () => {
+    it("GET gives every member exactly the public values incl. memberNumberPrefix (defaults without a row)", async () => {
       const plain = await join("settings-reader");
       const res = await call(plain, "/club-settings");
       expect(res.status).toBe(200);
-      expect((await body(res)).data).toEqual({ noticePeriodDays: null, noticeMode: null, allowSelfLoans: true });
+      expect((await body(res)).data).toEqual({ noticePeriodDays: null, noticeMode: null, memberNumberPrefix: null, allowSelfLoans: true });
     });
 
     it("PATCH needs members:write and validates the values", async () => {
@@ -127,12 +127,12 @@ describe("exit workflow (B6)", () => {
       }
     });
 
-    it("PATCH creates the row on demand, returns all four values, GET shows only the three, and the prefix drives new member numbers", async () => {
+    it("PATCH creates the row on demand, returns all four values, GET shows all four, and the prefix drives new member numbers", async () => {
       const res = await call(founder, "/club-settings", { method: "PATCH", body: { noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: " tsv ", allowSelfLoans: false } });
       expect(res.status).toBe(200);
       expect((await body(res)).data).toEqual({ noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: "TSV", allowSelfLoans: false });
       const plain = await join("settings-after");
-      expect((await body(await call(plain, "/club-settings"))).data).toEqual({ noticePeriodDays: 30, noticeMode: "month_end", allowSelfLoans: false });
+      expect((await body(await call(plain, "/club-settings"))).data).toEqual({ noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: "TSV", allowSelfLoans: false });
       const created = await childMember();
       expect(created.memberNumber).toMatch(/^TSV-\d{4}$/);
       // partial update keeps the rest; null clears
@@ -144,7 +144,7 @@ describe("exit workflow (B6)", () => {
 
     it("is club-scoped", async () => {
       const other = await call(outsider, "/club-settings", { clubId: otherClub });
-      expect((await body(other)).data).toEqual({ noticePeriodDays: null, noticeMode: null, allowSelfLoans: true });
+      expect((await body(other)).data).toEqual({ noticePeriodDays: null, noticeMode: null, memberNumberPrefix: null, allowSelfLoans: true });
     });
   });
 

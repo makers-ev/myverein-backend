@@ -34,7 +34,7 @@ describe("migration folder bookkeeping", () => {
   });
 });
 
-describe("migration 0019 media-security-layer", () => {
+describe("migration 0019/0020 media-security-layer", () => {
   let admin: Pool;
   let pool: Pool;
   let tmpOld: string;
@@ -68,14 +68,27 @@ describe("migration 0019 media-security-layer", () => {
     await pool.query(`INSERT INTO "user" (id, name, email, email_verified) VALUES ('u1', 'U', 'u1@example.com', true)`);
     await pool.query(`INSERT INTO organization (id, name, slug, created_at) VALUES ('o1', 'Eins', 'eins', now())`);
     await pool.query(`INSERT INTO member (id, organization_id, user_id, role, created_at) VALUES ('m1', 'o1', 'u1', 'owner', now())`);
-    await pool.query(`INSERT INTO locations (club_id, name, photo_url) VALUES ('o1', 'Haus', 'o1/abc-haus.jpg'), ('o1', 'Ohne', NULL)`);
+    await pool.query(
+      `INSERT INTO locations (club_id, name, photo_url) VALUES ('o1', 'Haus', 'o1/abc-haus.jpg'), ('o1', 'Ohne', NULL), ('o1', 'Extern', 'https://evil.example/x.png'), ('o1', 'Pfad', '/media/o1/x.jpg'), ('o1', 'Fremd', 'o2/x.jpg'), ('o1', 'Traversal', 'o1/../o2/x.jpg'), ('o1', 'Nur Prefix', 'o1/')`,
+    );
     const item = (await pool.query(`INSERT INTO inventory_items (club_id, name, condition) VALUES ('o1', 'Zelt', 'gut') RETURNING id`)).rows[0].id as string;
-    await pool.query(`INSERT INTO inventory_damage_reports (item_id, reported_by, description, photo_url) VALUES ($1, 'm1', 'Riss', 'o1/def-riss.png')`, [item]);
+    await pool.query(
+      `INSERT INTO inventory_damage_reports (item_id, reported_by, description, photo_url) VALUES ($1, 'm1', 'Riss', 'o1/def-riss.png'), ($1, 'm1', 'Extern', 'http://evil.example/a.png'), ($1, 'm1', 'Fremd', 'o2/a.png'), ($1, 'm1', 'Leer', NULL)`,
+      [item],
+    );
 
     await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS });
 
-    expect((await pool.query(`SELECT name, photo_key FROM locations ORDER BY name`)).rows).toEqual([{ name: "Haus", photo_key: "o1/abc-haus.jpg" }, { name: "Ohne", photo_key: null }]);
-    expect((await pool.query(`SELECT photo_key FROM inventory_damage_reports`)).rows).toEqual([{ photo_key: "o1/def-riss.png" }]);
+    // 0019 renames and keeps the values; 0020 clears everything that is not an own-club key.
+    const locs = (await pool.query(`SELECT name, photo_key FROM locations ORDER BY name`)).rows;
+    expect(locs.find((r) => r.name === "Haus")?.photo_key).toBe("o1/abc-haus.jpg");
+    expect(locs.filter((r) => r.name !== "Haus").map((r) => r.photo_key)).toEqual(new Array(6).fill(null));
+    const reports = (await pool.query(`SELECT description, photo_key FROM inventory_damage_reports ORDER BY description`)).rows;
+    expect(reports).toEqual([{ description: "Extern", photo_key: null }, { description: "Fremd", photo_key: null }, { description: "Leer", photo_key: null }, { description: "Riss", photo_key: "o1/def-riss.png" }]);
+    // idempotent: running the cleanup again changes nothing
+    const sql = (await readFile(path.join(MIGRATIONS, "0020_media-legacy-photo-keys.sql"), "utf8")).split("--> statement-breakpoint");
+    for (const statement of sql) await pool.query(statement);
+    expect((await pool.query(`SELECT count(*)::int AS n FROM locations WHERE photo_key IS NOT NULL`)).rows[0].n).toBe(1);
     const oldColumns = await pool.query(`SELECT table_name FROM information_schema.columns WHERE column_name = 'photo_url' AND table_schema = 'public'`);
     expect(oldColumns.rows).toHaveLength(0);
 

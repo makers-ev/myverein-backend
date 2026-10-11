@@ -13,7 +13,7 @@ import { sessionGuard } from "../middleware/session-guard.js";
  *
  * - `GET /media/<key>?exp=&sig=` is registered FIRST and needs no session: it only checks the HMAC signature (minted by
  *   a feature route after ITS permission check) and the registry row. Plain `<img src>` and the native app `Image` can
- *   load it without cookies. Rate limited per IP.
+ *   load it without cookies. Rate limited per IP (keyed by `x-forwarded-for`, see README "Operations": only meaningful behind a proxy that overwrites it).
  * - Everything registered after the `use(...)` calls (the upload) needs session + club membership.
  */
 export const mediaRoutes = new Hono<ClubEnv>();
@@ -26,16 +26,17 @@ mediaRoutes.get("/:key{.+}", servePerIp, async (c) => {
   const exp = c.req.query("exp");
   const sig = c.req.query("sig");
 
-  const row = await findMediaByKey(key);
-  // Explicitly opted-in public media (never sensitive, see setMediaVisibility) needs no signature.
-  if (row && row.visibility === "public_opt_in" && !row.sensitive) return serveSignedMedia(c, row, 300);
-
-  // Signature first, existence second: an unsigned request cannot probe which keys exist.
-  if (!verifyMediaSignature(key, exp, sig)) throw new ForbiddenError("Invalid or expired media link");
-  if (!row) throw new NotFoundError("File not found");
-
-  const maxAge = Math.min(Math.floor((Number(exp) - Date.now()) / 1000), Math.floor(mediaUrlTtlMs() / 1000));
-  return serveSignedMedia(c, row, maxAge);
+  // Signature first. Only a valid one reaches the registry as an authorisation; only a MISS looks for an explicit
+  // public_opt_in (the one file kind that needs no signature). Unsigned requests for unknown keys get the same 403.
+  if (verifyMediaSignature(key, exp, sig)) {
+    const row = await findMediaByKey(key);
+    if (!row) throw new NotFoundError("File not found");
+    const maxAge = Math.min(Math.floor((Number(exp) - Date.now()) / 1000), Math.floor(mediaUrlTtlMs() / 1000));
+    return serveSignedMedia(c, row, maxAge);
+  }
+  const candidate = await findMediaByKey(key);
+  if (candidate && candidate.visibility === "public_opt_in" && !candidate.sensitive) return serveSignedMedia(c, candidate, 300);
+  throw new ForbiddenError("Invalid or expired media link");
 });
 
 mediaRoutes.use("*", sessionGuard);

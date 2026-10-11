@@ -49,8 +49,13 @@ clubInfoRoutes.get("/", async (c) => {
   const users = userIds.length ? await db.query.user.findMany({ where: inArray(user.id, userIds) }) : [];
   const usersById = new Map(users.map((u) => [u.id, u]));
 
-  // Board photos are shown to every club member (and guests); adults only, signed URLs minted after the club check.
-  const boardPhotos = await boardPhotoUrls(clubId, [...new Set(boardRoleRows.map((r) => r.memberId))]);
+  // Board photos: only for members:write / members:read_sensitive and the person themselves (consent follows in Wave 10).
+  const roleTypes = c.get("clubRoleTypes");
+  const boardPhotos = await boardPhotoUrls(clubId, [...new Set(boardRoleRows.map((r) => r.memberId))], {
+    memberId: c.get("membership").id,
+    canReadSensitive: hasClubPermission(roleTypes, "members:read_sensitive"),
+    canWrite: hasClubPermission(roleTypes, "members:write"),
+  });
 
   const board = boardRoleRows.map((roleRow) => {
     const memberRow = membersById.get(roleRow.memberId);

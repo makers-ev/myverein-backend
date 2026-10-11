@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 // Raw local-disk object storage, adapted from mycouple-backend's src/lib/storage.ts (no Cloudflare R2 yet).
@@ -51,4 +51,21 @@ export async function deleteObject(key: string): Promise<void> {
     throw new Error("Invalid object key");
   }
   await rm(resolved, { force: true });
+}
+
+function resolveInside(key: string): string {
+  const root = path.resolve(UPLOADS_DIR);
+  const resolved = path.resolve(root, key);
+  if (resolved === root || !resolved.startsWith(root + path.sep)) throw new Error("Invalid object key");
+  return resolved;
+}
+
+/** Size in bytes of a stored file (same traversal guard), so callers can cap before reading it into memory. */
+export async function objectSize(key: string): Promise<number> {
+  return (await stat(resolveInside(key))).size;
+}
+
+/** Overwrites an existing stored file in place (same traversal guard). */
+export async function writeObject(key: string, buffer: Buffer): Promise<void> {
+  await writeFile(resolveInside(key), buffer);
 }

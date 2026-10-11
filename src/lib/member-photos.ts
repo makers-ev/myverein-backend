@@ -77,14 +77,19 @@ export async function memberPhotoUrls(
   return result;
 }
 
-/** Board list photos for `GET /club-info`: adults only (the route's own check is "member of this club"). */
-export async function boardPhotoUrls(clubId: string, accountMemberIds: string[]): Promise<Map<string, string>> {
+/**
+ * Board list photos for `GET /club-info`. Same default as everywhere else (E6, until the Wave 10 consent management):
+ * only for `members:write` / `members:read_sensitive` and for the person themselves -- NOT for other members, whether
+ * adult or minor, and independent of a (possibly unknown) birth date. Keyed by the Better Auth `member.id`.
+ */
+export async function boardPhotoUrls(clubId: string, accountMemberIds: string[], caller: PhotoCaller): Promise<Map<string, string>> {
   const result = new Map<string, string>();
-  if (accountMemberIds.length === 0) return result;
-  const rows = await db.select().from(clubMembers).where(and(eq(clubMembers.clubId, clubId), inArray(clubMembers.memberId, accountMemberIds)));
-  const adults = rows.filter((r) => r.photoKey !== null && !isMinor(r.birthDate));
-  const urls = await signedMediaUrls(clubId, adults.map((r) => r.photoKey), "club_member");
-  for (const r of adults) {
+  const allowed = caller.canWrite || caller.canReadSensitive ? accountMemberIds : accountMemberIds.filter((id) => id === caller.memberId);
+  if (allowed.length === 0) return result;
+  const rows = await db.select().from(clubMembers).where(and(eq(clubMembers.clubId, clubId), inArray(clubMembers.memberId, allowed)));
+  const withPhoto = rows.filter((r) => r.photoKey !== null);
+  const urls = await signedMediaUrls(clubId, withPhoto.map((r) => r.photoKey), "club_member");
+  for (const r of withPhoto) {
     const url = urls.get(r.photoKey!);
     if (url && r.memberId) result.set(r.memberId, url);
   }

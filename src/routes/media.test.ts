@@ -1,7 +1,7 @@
 import { readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
@@ -12,7 +12,7 @@ import { auditLog } from "../db/schema/audit-log.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { toAppError } from "../lib/errors.js";
 import { GPS_MARKER, makeJpeg, makePng, makeWebp, PDF_BYTES } from "../lib/media-fixtures.js";
-import { deleteMedia, setMediaVisibility, signedMediaUrls, sniffMimeType, storeUpload, streamSensitiveMedia } from "../lib/media.js";
+import { deleteMedia, normalizeContentType, setMediaVisibility, signedMediaUrls, sniffMimeType, storeUpload, streamSensitiveMedia, sweepUnattachedUploads } from "../lib/media.js";
 import { signMediaKey } from "../lib/media-url.js";
 import { putObject, UPLOADS_DIR } from "../lib/storage.js";
 import { mediaRoutes } from "./media.js";
@@ -94,6 +94,8 @@ describe("media routes and security layer", () => {
 
   afterEach(() => {
     delete process.env.MEDIA_QUOTA_BYTES_PER_CLUB;
+    delete process.env.MEDIA_UNATTACHED_MAX_FILES_PER_USER;
+    delete process.env.MEDIA_UNATTACHED_MAX_BYTES_PER_USER;
   });
 
   afterAll(async () => {
@@ -316,6 +318,63 @@ describe("media routes and security layer", () => {
     });
   });
 
+  describe("content type normalisation", () => {
+    it("accepts the usual spellings of the declared type (image/JPG, parameters, case) as long as the content agrees", async () => {
+      expect(normalizeContentType("IMAGE/JPG")).toBe("image/jpeg");
+      expect(normalizeContentType("image/pjpeg")).toBe("image/jpeg");
+      expect(normalizeContentType("Image/PNG; charset=binary")).toBe("image/png");
+      expect(normalizeContentType("image/x-png")).toBe("image/png");
+      expect((await uploadFile(clubAId, cookieA, file(makeJpeg(false), "a.jpg", "image/jpg"))).status).toBe(201);
+      expect((await uploadFile(clubAId, cookieA, file(makePng(false), "a.png", "Image/PNG"))).status).toBe(201);
+      expect((await uploadFile(clubAId, cookieA, file(makePng(false), "a.png", "image/jpg"))).status).toBe(422); // still must agree
+    });
+  });
+
+  describe("unclaimed uploads", () => {
+    it("caps unattached files and bytes per user (QUOTA_EXCEEDED) and frees the slot when the file is deleted", async () => {
+      const who = await signUpAndVerify(`media-cap-${suffix}@example.com`, "Cap User");
+      userIds.push(who.userId);
+      await auth.api.addMember({ body: { userId: who.userId, organizationId: clubAId, role: "member" } });
+      process.env.MEDIA_UNATTACHED_MAX_FILES_PER_USER = "2";
+      const first = await uploadOk(clubAId, who.cookie, file(makePng(false), "1.png", "image/png"));
+      await uploadOk(clubAId, who.cookie, file(makePng(false), "2.png", "image/png"));
+      const third = await uploadFile(clubAId, who.cookie, file(makePng(false), "3.png", "image/png"));
+      expect(third.status).toBe(422);
+      expect(((await third.json()) as { error: { code: string } }).error.code).toBe("QUOTA_EXCEEDED");
+      // another (fresh) user is unaffected
+      const other = await signUpAndVerify(`media-cap2-${suffix}@example.com`, "Cap User 2");
+      userIds.push(other.userId);
+      await auth.api.addMember({ body: { userId: other.userId, organizationId: clubAId, role: "member" } });
+      expect((await uploadFile(clubAId, other.cookie, file(makePng(false), "x.png", "image/png"))).status).toBe(201);
+      await deleteMedia(first.key);
+      expect((await uploadFile(clubAId, who.cookie, file(makePng(false), "4.png", "image/png"))).status).toBe(201);
+
+      process.env.MEDIA_UNATTACHED_MAX_FILES_PER_USER = "100";
+      process.env.MEDIA_UNATTACHED_MAX_BYTES_PER_USER = "10";
+      expect((await uploadFile(clubAId, who.cookie, file(makePng(false), "5.png", "image/png"))).status).toBe(422);
+    });
+
+    it("sweeps unclaimed uploads after the TTL (file + registry row) and keeps fresh and claimed ones", async () => {
+      const old = await uploadOk(clubAId, cookieA, file(makePng(false), "old.png", "image/png"));
+      const fresh = await uploadOk(clubAId, cookieA, file(makePng(false), "fresh.png", "image/png"));
+      const claimed = await uploadOk(clubAId, cookieA, file(makePng(false), "claimed.png", "image/png"));
+      const longAgo = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      await db.update(mediaFiles).set({ createdAt: longAgo }).where(eq(mediaFiles.storageKey, old.key));
+      await db.update(mediaFiles).set({ createdAt: longAgo, ownerType: "location", ownerId: "x" }).where(eq(mediaFiles.storageKey, claimed.key));
+
+      expect(await sweepUnattachedUploads()).toBeGreaterThanOrEqual(1);
+      const [oldRow] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, old.key));
+      expect(oldRow.deletedAt).not.toBeNull();
+      await expect(stat(path.join(UPLOADS_DIR, old.key))).rejects.toThrow();
+      expect((await get(localUrl(old.url))).status).toBe(404);
+      expect((await get(localUrl(fresh.url))).status).toBe(200);
+      expect((await get(localUrl(claimed.url))).status).toBe(200);
+      expect(await sweepUnattachedUploads()).toBe(0); // idempotent
+      const [stillThere] = await db.select().from(mediaFiles).where(and(eq(mediaFiles.storageKey, claimed.key)));
+      expect(stillThere.deletedAt).toBeNull();
+    });
+  });
+
   describe("legacy files (written before the registry existed)", () => {
     it("registers a pre-registry image of the own club on first signing, from its magic bytes", async () => {
       const { key } = await putObject({ prefix: clubAId, extension: "jpg", buffer: makeJpeg(false) });
@@ -325,6 +384,22 @@ describe("media routes and security layer", () => {
       const [row] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, key));
       expect(row).toMatchObject({ clubId: clubAId, mimeType: "image/jpeg", ownerType: "damage_report", kind: "image" });
       expect((await get(localUrl(urls.get(key)!))).status).toBe(200);
+    });
+
+    it("strips metadata from a pre-registry image when registering it (the file is rewritten) and ignores oversized files", async () => {
+      const { key } = await putObject({ prefix: clubAId, extension: "jpg", buffer: makeJpeg(true) });
+      expect((await readFile(path.join(UPLOADS_DIR, key))).includes(GPS_MARKER)).toBe(true);
+      const urls = await signedMediaUrls(clubAId, [key]);
+      expect(urls.size).toBe(1);
+      const onDisk = await readFile(path.join(UPLOADS_DIR, key));
+      expect(onDisk.includes(GPS_MARKER)).toBe(false);
+      const [row] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, key));
+      expect(row.sizeBytes).toBe(onDisk.length);
+
+      const big = await putObject({ prefix: clubAId, extension: "jpg", buffer: Buffer.concat([makeJpeg(false), Buffer.alloc(11 * 1024 * 1024)]) });
+      expect((await signedMediaUrls(clubAId, [big.key])).size).toBe(0);
+      const corrupt = await putObject({ prefix: clubAId, extension: "jpg", buffer: makeJpeg(true).subarray(0, 40) });
+      expect((await signedMediaUrls(clubAId, [corrupt.key])).size).toBe(0);
     });
 
     it("does not register garbage, a foreign club's key, or a file that is not an image", async () => {

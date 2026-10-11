@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Context } from "hono";
 
 import { db } from "../db/client.js";
@@ -16,7 +16,7 @@ import { ConflictError, NotFoundError, ValidationError } from "./errors.js";
 import { MalformedImageError, stripImageMetadata } from "./image-sanitize.js";
 import { logger } from "./logger.js";
 import { buildMediaUrl } from "./media-url.js";
-import { deleteObject, getObject, putObject, sanitizeFilename } from "./storage.js";
+import { deleteObject, getObject, objectSize, putObject, sanitizeFilename, writeObject } from "./storage.js";
 
 /**
  * Central media security layer (Wave 7 B18). THE only module that touches stored user files: every upload, URL and
@@ -66,6 +66,27 @@ export function setUploadScanner(scanner: UploadScanner | null): void {
   uploadScanner = scanner;
 }
 
+const TYPE_ALIASES: Record<string, string> = { "image/jpg": "image/jpeg", "image/pjpeg": "image/jpeg", "image/x-png": "image/png" };
+
+/** Declared content type as browsers/clients send it: case, parameters and the usual aliases (image/jpg) normalised. */
+export function normalizeContentType(type: string): string {
+  const base = type.split(";")[0]!.trim().toLowerCase();
+  return TYPE_ALIASES[base] ?? base;
+}
+
+/** Cap for files that no feature has claimed yet (`POST /media`): files and bytes per user (env-tunable). */
+function unattachedLimits(): { files: number; bytes: number } {
+  const files = Number(process.env.MEDIA_UNATTACHED_MAX_FILES_PER_USER);
+  const bytes = Number(process.env.MEDIA_UNATTACHED_MAX_BYTES_PER_USER);
+  return { files: Number.isFinite(files) && files > 0 ? Math.floor(files) : 25, bytes: Number.isFinite(bytes) && bytes > 0 ? Math.floor(bytes) : 50 * 1024 * 1024 };
+}
+
+/** Hours after which an unclaimed upload is swept (`MEDIA_UNATTACHED_TTL_HOURS`, default 24). */
+export function unattachedTtlMs(): number {
+  const hours = Number(process.env.MEDIA_UNATTACHED_TTL_HOURS);
+  return (Number.isFinite(hours) && hours > 0 ? hours : 24) * 60 * 60 * 1000;
+}
+
 export interface StoreUploadInput {
   file: File;
   /** Owning club (quota scope); null for platform-level files such as club registration proofs. */
@@ -101,7 +122,7 @@ export async function storeUpload(input: StoreUploadInput): Promise<MediaFileRow
     throw new ValidationError(`Unsupported file type (allowed: ${input.allowedTypes.join(", ")})`);
   }
   // The declared type is client-controlled -- it has to agree with the content (an empty declaration is tolerated).
-  if (file.type && file.type !== sniffed) throw new ValidationError("File content does not match its declared content type");
+  if (file.type && normalizeContentType(file.type) !== sniffed) throw new ValidationError("File content does not match its declared content type");
   const isImage = sniffed.startsWith("image/");
   if (input.kind === "image" && !isImage) throw new ValidationError("Only images are accepted here");
 
@@ -130,6 +151,18 @@ export async function storeUpload(input: StoreUploadInput): Promise<MediaFileRow
         .where(and(eq(mediaFiles.clubId, input.clubId), isNull(mediaFiles.deletedAt)));
       if (Number(used) + buffer.length > clubQuotaBytes()) {
         throw new ValidationError("The storage quota of this club is exhausted", { code: "QUOTA_EXCEEDED" });
+      }
+    }
+    // Unclaimed uploads are capped per user so POST /media cannot be used as free storage (they are swept after a TTL).
+    if (!input.owner && input.uploadedBy) {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`media-unattached:${input.uploadedBy}`}, 0))`);
+      const [{ files, bytes }] = await tx
+        .select({ files: sql<number>`count(*)::int`, bytes: sql<number>`coalesce(sum(${mediaFiles.sizeBytes}), 0)::bigint::float8` })
+        .from(mediaFiles)
+        .where(and(eq(mediaFiles.uploadedBy, input.uploadedBy), eq(mediaFiles.ownerType, UNATTACHED_OWNER), isNull(mediaFiles.deletedAt)));
+      const limits = unattachedLimits();
+      if (files + 1 > limits.files || Number(bytes) + buffer.length > limits.bytes) {
+        throw new ValidationError("Too many unused uploads: attach or wait for the pending ones to expire", { code: "QUOTA_EXCEEDED" });
       }
     }
     const [row] = await tx
@@ -193,6 +226,30 @@ export async function deleteMedia(storageKey: string, clubId?: string): Promise<
   if (await markMediaDeleted(storageKey, db, clubId)) await purgeMediaFile(storageKey);
 }
 
+/**
+ * Deletes uploads that no feature row claimed within the TTL (file + registry tombstone). Returns the number removed.
+ * Runs at startup and periodically (`startMediaSweeper`).
+ */
+export async function sweepUnattachedUploads(now = Date.now()): Promise<number> {
+  const cutoff = new Date(now - unattachedTtlMs());
+  const stale = await db
+    .update(mediaFiles)
+    .set({ deletedAt: new Date(now) })
+    .where(and(eq(mediaFiles.ownerType, UNATTACHED_OWNER), isNull(mediaFiles.deletedAt), lt(mediaFiles.createdAt, cutoff)))
+    .returning({ storageKey: mediaFiles.storageKey });
+  for (const { storageKey } of stale) await purgeMediaFile(storageKey);
+  return stale.length;
+}
+
+/** Starts the sweep now and then hourly; the timer does not keep the process alive. */
+export function startMediaSweeper(intervalMs = 60 * 60 * 1000): () => void {
+  const run = () => sweepUnattachedUploads().then((n) => (n > 0 ? logger.info({ removed: n }, "[media] swept unused uploads") : undefined)).catch((err) => logger.error({ err }, "[media] sweep failed"));
+  void run();
+  const timer = setInterval(run, intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
 /** Opt a file into unauthenticated serving (`public_opt_in`). Sensitive files and files without a club can never be public. */
 export async function setMediaVisibility(storageKey: string, visibility: MediaVisibility): Promise<void> {
   const row = await findMediaByKey(storageKey);
@@ -218,12 +275,24 @@ export async function registerLegacyFile(input: {
 }): Promise<MediaFileRow | null> {
   let buffer: Buffer;
   try {
+    // Cap BEFORE reading: a huge stray file must not be pulled into memory.
+    if ((await objectSize(input.storageKey)) > MAX_DOCUMENT_BYTES) return null;
     buffer = await getObject(input.storageKey);
   } catch {
     return null;
   }
   const mimeType = sniffMimeType(buffer);
   if (!mimeType || (input.kind === "image" && !mimeType.startsWith("image/"))) return null;
+  if (mimeType.startsWith("image/")) {
+    // Old files were never sanitised: strip EXIF/GPS now and rewrite the file, so the registry describes what is served.
+    try {
+      const stripped = stripImageMetadata(buffer, mimeType);
+      if (!stripped.equals(buffer)) await writeObject(input.storageKey, stripped);
+      buffer = stripped;
+    } catch {
+      return null;
+    }
+  }
   await db
     .insert(mediaFiles)
     .values({

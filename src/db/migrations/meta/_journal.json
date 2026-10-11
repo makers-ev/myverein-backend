@@ -141,6 +141,13 @@
       "when": 1791742430860,
       "tag": "0019_media-security-layer",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1791743766173,
+      "tag": "0020_media-legacy-photo-keys",
+      "breakpoints": true
     }
   ]
 }
