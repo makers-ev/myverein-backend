@@ -12,6 +12,7 @@ import { locationWifiNetworks } from "../db/schema/location-wifi.js";
 import { LOCATION_VISIBILITIES, locationKeyHolders, locations, type LocationRow, type LocationVisibility } from "../db/schema/locations.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
+import { attachUploadedImage, markMediaDeleted, purgeMediaFile, signedMediaUrls } from "../lib/media.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -75,6 +76,22 @@ function shapeLocation(row: LocationRow, roleTypes: readonly string[]) {
   return { ...row, accessNote: null, accessRestricted: true };
 }
 
+/**
+ * Response shape of locations: the stored `photoKey` is internal, clients get `photoUrl` -- a short-lived signed media
+ * URL (null if there is no photo or the file is gone). Only called after the route's own permission check.
+ */
+async function withPhotoUrls<T extends { photoKey: string | null }>(clubId: string, rows: T[]) {
+  const urls = await signedMediaUrls(clubId, rows.map((r) => r.photoKey), "location");
+  return rows.map(({ photoKey, ...rest }) => ({ ...rest, photoUrl: photoKey ? (urls.get(photoKey) ?? null) : null }));
+}
+
+/** Claims a freshly uploaded image for a location (inside the caller's transaction). */
+function claimLocationPhoto(tx: Parameters<typeof attachUploadedImage>[0], clubId: string, userId: string, locationId: string, photoKey: string) {
+  return attachUploadedImage(tx, { clubId, storageKey: photoKey, uploadedBy: userId, owner: { type: "location", id: locationId } });
+}
+
+const photoUrlRemoved = z.never({ error: "photoUrl is no longer accepted: upload the image via POST /media and send its key as photoKey" }).optional();
+
 // --- Location CRUD -----------------------------------------------------------
 
 locationRoutes.get("/", async (c) => {
@@ -83,7 +100,8 @@ locationRoutes.get("/", async (c) => {
     where: eq(locations.clubId, clubId),
     orderBy: (l, { asc }) => [asc(l.name)],
   });
-  return c.json({ data: rows.map((row) => shapeLocation(row, c.get("clubRoleTypes"))) });
+  const shaped = rows.map((row) => shapeLocation(row, c.get("clubRoleTypes")));
+  return c.json({ data: await withPhotoUrls(clubId, shaped) });
 });
 
 locationRoutes.get("/:id", async (c) => {
@@ -97,7 +115,8 @@ locationRoutes.get("/:id", async (c) => {
     ? await db.query.locationKeyHolders.findMany({ where: eq(locationKeyHolders.locationId, id) })
     : [];
 
-  return c.json({ data: { ...shapeLocation(row, roleTypes), keyHolders } });
+  const [shaped] = await withPhotoUrls(clubId, [shapeLocation(row, roleTypes)]);
+  return c.json({ data: { ...shaped, keyHolders } });
 });
 
 const createLocationSchema = z.object({
@@ -106,7 +125,8 @@ const createLocationSchema = z.object({
   latitude: z.number().optional(),
   longitude: z.number().optional(),
   openingHours: z.string().optional(),
-  photoUrl: z.string().optional(),
+  photoKey: z.string().min(1).max(300).optional(),
+  photoUrl: photoUrlRemoved,
   contactPerson: z.string().optional(),
   accessNote: z.string().optional(),
 });
@@ -122,24 +142,27 @@ locationRoutes.post(
     requireLocationsWrite(roleTypes);
     const body = c.req.valid("json");
 
-    const [row] = await db
-      .insert(locations)
-      .values({
-        clubId,
-        name: body.name,
-        address: body.address,
-        latitude: body.latitude === undefined ? undefined : String(body.latitude),
-        longitude: body.longitude === undefined ? undefined : String(body.longitude),
-        openingHours: body.openingHours,
-        photoUrl: body.photoUrl,
-        contactPerson: body.contactPerson,
-        accessNote: body.accessNote,
-      })
-      .returning();
+    const row = await db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(locations)
+        .values({
+          clubId,
+          name: body.name,
+          address: body.address,
+          latitude: body.latitude === undefined ? undefined : String(body.latitude),
+          longitude: body.longitude === undefined ? undefined : String(body.longitude),
+          openingHours: body.openingHours,
+          photoKey: body.photoKey,
+          contactPerson: body.contactPerson,
+          accessNote: body.accessNote,
+        })
+        .returning();
+      if (body.photoKey) await claimLocationPhoto(tx, clubId, c.get("user").id, created!.id, body.photoKey);
+      await tx.insert(auditLog).values({ eventType: "location.create", subjectId: created!.id, payload: { clubId, name: created!.name } });
+      return created!;
+    });
 
-    await db.insert(auditLog).values({ eventType: "location.create", subjectId: row.id, payload: { clubId, name: row.name } });
-
-    return c.json({ data: row }, 201);
+    return c.json({ data: (await withPhotoUrls(clubId, [row]))[0] }, 201);
   },
 );
 
@@ -149,7 +172,8 @@ const updateLocationSchema = z.object({
   latitude: z.number().nullable().optional(),
   longitude: z.number().nullable().optional(),
   openingHours: z.string().nullable().optional(),
-  photoUrl: z.string().nullable().optional(),
+  photoKey: z.string().min(1).max(300).nullable().optional(),
+  photoUrl: photoUrlRemoved,
   contactPerson: z.string().nullable().optional(),
   accessNote: z.string().nullable().optional(),
 });
@@ -166,22 +190,30 @@ locationRoutes.patch(
     const id = c.req.param("id");
     const body = c.req.valid("json");
 
-    await loadClubLocation(id, clubId);
+    const existing = await loadClubLocation(id, clubId);
 
-    const [row] = await db
-      .update(locations)
-      .set({
-        ...body,
-        latitude: body.latitude === undefined ? undefined : body.latitude === null ? null : String(body.latitude),
-        longitude: body.longitude === undefined ? undefined : body.longitude === null ? null : String(body.longitude),
-        updatedAt: new Date(),
-      })
-      .where(and(eq(locations.id, id), eq(locations.clubId, clubId)))
-      .returning();
+    const replaced = body.photoKey !== undefined && existing.photoKey !== null && existing.photoKey !== body.photoKey;
+    let removedPhoto = false;
+    const row = await db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(locations)
+        .set({
+          ...body,
+          latitude: body.latitude === undefined ? undefined : body.latitude === null ? null : String(body.latitude),
+          longitude: body.longitude === undefined ? undefined : body.longitude === null ? null : String(body.longitude),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(locations.id, id), eq(locations.clubId, clubId)))
+        .returning();
+      if (body.photoKey && body.photoKey !== existing.photoKey) await claimLocationPhoto(tx, clubId, c.get("user").id, id, body.photoKey);
+      // A replaced / removed photo is deleted (registry tombstone now, file after the commit).
+      if (replaced) removedPhoto = await markMediaDeleted(existing.photoKey!, tx, clubId);
+      await tx.insert(auditLog).values({ eventType: "location.update", subjectId: id, payload: { clubId, changes: body } });
+      return updated!;
+    });
+    if (removedPhoto) await purgeMediaFile(existing.photoKey!);
 
-    await db.insert(auditLog).values({ eventType: "location.update", subjectId: id, payload: { clubId, changes: body } });
-
-    return c.json({ data: row });
+    return c.json({ data: (await withPhotoUrls(clubId, [row]))[0] });
   },
 );
 
@@ -191,10 +223,14 @@ locationRoutes.delete("/:id", async (c) => {
   requireLocationsWrite(roleTypes);
   const id = c.req.param("id");
 
-  await loadClubLocation(id, clubId);
-
-  await db.delete(locations).where(and(eq(locations.id, id), eq(locations.clubId, clubId)));
-  await db.insert(auditLog).values({ eventType: "location.delete", subjectId: id, payload: { clubId } });
+  const existing = await loadClubLocation(id, clubId);
+  let removedPhoto = false;
+  await db.transaction(async (tx) => {
+    await tx.delete(locations).where(and(eq(locations.id, id), eq(locations.clubId, clubId)));
+    if (existing.photoKey) removedPhoto = await markMediaDeleted(existing.photoKey, tx, clubId);
+    await tx.insert(auditLog).values({ eventType: "location.delete", subjectId: id, payload: { clubId } });
+  });
+  if (removedPhoto) await purgeMediaFile(existing.photoKey!);
 
   return c.body(null, 204);
 });

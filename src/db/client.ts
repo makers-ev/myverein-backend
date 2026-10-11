@@ -25,6 +25,7 @@ import * as inventorySchema from "./schema/inventory.js";
 import * as locationLinksSchema from "./schema/location-links.js";
 import * as locationWifiSchema from "./schema/location-wifi.js";
 import * as locationsSchema from "./schema/locations.js";
+import * as mediaFilesSchema from "./schema/media-files.js";
 import * as meetingsSchema from "./schema/meetings.js";
 import * as notificationsSchema from "./schema/notifications.js";
 
@@ -75,6 +76,7 @@ export const schema = {
   ...eventsSchema,
   ...eventAttendeesSchema,
   ...availabilitySchema,
+  ...mediaFilesSchema,
   ...meetingsSchema,
   ...locationsSchema,
   ...locationWifiSchema,

@@ -23,7 +23,8 @@ export const locations = pgTable(
     latitude: numeric("latitude"),
     longitude: numeric("longitude"),
     openingHours: text("opening_hours"),
-    photoUrl: text("photo_url"),
+    // Storage key of a `media_files` row, never a URL (B18).
+    photoKey: text("photo_key"),
     contactPerson: text("contact_person"),
     accessNote: text("access_note"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

@@ -67,7 +67,8 @@ export const inventoryDamageReports = pgTable(
       .notNull()
       .references(() => member.id, { onDelete: "cascade" }),
     description: text("description").notNull(),
-    photoUrl: text("photo_url"),
+    // Storage key of a `media_files` row, never a URL (B18).
+    photoKey: text("photo_key"),
     // Freitext-Beispiele: "gemeldet" | "in_bearbeitung" | "behoben".
     status: text("status").notNull().default("gemeldet"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

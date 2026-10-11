@@ -1,87 +1,76 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
-import { NotFoundError, ValidationError } from "../lib/errors.js";
-import { getObject, putObject } from "../lib/storage.js";
+import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { findMediaByKey, IMAGE_TYPES, MAX_IMAGE_BYTES, serveSignedMedia, storeUpload } from "../lib/media.js";
+import { buildMediaUrl, mediaUrlTtlMs, verifyMediaSignature } from "../lib/media-url.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
 
+/**
+ * Media endpoints (Wave 7 B18). Two very different halves:
+ *
+ * - `GET /media/<key>?exp=&sig=` is registered FIRST and needs no session: it only checks the HMAC signature (minted by
+ *   a feature route after ITS permission check) and the registry row. Plain `<img src>` and the native app `Image` can
+ *   load it without cookies. Rate limited per IP.
+ * - Everything registered after the `use(...)` calls (the upload) needs session + club membership.
+ */
 export const mediaRoutes = new Hono<ClubEnv>();
 
-mediaRoutes.use("*", rateLimit({ windowMs: 60_000, max: 60 }));
+const servePerIp = rateLimit({ windowMs: 60_000, max: 600 });
+
+// Key contains slashes (`<clubId>/<uuid>.<ext>`), so the param captures the rest of the path.
+mediaRoutes.get("/:key{.+}", servePerIp, async (c) => {
+  const key = c.req.param("key");
+  const exp = c.req.query("exp");
+  const sig = c.req.query("sig");
+
+  const row = await findMediaByKey(key);
+  // Explicitly opted-in public media (never sensitive, see setMediaVisibility) needs no signature.
+  if (row && row.visibility === "public_opt_in" && !row.sensitive) return serveSignedMedia(c, row, 300);
+
+  // Signature first, existence second: an unsigned request cannot probe which keys exist.
+  if (!verifyMediaSignature(key, exp, sig)) throw new ForbiddenError("Invalid or expired media link");
+  if (!row) throw new NotFoundError("File not found");
+
+  const maxAge = Math.min(Math.floor((Number(exp) - Date.now()) / 1000), Math.floor(mediaUrlTtlMs() / 1000));
+  return serveSignedMedia(c, row, maxAge);
+});
+
 mediaRoutes.use("*", sessionGuard);
 mediaRoutes.use("*", clubGuard);
+mediaRoutes.use("*", rateLimit({ windowMs: 60_000, max: 30, key: (c) => `media-upload:${c.get("user").id}` }));
 
-export const ALLOWED_IMAGE_CONTENT_TYPES: string[] = ["image/jpeg", "image/png", "image/webp"];
-export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
-
-/** Content-type/size gate. Pure so it's unit-testable without a live server. */
-export function assertValidImage(contentType: string, sizeBytes: number): void {
-  if (!ALLOWED_IMAGE_CONTENT_TYPES.includes(contentType)) {
-    throw new ValidationError(`Unsupported content type: ${contentType}`);
-  }
-  if (sizeBytes > MAX_UPLOAD_BYTES) {
-    throw new ValidationError(`File exceeds maximum size of ${MAX_UPLOAD_BYTES} bytes`);
-  }
-}
-
-const CONTENT_TYPE_BY_EXTENSION: Record<string, string> = {
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  png: "image/png",
-  webp: "image/webp",
-};
-
+/**
+ * Generic image upload (e.g. damage report photos). Returns the storage `key` to put into the feature request
+ * (`photoKey`) and a signed preview URL. The file is stored `unattached`; the feature route claims it exactly once.
+ */
 mediaRoutes.post(
   "/",
   bodyLimit({
-    maxSize: MAX_UPLOAD_BYTES,
+    maxSize: MAX_IMAGE_BYTES + 64 * 1024, // multipart framing overhead on top of the file itself
     onError: () => {
-      throw new ValidationError(`File exceeds maximum size of ${MAX_UPLOAD_BYTES} bytes`);
+      throw new ValidationError(`File exceeds maximum size of ${MAX_IMAGE_BYTES} bytes`);
     },
   }),
   async (c) => {
-    const clubId = c.get("clubId");
-
     const body = await c.req.parseBody();
     const file = body["file"];
     if (!(file instanceof File)) {
       throw new ValidationError("Missing file upload (field name: file)");
     }
 
-    assertValidImage(file.type, file.size);
+    const row = await storeUpload({
+      file,
+      clubId: c.get("clubId"),
+      kind: "image",
+      allowedTypes: IMAGE_TYPES,
+      maxBytes: MAX_IMAGE_BYTES,
+      visibility: "club",
+      uploadedBy: c.get("user").id,
+    });
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const { key } = await putObject({ clubId, filename: file.name, buffer });
-
-    return c.json({ data: { key } }, 201);
+    return c.json({ data: { key: row.storageKey, url: buildMediaUrl(row.storageKey), mimeType: row.mimeType, sizeBytes: row.sizeBytes } }, 201);
   },
 );
-
-// Key contains a slash (`${clubId}/${uuid}-${filename}`), so the param needs
-// a regex capturing the rest of the path, not a plain `:key`.
-mediaRoutes.get("/:key{.+}", async (c) => {
-  const clubId = c.get("clubId");
-  const key = c.req.param("key");
-
-  // The key's club-id prefix must match the caller's club -- never 403, same
-  // "don't leak existence" convention as the rest of this backend.
-  const [keyClubId] = key.split("/", 1);
-  if (keyClubId !== clubId) {
-    throw new NotFoundError("File not found");
-  }
-
-  let buffer: Buffer;
-  try {
-    buffer = await getObject(key);
-  } catch {
-    throw new NotFoundError("File not found");
-  }
-
-  const extension = key.split(".").pop()?.toLowerCase() ?? "";
-  const contentType = CONTENT_TYPE_BY_EXTENSION[extension] ?? "application/octet-stream";
-
-  c.header("Content-Type", contentType);
-  return c.body(new Uint8Array(buffer));
-});

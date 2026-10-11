@@ -176,7 +176,7 @@ adminClubRegistrationRoutes.get("/:id/documents/:docId", async (c) => {
   if (row.status === "draft") throw new NotFoundError("Registration not found");
   const doc = await findDocument(row.id, c.req.param("docId"));
   await recordAdminDocumentAccess(c.get("user").id, row.id, doc);
-  return documentResponse(c, doc);
+  return documentResponse(c, doc, c.get("user").id);
 });
 
 // --- decisions ---------------------------------------------------------

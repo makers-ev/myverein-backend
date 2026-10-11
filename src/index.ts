@@ -47,6 +47,9 @@ app.use(
     xContentTypeOptions: true,
     xFrameOptions: "DENY",
     referrerPolicy: "strict-origin-when-cross-origin",
+    // The website embeds signed GET /media/* images cross-origin (<img>, api. vs app. subdomain); the default
+    // same-origin would block them. Only signed/opted-in media is reachable that way, JSON stays CORS-gated.
+    crossOriginResourcePolicy: "cross-origin",
   }),
 );
 

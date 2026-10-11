@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
+import path from "node:path";
 
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -9,7 +11,12 @@ import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { toAppError } from "../lib/errors.js";
+import { mediaFiles } from "../db/schema/media-files.js";
+import { locations } from "../db/schema/locations.js";
+import { makePng } from "../lib/media-fixtures.js";
+import { UPLOADS_DIR } from "../lib/storage.js";
 import { locationRoutes } from "./locations.js";
+import { mediaRoutes } from "./media.js";
 
 /**
  * Integration test against a real Postgres (DATABASE_URL), following
@@ -23,6 +30,7 @@ import { locationRoutes } from "./locations.js";
 
 const app = new Hono();
 app.route("/locations", locationRoutes);
+app.route("/media", mediaRoutes);
 app.onError((err, c) => {
   const appError = toAppError(err);
   return c.json(appError.toJSON(), appError.status as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 503);
@@ -557,6 +565,103 @@ describe("locations routes", () => {
 
       const getRes = await app.request(`/locations/${deleteLocationId}?clubId=${clubAId}`, { headers: { cookie: cookieBoard } });
       expect(getRes.status).toBe(404);
+    });
+  });
+  // --- Photos (B18: keys in the table, signed URLs in the response) ---------------------
+
+  describe("photos", () => {
+    type Loc = { id: string; photoUrl: string | null; photoKey?: string };
+    const upload = async (clubId: string, cookie: string) => {
+      const form = new FormData();
+      form.set("file", new File([new Uint8Array(makePng(true))], "ort.png", { type: "image/png" }));
+      const res = await app.request(`/media?clubId=${clubId}`, { method: "POST", headers: { cookie }, body: form });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { data: { key: string } }).data.key;
+    };
+    const send = (method: string, url: string, cookie: string, body: object) =>
+      app.request(url, { method, headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body) });
+    const signedPath = (url: string) => {
+      const u = new URL(url);
+      return `${u.pathname}${u.search}`;
+    };
+    let photoLocation: Loc;
+    let firstKey: string;
+
+    it("stores the uploaded key, claims the file and answers with a signed photoUrl (no photoKey)", async () => {
+      firstKey = await upload(clubAId, cookieBoard);
+      const res = await send("POST", `/locations?clubId=${clubAId}`, cookieBoard, { name: "Mit Foto", photoKey: firstKey });
+      expect(res.status).toBe(201);
+      photoLocation = ((await res.json()) as { data: Loc }).data;
+      expect(photoLocation.photoKey).toBeUndefined();
+      expect(photoLocation.photoUrl).toContain(`/media/${firstKey}?exp=`);
+      const [row] = await db.select().from(locations).where(eq(locations.id, photoLocation.id));
+      expect(row.photoKey).toBe(firstKey);
+      const [media] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, firstKey));
+      expect(media).toMatchObject({ ownerType: "location", ownerId: photoLocation.id });
+      expect((await app.request(signedPath(photoLocation.photoUrl!))).status).toBe(200);
+    });
+
+    it("hands out the signed URL to plain members in list and detail, and nothing without a key", async () => {
+      const list = (await (await app.request(`/locations?clubId=${clubAId}`, { headers: { cookie: cookiePlain } })).json()) as { data: Loc[] };
+      expect(list.data.find((l) => l.id === photoLocation.id)?.photoUrl).toContain("/media/");
+      expect(list.data.find((l) => l.id === locationId)?.photoUrl).toBeNull();
+      expect(list.data.every((l) => l.photoKey === undefined)).toBe(true);
+      const detail = (await (await app.request(`/locations/${photoLocation.id}?clubId=${clubAId}`, { headers: { cookie: cookiePlain } })).json()) as { data: Loc };
+      expect(detail.data.photoUrl).toContain("/media/");
+      // The other club cannot read it (IDOR) and its listing does not contain it.
+      expect((await app.request(`/locations/${photoLocation.id}?clubId=${clubBId}`, { headers: { cookie: cookieB } })).status).toBe(404);
+    });
+
+    it("rejects the removed free-text photoUrl and invented, foreign, other-user and reused keys with 422", async () => {
+      expect((await send("POST", `/locations?clubId=${clubAId}`, cookieBoard, { name: "x", photoUrl: "https://evil.example/x.png" })).status).toBe(422);
+      expect((await send("PATCH", `/locations/${photoLocation.id}?clubId=${clubAId}`, cookieBoard, { photoUrl: "/media/x" })).status).toBe(422);
+      expect((await send("POST", `/locations?clubId=${clubAId}`, cookieBoard, { name: "x", photoKey: `${clubAId}/invented.png` })).status).toBe(422);
+      const foreign = await upload(clubBId, cookieB);
+      expect((await send("POST", `/locations?clubId=${clubAId}`, cookieBoard, { name: "x", photoKey: foreign })).status).toBe(422);
+      expect((await send("POST", `/locations?clubId=${clubAId}`, cookieBoard, { name: "x", photoKey: firstKey })).status).toBe(422); // already claimed
+      const all = (await (await app.request(`/locations?clubId=${clubAId}`, { headers: { cookie: cookieBoard } })).json()) as { data: Array<{ name: string }> };
+      expect(all.data.filter((l) => l.name === "x")).toHaveLength(0); // the failed creates left no row behind
+    });
+
+    it("replaces the photo (old file deleted) and removes it with photoKey null", async () => {
+      const secondKey = await upload(clubAId, cookieBoard);
+      const res = await send("PATCH", `/locations/${photoLocation.id}?clubId=${clubAId}`, cookieBoard, { photoKey: secondKey });
+      expect(res.status).toBe(200);
+      const oldUrl = photoLocation.photoUrl!;
+      const body = ((await res.json()) as { data: Loc }).data;
+      expect(body.photoUrl).toContain(secondKey);
+      const [oldMedia] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, firstKey));
+      expect(oldMedia.deletedAt).not.toBeNull();
+      await expect(stat(path.join(UPLOADS_DIR, firstKey))).rejects.toThrow();
+      expect((await app.request(signedPath(oldUrl))).status).toBe(404);
+
+      // Unrelated PATCH keeps the photo; null removes it.
+      const renamed = await send("PATCH", `/locations/${photoLocation.id}?clubId=${clubAId}`, cookieBoard, { name: "Umbenannt" });
+      expect(((await renamed.json()) as { data: Loc }).data.photoUrl).toContain(secondKey);
+      const cleared = await send("PATCH", `/locations/${photoLocation.id}?clubId=${clubAId}`, cookieBoard, { photoKey: null });
+      expect(((await cleared.json()) as { data: Loc }).data.photoUrl).toBeNull();
+      await expect(stat(path.join(UPLOADS_DIR, secondKey))).rejects.toThrow();
+    });
+
+    it("deletes the photo file together with the location", async () => {
+      const key = await upload(clubAId, cookieBoard);
+      const created = ((await (await send("POST", `/locations?clubId=${clubAId}`, cookieBoard, { name: "Wegwerf", photoKey: key })).json()) as { data: Loc }).data;
+      expect((await app.request(`/locations/${created.id}?clubId=${clubAId}`, { method: "DELETE", headers: { cookie: cookieBoard } })).status).toBe(204);
+      await expect(stat(path.join(UPLOADS_DIR, key))).rejects.toThrow();
+      const [media] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, key));
+      expect(media.deletedAt).not.toBeNull();
+    });
+
+    it("never returns pre-media-layer free-text values: a legacy external URL or a foreign key reads as null", async () => {
+      const foreign = await upload(clubBId, cookieB);
+      const [legacyUrl] = await db.insert(locations).values({ clubId: clubAId, name: "Alt URL", photoKey: "https://evil.example/x.png" }).returning();
+      const [legacyForeign] = await db.insert(locations).values({ clubId: clubAId, name: "Alt Fremd", photoKey: foreign }).returning();
+      const list = (await (await app.request(`/locations?clubId=${clubAId}`, { headers: { cookie: cookieBoard } })).json()) as { data: Loc[] };
+      expect(list.data.find((l) => l.id === legacyUrl.id)?.photoUrl).toBeNull();
+      expect(list.data.find((l) => l.id === legacyForeign.id)?.photoUrl).toBeNull();
+      // deleting such a location must not delete the other club's file
+      expect((await app.request(`/locations/${legacyForeign.id}?clubId=${clubAId}`, { method: "DELETE", headers: { cookie: cookieBoard } })).status).toBe(204);
+      expect((await stat(path.join(UPLOADS_DIR, foreign))).isFile()).toBe(true);
     });
   });
 });

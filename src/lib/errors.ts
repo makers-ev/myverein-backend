@@ -16,11 +16,17 @@ export type ErrorCode =
   | "UNPROCESSABLE_ENTITY"
   | "TOO_MANY_REQUESTS"
   | "INTERNAL_ERROR"
-  | "SERVICE_UNAVAILABLE";
+  | "SERVICE_UNAVAILABLE"
+  // Domain-specific codes (same HTTP status as the base class they are thrown with, see AppErrorOptions.code).
+  | "ALREADY_MEMBER"
+  | "APPLICATION_PENDING"
+  | "QUOTA_EXCEEDED";
 
 export interface AppErrorOptions {
   cause?: unknown;
   details?: unknown;
+  /** Overrides the base class' code so clients can tell apart cases that share an HTTP status (e.g. two kinds of 409). */
+  code?: ErrorCode;
 }
 
 export class AppError extends Error {
@@ -31,7 +37,7 @@ export class AppError extends Error {
   constructor(code: ErrorCode, status: number, message: string, options: AppErrorOptions = {}) {
     super(message, { cause: options.cause });
     this.name = "AppError";
-    this.code = code;
+    this.code = options.code ?? code;
     this.status = status;
     this.details = options.details;
   }

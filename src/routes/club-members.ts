@@ -1,6 +1,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNotNull, isNull, lte, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { member, organization, user } from "../auth/auth-schema.js";
@@ -30,6 +31,8 @@ import { sendEmail } from "../lib/email.js";
 import { APP_NAME, buildMemberInviteEmail, LOGO_CID, LOGO_PATH, SITE_URL } from "../lib/emailTemplate.js";
 import { clubMemberInvites, type ClubMemberInviteRow } from "../db/schema/club-member-invites.js";
 import { COUNTED_STATUSES, effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
+import { findMemberPhotoMedia, canSeeMemberPhoto, isMinor, memberPhotoUrls, removeMemberPhoto, replaceMemberPhoto, type PhotoCaller } from "../lib/member-photos.js";
+import { MAX_PHOTO_BYTES, streamMedia } from "../lib/media.js";
 import { nextMemberNumber } from "../lib/member-number.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -52,12 +55,14 @@ const validationHook = (result: { success: boolean; error?: { issues: unknown } 
  * leftAt, effectiveStatus (status derived at read time: left_at <= today => ausgetreten), orgRole, roles, departments.
  * `suggestedCategory` ({id,key,name} | null, age transition proposal) only for the own row or `members:read_sensitive`,
  * because it is derived from the birth date.
+ * `photoUrl`: short-lived signed media URL or null -- only for the own row, callers with `members:write` / `members:read_sensitive`
+ * and the guardians of a ward (never for other plain members; see lib/member-photos.ts).
  * Only for the member's own row or callers with `members:read_sensitive`: email (account e-mail), contactEmail,
  * memberNumber, birthDate, street, postalCode, city, phone, emergencyContactName/Phone.
  *
  * Batch-loads everything it needs, so the list endpoint does not run N+1 queries.
  */
-async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: string; canReadSensitive: boolean }, forceSensitive = false, today = todayBerlin()) {
+async function shapeClubMembers(rows: ClubMemberRow[], caller: PhotoCaller, forceSensitive = false, today = todayBerlin()) {
   if (rows.length === 0) return [];
 
   const memberIds = rows.map((r) => r.memberId).filter((v): v is string => v !== null);
@@ -77,6 +82,9 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: strin
       .where(inArray(clubMemberDepartments.clubMemberId, rows.map((r) => r.id)))
       .orderBy(asc(departments.name), asc(clubMemberDepartments.since)),
   ]);
+
+  // Signed photo URLs, only for rows the caller may see a photo of (own / members:write / read_sensitive / guardian).
+  const photoUrls = await memberPhotoUrls(rows[0]!.clubId, rows, caller, (row) => forceSensitive || (row.memberId !== null && row.memberId === caller.memberId));
 
   const accountById = new Map(accountRows.map((a) => [a.member.id, a]));
   const rolesByMember = new Map<string, typeof roleRows>();
@@ -114,6 +122,7 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: strin
       orgRole: account?.member.role ?? null,
       roles: (account ? (rolesByMember.get(account.member.id) ?? []) : []).map((r) => ({ id: r.id, roleType: r.roleType, departmentId: r.departmentId, termEndsAt: r.termEndsAt })),
       departments: departmentsByMember.get(row.id) ?? [],
+      photoUrl: photoUrls.get(row.id) ?? null,
       ...(sensitive
         ? {
             email: account?.email ?? null,
@@ -135,12 +144,16 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: strin
 
 type ShapedMember = Awaited<ReturnType<typeof shapeClubMembers>>[number];
 
-async function shapeOne(row: ClubMemberRow, caller: { memberId: string; canReadSensitive: boolean }, forceSensitive = false): Promise<ShapedMember> {
+async function shapeOne(row: ClubMemberRow, caller: PhotoCaller, forceSensitive = false): Promise<ShapedMember> {
   return (await shapeClubMembers([row], caller, forceSensitive))[0]!;
 }
 
 function callerOf(c: { get(k: "membership"): { id: string }; get(k: "clubRoleTypes"): string[] }) {
-  return { memberId: c.get("membership").id, canReadSensitive: hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive") };
+  return {
+    memberId: c.get("membership").id,
+    canReadSensitive: hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive"),
+    canWrite: hasClubPermission(c.get("clubRoleTypes"), "members:write"),
+  };
 }
 
 /** Roles (and other login-bound features) need a linked account: a member without an account answers 409. */
@@ -256,8 +269,18 @@ clubMemberRoutes.post(
           details: { code: "member_rejoin_blocked", clubMemberId: own!.id, status: state },
         });
       }
-      if (state !== "ausgetreten") throw new ConflictError("Already a member of this club");
+      if (state !== "ausgetreten") {
+        throw new ConflictError("Already a member of this club", { code: "ALREADY_MEMBER", details: { clubId, ...(own ? { clubMemberId: own.id } : {}) } });
+      }
     }
+
+    // Distinguishable from ALREADY_MEMBER so clients can say "your application is being reviewed". Details only carry
+    // the caller's OWN application.
+    const pendingFor = () => db.query.clubApplications.findFirst({ where: and(eq(clubApplications.userId, currentUser.id), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending")) });
+    const pendingError = (pending: { id: string; createdAt: Date }) =>
+      new ConflictError("An application for this club is already pending", { code: "APPLICATION_PENDING", details: { clubId, applicationId: pending.id, submittedAt: pending.createdAt } });
+    const alreadyPending = await pendingFor();
+    if (alreadyPending) throw pendingError(alreadyPending);
 
     let application;
     try {
@@ -266,7 +289,11 @@ clubMemberRoutes.post(
         .values({ userId: currentUser.id, clubId, category: body.category, birthDate: body.birthDate })
         .returning();
     } catch (err) {
-      if (isUniqueViolation(err)) throw new ConflictError("An application for this club is already pending");
+      if (isUniqueViolation(err)) {
+        // Lost a race against a parallel apply of the same user.
+        const raced = await pendingFor();
+        throw raced ? pendingError(raced) : new ConflictError("An application for this club is already pending", { code: "APPLICATION_PENDING", details: { clubId } });
+      }
       throw err;
     }
 
@@ -342,6 +369,70 @@ clubMemberRoutes.patch("/me", zValidator("json", updateSelfSchema, validationHoo
     .returning();
 
   return c.json({ data: await shapeOne(updated!, callerOf(c), true) });
+});
+
+// --- Profile photo (B13) ----------------------------------------------------
+// Stored through the central media layer (lib/media.ts + lib/member-photos.ts): JPEG/PNG/WebP, max 5 MB, magic bytes,
+// EXIF/GPS stripped, quota. Registered BEFORE the `/:id/...` routes so `me` is not taken for an id.
+
+const photoUploadLimit = bodyLimit({
+  maxSize: MAX_PHOTO_BYTES + 64 * 1024, // multipart framing overhead on top of the file itself
+  onError: () => {
+    throw new ValidationError(`File exceeds maximum size of ${MAX_PHOTO_BYTES} bytes`);
+  },
+});
+const photoWriteLimiter = rateLimit({ windowMs: 60_000, max: 20, key: (c) => `member-photo:${c.get("user").id}` });
+
+async function readPhotoFile(c: { req: { parseBody(): Promise<Record<string, unknown>> } }): Promise<File> {
+  const body = await c.req.parseBody();
+  const file = body["file"];
+  if (!(file instanceof File)) throw new ValidationError("Missing file upload (field name: file)");
+  return file;
+}
+
+clubMemberRoutes.put("/me/photo", photoWriteLimiter, photoUploadLimit, async (c) => {
+  const row = await ensureClubMember(db, c.get("membership"));
+  // Photos of minors are personal data of a child: the board sets them (with the guardians' consent), not the child.
+  if (isMinor(row.birthDate)) throw new ForbiddenError("The photo of a minor is set by the board (members:write)");
+  const updated = await replaceMemberPhoto({ row, file: await readPhotoFile(c), uploadedBy: c.get("user").id, changedBy: c.get("membership").id });
+  return c.json({ data: await shapeOne(updated, callerOf(c), true) });
+});
+
+clubMemberRoutes.delete("/me/photo", photoWriteLimiter, async (c) => {
+  const row = await ensureClubMember(db, c.get("membership"));
+  await removeMemberPhoto({ row, changedBy: c.get("membership").id });
+  return c.body(null, 204);
+});
+
+clubMemberRoutes.get("/me/photo", async (c) => {
+  const row = await ensureClubMember(db, c.get("membership"));
+  const media = await findMemberPhotoMedia(row);
+  if (!media) throw new NotFoundError("No photo");
+  return streamMedia(c, media);
+});
+
+clubMemberRoutes.put("/:id/photo", photoWriteLimiter, photoUploadLimit, async (c) => {
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+  const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
+  const updated = await replaceMemberPhoto({ row, file: await readPhotoFile(c), uploadedBy: c.get("user").id, changedBy: c.get("membership").id });
+  return c.json({ data: await shapeOne(updated, callerOf(c)) });
+});
+
+clubMemberRoutes.delete("/:id/photo", photoWriteLimiter, async (c) => {
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+  const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
+  await removeMemberPhoto({ row, changedBy: c.get("membership").id });
+  return c.body(null, 204);
+});
+
+// Authenticated stream (cookie / bearer), same rights as the photo URL in the member shape; 404 where the photo is hidden.
+clubMemberRoutes.get("/:id/photo", async (c) => {
+  const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
+  assertMemberReadable(c, row);
+  if (!(await canSeeMemberPhoto(row, callerOf(c)))) throw new NotFoundError("No photo");
+  const media = await findMemberPhotoMedia(row);
+  if (!media) throw new NotFoundError("No photo");
+  return streamMedia(c, media);
 });
 
 // --- Member list / detail / create / update --------------------------------

@@ -3,6 +3,7 @@ import { boolean, date, index, integer, pgTable, text, timestamp, uniqueIndex, u
 
 import { member, organization } from "../../auth/auth-schema.js";
 import { departments } from "./departments.js";
+import { mediaFiles } from "./media-files.js";
 
 /** Allowed values of `club_members.status` (free text in the DB, validated with Zod in the routes). */
 export const MEMBER_STATUSES = ["interessent", "probe", "aktiv", "ruhend", "ausgetreten", "ausgeschlossen", "verstorben"] as const;
@@ -77,6 +78,8 @@ export const clubMembers = pgTable(
     // Set when the board deliberately unlinked the account (POST /:id/unlink): the member stays as is (no exit) and the
     // row is not reused when the same person joins again. Cleared when an account is linked.
     accountUnlinkedAt: timestamp("account_unlinked_at", { withTimezone: true }),
+    // Profile photo: storage key of a `media_files` row (never a URL; B13). NULL = no photo.
+    photoKey: text("photo_key").references(() => mediaFiles.storageKey, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

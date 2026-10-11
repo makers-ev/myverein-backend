@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { and, eq, inArray } from "drizzle-orm";
@@ -13,12 +13,16 @@ import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrationDocuments, clubRegistrations } from "../db/schema/club-registrations.js";
+import { mediaFiles } from "../db/schema/media-files.js";
 import { encodeRfc5987 } from "../lib/club-registrations.js";
 import { toAppError } from "../lib/errors.js";
 import { sendEmail } from "../lib/email.js";
 import { nextMemberNumber } from "../lib/member-number.js";
-import { UPLOADS_DIR } from "../lib/storage.js";
+import { putObject, UPLOADS_DIR } from "../lib/storage.js";
 import { adminClubRegistrationRoutes } from "./admin-club-registrations.js";
+import { makePng } from "../lib/media-fixtures.js";
+import { signMediaKey } from "../lib/media-url.js";
+import { mediaRoutes } from "./media.js";
 import { clubApplicationRoutes } from "./club-applications.js";
 import { clubMemberRoutes } from "./club-members.js";
 import { clubRegistrationRoutes, MAX_DOCUMENTS_PER_REGISTRATION } from "./club-registrations.js";
@@ -43,6 +47,7 @@ app.route("/club-registrations", clubRegistrationRoutes);
 app.route("/admin/club-registrations", adminClubRegistrationRoutes);
 app.route("/club-members", clubMemberRoutes);
 app.route("/club-applications", clubApplicationRoutes);
+app.route("/media", mediaRoutes);
 app.onError((err, c) => {
   const appError = toAppError(err);
   return c.json(appError.toJSON(), appError.status as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 503);
@@ -51,7 +56,8 @@ app.onError((err, c) => {
 const suffix = Date.now();
 const json = { "content-type": "application/json" };
 const PDF = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(64, 0x20)]);
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]);
+// A structurally valid PNG: the media layer parses images to strip metadata and rejects corrupt files.
+const PNG = makePng(false);
 
 type Actor = { userId: string; cookie: string };
 
@@ -398,6 +404,49 @@ describe("club registrations (Wave 6)", () => {
 
       for (let i = 1; i < MAX_DOCUMENTS_PER_REGISTRATION; i++) await addDoc(who, reg.id);
       expect((await upload(who, reg.id, uploadForm(PDF, "six.pdf", "application/pdf"))).status).toBe(422);
+    });
+
+    it("registers proofs as SENSITIVE media: no signed URL, authenticated stream with an audit entry per retrieval, delete = tombstone + file", async () => {
+      const who = await applicant("sensitive");
+      const reg = await create(who, "Sensitive Media Verein");
+      const docId = await addDoc(who, reg.id);
+      const doc = (await db.query.clubRegistrationDocuments.findFirst({ where: eq(clubRegistrationDocuments.id, docId) }))!;
+
+      const [media] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, doc.storageKey));
+      expect(media).toMatchObject({ clubId: null, sensitive: true, visibility: "private", kind: "document", mimeType: "application/pdf", ownerType: "club_registration", ownerId: reg.id, uploadedBy: who.userId });
+
+      // Not reachable through GET /media/* even with a correct signature.
+      const exp = Date.now() + 60_000;
+      const signed = `/media/${doc.storageKey}?exp=${exp}&sig=${signMediaKey(doc.storageKey, exp)}`;
+      expect((await app.request(signed)).status).toBe(404);
+
+      const dl = await req(who, `/club-registrations/${reg.id}/documents/${docId}`);
+      expect(dl.status).toBe(200);
+      expect(dl.headers.get("cache-control")).toBe("private, no-store");
+      expect(dl.headers.get("content-disposition")).toContain("attachment");
+      await req(who, `/club-registrations/${reg.id}/documents/${docId}`);
+      const audits = await db.select().from(auditLog).where(and(eq(auditLog.subjectId, reg.id), eq(auditLog.eventType, "media.sensitive_access")));
+      expect(audits).toHaveLength(2);
+      expect(audits[0].payload).toMatchObject({ mediaId: media.id, accessedBy: who.userId });
+
+      expect((await req(who, `/club-registrations/${reg.id}/documents/${docId}`, { method: "DELETE" })).status).toBe(204);
+      const [after] = await db.select().from(mediaFiles).where(eq(mediaFiles.id, media.id));
+      expect(after.deletedAt).not.toBeNull();
+      await expect(stat(path.join(UPLOADS_DIR, doc.storageKey))).rejects.toThrow();
+    });
+
+    it("streams a proof uploaded before the media registry existed and registers it as sensitive on first access", async () => {
+      const who = await applicant("legacydoc");
+      const reg = await create(who, "Legacy Doc Verein");
+      const { key } = await putObject({ prefix: `registrations/${reg.id}`, extension: "pdf", buffer: PDF });
+      const [doc] = await db.insert(clubRegistrationDocuments).values({ registrationId: reg.id, kind: "satzung", storageKey: key, filename: "alt.pdf", mimeType: "application/pdf", sizeBytes: PDF.length }).returning();
+      expect((await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, key))).length).toBe(0);
+
+      const dl = await req(who, `/club-registrations/${reg.id}/documents/${doc.id}`);
+      expect(dl.status).toBe(200);
+      expect(Buffer.from(await dl.arrayBuffer()).equals(PDF)).toBe(true);
+      const [media] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, key));
+      expect(media).toMatchObject({ sensitive: true, clubId: null, mimeType: "application/pdf", ownerType: "club_registration" });
     });
 
     it("deletes documents (204) while editable and refuses changes once pending", async () => {

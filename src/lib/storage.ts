@@ -2,12 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-// Adapted from mycouple-backend's src/lib/storage.ts (local-disk object
-// storage, no Cloudflare R2 yet). Simplified for this repo: no quota system
-// (no media_uploads table -- not in this backend's Data Model doc), and
-// files are served back through an authenticated route (see
-// routes/media.ts) instead of a public URL, so putObject() returns only a
-// `key`, never a URL.
+// Raw local-disk object storage, adapted from mycouple-backend's src/lib/storage.ts (no Cloudflare R2 yet).
+// This is the LOWEST layer: nothing outside src/lib/media.ts (the central media security layer, Wave 7 B18) may call
+// putObject/getObject/deleteObject -- a test enforces that. It returns only a `key`, never a URL.
 export const UPLOADS_DIR = process.env.UPLOADS_DIR ?? "./uploads";
 
 /** Strips path separators and control characters from a client-supplied filename before it touches the filesystem. */
@@ -18,19 +15,13 @@ export function sanitizeFilename(filename: string): string {
   return trimmed || "file";
 }
 
-export async function putObject({
-  clubId,
-  filename,
-  buffer,
-}: {
-  clubId: string;
-  filename: string;
-  buffer: Buffer;
-}): Promise<{ key: string }> {
-  const clubDir = path.join(UPLOADS_DIR, clubId);
-  await mkdir(clubDir, { recursive: true });
+export async function putObject({ prefix, extension, buffer }: { prefix: string; extension: string; buffer: Buffer }): Promise<{ key: string }> {
+  const dir = path.join(UPLOADS_DIR, prefix);
+  await mkdir(dir, { recursive: true });
 
-  const key = `${clubId}/${randomUUID()}-${sanitizeFilename(filename)}`;
+  // The client filename never becomes part of the key (it lives in media_files.original_filename).
+  const safeExtension = extension.replace(/[^a-z0-9]/gi, "").slice(0, 8).toLowerCase();
+  const key = `${prefix}/${randomUUID()}${safeExtension ? `.${safeExtension}` : ""}`;
   await writeFile(path.join(UPLOADS_DIR, key), buffer);
 
   return { key };
