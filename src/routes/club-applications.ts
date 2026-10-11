@@ -6,10 +6,11 @@ import { member, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubApplications } from "../db/schema/club-applications.js";
-import { clubMemberships } from "../db/schema/club-memberships.js";
+import { clubMembers } from "../db/schema/club-members.js";
+import { ensureClubMember, findCategoryByKey } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError } from "../lib/errors.js";
-import { nextMemberNumber } from "../lib/member-number.js";
+import { logger } from "../lib/logger.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -95,6 +96,7 @@ clubApplicationRoutes.post("/:id/approve", async (c) => {
   }
   if (!createdMember) throw new ConflictError("Could not create membership");
 
+  const today = new Date().toISOString().slice(0, 10);
   try {
     const result = await db.transaction(async (tx) => {
       // Claim the application first: only one concurrent decision can flip it out of 'pending'.
@@ -105,35 +107,55 @@ clubApplicationRoutes.post("/:id/approve", async (c) => {
         .returning();
       if (!decided) throw new ConflictError("Application has already been decided");
 
-      const memberNumber = await nextMemberNumber(tx, clubId);
-      const [membership] = await tx
-        .insert(clubMemberships)
-        .values({
-          memberId: createdMember.id,
-          memberNumber,
-          category: application.category,
-          birthDate: application.birthDate,
-          joinedAt: new Date().toISOString().slice(0, 10),
-        })
+      // The Better Auth afterAddMember hook normally created the club_members row already (default category);
+      // ensureClubMember covers a hook that did not run, then the application's choices are applied on top.
+      const ensured = await ensureClubMember(tx, createdMember, { categoryKey: application.category, birthDate: application.birthDate, joinedAt: today });
+      const category = await findCategoryByKey(tx, clubId, application.category);
+      const [clubMember] = await tx
+        .update(clubMembers)
+        .set({ ...(category ? { categoryId: category.id } : {}), birthDate: application.birthDate ?? ensured.birthDate, joinedAt: today, status: "aktiv", updatedAt: new Date() })
+        .where(eq(clubMembers.id, ensured.id))
         .returning();
+      const memberNumber = clubMember!.memberNumber;
 
       await tx.insert(auditLog).values({
         eventType: "club_application.approve",
         subjectId: application.id,
-        payload: { clubId, userId: application.userId, memberId: createdMember.id, decidedBy: decider.id, memberNumber },
+        payload: { clubId, userId: application.userId, memberId: createdMember.id, clubMemberId: clubMember!.id, decidedBy: decider.id, memberNumber },
       });
 
-      return { application: decided, membership };
+      return { application: decided, clubMember: clubMember!, categoryKey: category?.key ?? application.category };
     });
 
-    return c.json({ data: { application: result.application, member: createdMember, membership: result.membership } });
+    // `membership` is the pre-Wave-7 shape (deprecated, kept for existing clients); `clubMember` is the canonical row.
+    const { clubMember } = result;
+    const membership = {
+      id: clubMember.id,
+      memberId: createdMember.id,
+      memberNumber: clubMember.memberNumber,
+      category: result.categoryKey,
+      joinedAt: clubMember.joinedAt,
+      leftAt: clubMember.leftAt,
+      birthDate: clubMember.birthDate,
+      emergencyContactName: clubMember.emergencyContactName,
+      emergencyContactPhone: clubMember.emergencyContactPhone,
+      createdAt: clubMember.createdAt,
+      updatedAt: clubMember.updatedAt,
+    };
+    return c.json({ data: { application: result.application, member: createdMember, membership, clubMember } });
   } catch (err) {
-    // The member row was created outside the transaction -- best-effort removal so a failed approval doesn't leave
-    // a member without a club_memberships row while the application is still pending.
+    // The member row (and the club_members row the hook created for it) was created outside the transaction --
+    // best-effort removal so a failed approval doesn't leave a half-joined member while the application is still
+    // pending. The club_members row goes first: its member_id FK is ON DELETE SET NULL and would otherwise leave
+    // an account-less ghost member behind.
+    await db
+      .delete(clubMembers)
+      .where(eq(clubMembers.memberId, createdMember.id))
+      .catch((cleanupErr) => logger.error({ err: cleanupErr, memberId: createdMember.id }, "[club-applications] failed to remove club member after aborted approval"));
     await db
       .delete(member)
       .where(eq(member.id, createdMember.id))
-      .catch((cleanupErr) => console.error("[club-applications] failed to remove member after aborted approval", createdMember.id, cleanupErr));
+      .catch((cleanupErr) => logger.error({ err: cleanupErr, memberId: createdMember.id }, "[club-applications] failed to remove member after aborted approval"));
     throw err;
   }
 });

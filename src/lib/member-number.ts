@@ -17,7 +17,7 @@ export function clubAbbreviation(slug: string | null | undefined): string {
  * Locks the club's `organization` row (`FOR UPDATE`) for the rest of the
  * transaction so two concurrent approvals/first-time upserts can't read the
  * same number and hand out the same number. Must be called inside the same
- * transaction that inserts the `club_memberships` row.
+ * transaction that inserts the `club_members` row.
  */
 export async function nextMemberNumber(tx: DbTransaction, clubId: string): Promise<string> {
   const locked = await tx.execute<{ slug: string | null }>(sql`SELECT slug FROM organization WHERE id = ${clubId} FOR UPDATE`);
@@ -25,14 +25,13 @@ export async function nextMemberNumber(tx: DbTransaction, clubId: string): Promi
 
   const abbr = clubAbbreviation(slug);
 
-  // Highest numeric suffix already handed out ("DEMO-0007" -> 7) or the plain row count, whichever is larger: the
-  // count alone would repeat a number once a membership with a lower number was deleted.
+  // Highest numeric suffix already handed out ("DEMO-0007" -> 7) or the plain `club_members` row count (account-less members included), whichever is larger: the
+  // count alone would repeat a number once a member with a lower number was deleted.
   const stats = await tx.execute<{ count: string; max_suffix: string | null }>(sql`
     SELECT count(*)::text AS count,
            max(substring(cm.member_number FROM '^' || ${abbr} || '-([0-9]+)$')::int)::text AS max_suffix
-    FROM club_memberships cm
-    INNER JOIN member m ON m.id = cm.member_id
-    WHERE m.organization_id = ${clubId}
+    FROM club_members cm
+    WHERE cm.club_id = ${clubId}
   `);
   const count = Number(stats.rows[0]?.count ?? 0);
   const maxSuffix = Number(stats.rows[0]?.max_suffix ?? 0);

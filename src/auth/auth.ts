@@ -9,6 +9,8 @@ import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plu
 import { organization as organizationTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { ensureClubMember } from "../lib/club-members.js";
+import { logger } from "../lib/logger.js";
 import { notification, notificationTemplate } from "../db/schema/notifications.js";
 import { sendEmail } from "../lib/email.js";
 import { APP_NAME, buildResetPasswordEmail, buildVerifyEmailEmail, LOGO_CID, LOGO_PATH } from "../lib/emailTemplate.js";
@@ -143,6 +145,24 @@ export const auth = betterAuth({
       // registration would be left with club_id NULL. (Deleting is a platform/DB operation.)
       disableOrganizationDeletion: true,
       organizationHooks: {
+        // ADR-003: every account member (founder via createOrganization, addMember, accepted invitation) gets its
+        // club_members row, so no join path can slip past. A failure is logged, not thrown: the account membership
+        // already exists at this point and the explicit join flows (application approval, club approval, seed) as well
+        // as GET /club-members and /me call ensureClubMember again and repair it.
+        afterAddMember: async ({ member: addedMember }) => {
+          try {
+            await ensureClubMember(db, addedMember);
+          } catch (err) {
+            logger.error({ err, memberId: addedMember.id }, "[auth] could not create club_members row for new member");
+          }
+        },
+        afterAcceptInvitation: async ({ member: acceptedMember }) => {
+          try {
+            await ensureClubMember(db, acceptedMember);
+          } catch (err) {
+            logger.error({ err, memberId: acceptedMember.id }, "[auth] could not create club_members row for accepted invitation");
+          }
+        },
         // The slug is the public join key (Aufnahmeantrag) and the name is what the platform admin verified
         // during the registration review -- both must stay stable once assigned, so reject any attempt to
         // change them through /api/auth/organization/update. Re-sending the current value is a no-op;

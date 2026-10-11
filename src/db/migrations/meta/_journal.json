@@ -99,6 +99,13 @@
       "when": 1791199610293,
       "tag": "0013_club-registrations",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1791735900432,
+      "tag": "0014_member-foundation",
+      "breakpoints": true
     }
   ]
 }

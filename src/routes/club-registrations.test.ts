@@ -10,7 +10,7 @@ import { auth } from "../auth/auth.js";
 import { member, organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
-import { clubMemberships } from "../db/schema/club-memberships.js";
+import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrationDocuments, clubRegistrations } from "../db/schema/club-registrations.js";
 import { encodeRfc5987 } from "../lib/club-registrations.js";
@@ -590,9 +590,15 @@ describe("club registrations (Wave 6)", () => {
       expect(JSON.parse(orgRow!.metadata!)).toEqual({ registrationId: reg.id });
       const roles = await db.select().from(clubRoles).where(eq(clubRoles.memberId, owner!.id));
       expect(roles.map((r) => r.roleType)).toEqual(["stellv_vorsitz"]);
-      const membership = await db.query.clubMemberships.findFirst({ where: eq(clubMemberships.memberId, owner!.id) });
-      expect(membership?.memberNumber).toBe("TURN-0001");
-      expect(membership?.joinedAt).toBe(new Date().toISOString().slice(0, 10));
+      const clubMember = await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, owner!.id) });
+      expect(clubMember?.memberNumber).toBe("TURN-0001");
+      expect(clubMember?.joinedAt).toBe(new Date().toISOString().slice(0, 10));
+      expect(clubMember?.status).toBe("aktiv");
+      expect(clubMember?.displayName).toBe("Applicant approve");
+      // The founder is a club member with category "aktiv" and the five default categories exist.
+      const categories = await db.select().from(memberCategories).where(eq(memberCategories.clubId, data.club.id));
+      expect(categories.map((c) => c.key).sort()).toEqual(["aktiv", "ehrenmitglied", "foerdernd", "jugend", "passiv"]);
+      expect(categories.find((c) => c.id === clubMember?.categoryId)?.key).toBe("aktiv");
 
       const row = await db.query.clubRegistrations.findFirst({ where: eq(clubRegistrations.id, reg.id) });
       expect(row?.reviewedBy).toBe(admin.userId);
@@ -690,7 +696,9 @@ describe("club registrations (Wave 6)", () => {
     it("removes the created organization again when the approval fails afterwards, and can be retried", async () => {
       const who = await applicant("compensate");
       const reg = await submitted(who, `Kompensation Verein ${suffix}`);
-      vi.mocked(nextMemberNumber).mockRejectedValueOnce(new Error("boom"));
+      // First call: the Better Auth afterAddMember hook (failure is logged and swallowed there); second call: the
+      // approval transaction's own ensureClubMember, which aborts the approval.
+      vi.mocked(nextMemberNumber).mockRejectedValueOnce(new Error("boom")).mockRejectedValueOnce(new Error("boom"));
 
       expect((await decide(reg.id, "approve")).status).toBe(500);
       expect(await db.query.organization.findFirst({ where: eq(organization.slug, reg.slugSuggestion!) })).toBeUndefined();

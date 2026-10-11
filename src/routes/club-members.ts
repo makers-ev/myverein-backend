@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
@@ -7,13 +7,22 @@ import { member, organization, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubApplications } from "../db/schema/club-applications.js";
-import { clubMemberships } from "../db/schema/club-memberships.js";
+import {
+  clubMemberDepartments,
+  clubMembers,
+  clubMemberStatusHistory,
+  memberCategories,
+  type ClubMemberRow,
+  type MemberCategoryRow,
+} from "../db/schema/club-members.js";
+import { clubRoles } from "../db/schema/club-roles.js";
+import { departments } from "../db/schema/departments.js";
+import { guardianLinks } from "../db/schema/guardian-links.js";
 import { CLUB_ROLE_TYPES, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
+import { ensureClubMember, ensureDefaultCategories, findCategoryByKey, isUuid, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { nextMemberNumber } from "../lib/member-number.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
-import { clubRoles } from "../db/schema/club-roles.js";
-import { guardianLinks } from "../db/schema/guardian-links.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
 
@@ -21,39 +30,140 @@ export const clubMemberRoutes = new Hono<ClubEnv>();
 
 clubMemberRoutes.use("*", rateLimit({ windowMs: 60_000, max: 60 }));
 
+const today = () => new Date().toISOString().slice(0, 10);
+
+const validationHook = (result: { success: boolean; error?: { issues: unknown } }) => {
+  if (!result.success) throw new ValidationError("Invalid request body", { details: result.error?.issues });
+};
+
 /**
- * Loads a membership's club_memberships sidecar row + club_roles + basic
- * user fields, and shapes it into the API response -- optionally hiding
- * "sensitive" fields (birth date, emergency contact, member number) when the
- * caller has neither `members:read_sensitive` nor is looking at their own
- * row. Shared by the list and detail handlers so the two can't drift.
+ * Shapes club_members rows into the API response (stable contract, see README "Club members API").
+ *
+ * Always present: id (= club_members.id), memberId (Better Auth member.id | null), userId, hasAccount, name,
+ * status, category (KEY string -- kept for older clients), categoryId, categoryName, categoryObject, joinedAt,
+ * leftAt, orgRole, roles, departments.
+ * Only for the member's own row or callers with `members:read_sensitive`: email (account e-mail), contactEmail,
+ * memberNumber, birthDate, street, postalCode, city, phone, emergencyContactName/Phone.
+ *
+ * Batch-loads everything it needs, so the list endpoint does not run N+1 queries.
  */
-async function shapeMember(memberRow: typeof member.$inferSelect, includeSensitive: boolean) {
-  const [userRow, membershipRow, roleRows] = await Promise.all([
-    db.query.user.findFirst({ where: eq(user.id, memberRow.userId) }),
-    db.query.clubMemberships.findFirst({ where: eq(clubMemberships.memberId, memberRow.id) }),
-    db.query.clubRoles.findMany({ where: eq(clubRoles.memberId, memberRow.id) }),
+async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: string; canReadSensitive: boolean }, forceSensitive = false) {
+  if (rows.length === 0) return [];
+
+  const memberIds = rows.map((r) => r.memberId).filter((v): v is string => v !== null);
+  const categoryIds = [...new Set(rows.map((r) => r.categoryId).filter((v): v is string => v !== null))];
+
+  const [accountRows, roleRows, categoryRows, departmentRows] = await Promise.all([
+    memberIds.length > 0
+      ? db.select({ member, email: user.email, userName: user.name }).from(member).innerJoin(user, eq(user.id, member.userId)).where(inArray(member.id, memberIds))
+      : Promise.resolve([]),
+    memberIds.length > 0 ? db.select().from(clubRoles).where(inArray(clubRoles.memberId, memberIds)) : Promise.resolve([]),
+    categoryIds.length > 0 ? db.select().from(memberCategories).where(inArray(memberCategories.id, categoryIds)) : Promise.resolve([]),
+    db
+      .select({ clubMemberId: clubMemberDepartments.clubMemberId, id: departments.id, name: departments.name, since: clubMemberDepartments.since, until: clubMemberDepartments.until })
+      .from(clubMemberDepartments)
+      .innerJoin(departments, eq(departments.id, clubMemberDepartments.departmentId))
+      .where(inArray(clubMemberDepartments.clubMemberId, rows.map((r) => r.id)))
+      .orderBy(asc(departments.name), asc(clubMemberDepartments.since)),
   ]);
 
-  return {
-    id: memberRow.id,
-    userId: memberRow.userId,
-    name: userRow?.name ?? null,
-    email: userRow?.email ?? null,
-    orgRole: memberRow.role,
-    category: membershipRow?.category ?? null,
-    joinedAt: membershipRow?.joinedAt ?? null,
-    leftAt: membershipRow?.leftAt ?? null,
-    roles: roleRows.map((r) => ({ id: r.id, roleType: r.roleType, departmentId: r.departmentId, termEndsAt: r.termEndsAt })),
-    ...(includeSensitive
-      ? {
-          memberNumber: membershipRow?.memberNumber ?? null,
-          birthDate: membershipRow?.birthDate ?? null,
-          emergencyContactName: membershipRow?.emergencyContactName ?? null,
-          emergencyContactPhone: membershipRow?.emergencyContactPhone ?? null,
-        }
-      : {}),
-  };
+  const accountById = new Map(accountRows.map((a) => [a.member.id, a]));
+  const rolesByMember = new Map<string, typeof roleRows>();
+  for (const r of roleRows) rolesByMember.set(r.memberId, [...(rolesByMember.get(r.memberId) ?? []), r]);
+  const categoryById = new Map<string, MemberCategoryRow>(categoryRows.map((c) => [c.id, c]));
+  const departmentsByMember = new Map<string, Array<{ id: string; name: string; since: string; until: string | null }>>();
+  for (const d of departmentRows) {
+    departmentsByMember.set(d.clubMemberId, [...(departmentsByMember.get(d.clubMemberId) ?? []), { id: d.id, name: d.name, since: d.since, until: d.until }]);
+  }
+
+  return rows.map((row) => {
+    const account = row.memberId ? accountById.get(row.memberId) : undefined;
+    const category = row.categoryId ? categoryById.get(row.categoryId) : undefined;
+    const sensitive = forceSensitive || caller.canReadSensitive || (row.memberId !== null && row.memberId === caller.memberId);
+
+    return {
+      id: row.id,
+      memberId: row.memberId,
+      userId: account?.member.userId ?? null,
+      hasAccount: account !== undefined,
+      name: row.displayName,
+      status: row.status,
+      // `category` stays the category KEY string (what the clubs-members contract returned before Wave 7);
+      // the richer forms are additive.
+      category: category?.key ?? null,
+      categoryId: row.categoryId,
+      categoryName: category?.name ?? null,
+      categoryObject: category ? { id: category.id, key: category.key, name: category.name, votingRight: category.votingRight } : null,
+      joinedAt: row.joinedAt,
+      leftAt: row.leftAt,
+      orgRole: account?.member.role ?? null,
+      roles: (account ? (rolesByMember.get(account.member.id) ?? []) : []).map((r) => ({ id: r.id, roleType: r.roleType, departmentId: r.departmentId, termEndsAt: r.termEndsAt })),
+      departments: departmentsByMember.get(row.id) ?? [],
+      ...(sensitive
+        ? {
+            email: account?.email ?? null,
+            contactEmail: row.contactEmail,
+            memberNumber: row.memberNumber,
+            birthDate: row.birthDate,
+            street: row.street,
+            postalCode: row.postalCode,
+            city: row.city,
+            phone: row.phone,
+            emergencyContactName: row.emergencyContactName,
+            emergencyContactPhone: row.emergencyContactPhone,
+          }
+        : {}),
+    };
+  });
+}
+
+type ShapedMember = Awaited<ReturnType<typeof shapeClubMembers>>[number];
+
+async function shapeOne(row: ClubMemberRow, caller: { memberId: string; canReadSensitive: boolean }, forceSensitive = false): Promise<ShapedMember> {
+  return (await shapeClubMembers([row], caller, forceSensitive))[0]!;
+}
+
+function callerOf(c: { get(k: "membership"): { id: string }; get(k: "clubRoleTypes"): string[] }) {
+  return { memberId: c.get("membership").id, canReadSensitive: hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive") };
+}
+
+/** Roles (and other login-bound features) need a linked account: a member without an account answers 409. */
+function requireAccount(row: ClubMemberRow): string {
+  if (!row.memberId) throw new ConflictError("Member has no account");
+  return row.memberId;
+}
+
+/** Optional free-text field: trimmed, "" becomes null, null clears. */
+const optText = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max)
+    .nullable()
+    .optional()
+    .transform((v) => (v === "" ? null : v));
+const optDate = z.string().date().nullable().optional();
+const optEmail = z
+  .string()
+  .trim()
+  .max(320)
+  .email()
+  .nullable()
+  .optional();
+
+/** Resolves a category reference (id or key) within the club; unknown/archived categories are a 422. */
+async function resolveCategory(clubId: string, ref: { categoryId?: string; categoryKey?: string }): Promise<MemberCategoryRow | undefined> {
+  let row: MemberCategoryRow | null | undefined;
+  if (ref.categoryId !== undefined) {
+    row = await db.query.memberCategories.findFirst({ where: and(eq(memberCategories.id, ref.categoryId), eq(memberCategories.clubId, clubId)) });
+  } else if (ref.categoryKey !== undefined) {
+    await ensureDefaultCategories(clubId);
+    row = await findCategoryByKey(db, clubId, ref.categoryKey);
+  } else {
+    return undefined;
+  }
+  if (!row || row.archivedAt) throw new ValidationError("Unknown or archived category");
+  return row;
 }
 
 // --- Aufnahmeantrag ---------------------------------------------------
@@ -125,117 +235,257 @@ clubMemberRoutes.post(
 clubMemberRoutes.use("/*", sessionGuard);
 clubMemberRoutes.use("/*", clubGuard);
 
+// --- Self-service ---------------------------------------------------------
+
 clubMemberRoutes.get("/me", async (c) => {
   const membership = c.get("membership");
-  const shaped = await shapeMember(membership, true);
-  return c.json({ data: { ...shaped, permissions: clubPermissionsFor(c.get("clubRoleTypes")) } });
+  // Safety net for accounts whose club_members row is missing (normally created by the Better Auth hook).
+  const row = await ensureClubMember(db, membership);
+  const shaped = await shapeOne(row, callerOf(c), true);
+  return c.json({ data: { ...shaped, clubMemberId: row.id, permissions: clubPermissionsFor(c.get("clubRoleTypes")) } });
 });
-
-/**
- * Update the membership sidecar, creating it first for members that joined without /apply (e.g. the club founder).
- * A newly created row gets an automatic member number (see member-number.ts) unless the caller passed
- * `memberNumber` explicitly (including null) -- the board can still override it manually afterwards.
- */
-async function upsertMembership(memberRow: typeof member.$inferSelect, values: Partial<typeof clubMemberships.$inferInsert>) {
-  return db.transaction(async (tx) => {
-    const existing = await tx.query.clubMemberships.findFirst({ where: eq(clubMemberships.memberId, memberRow.id) });
-    const generated =
-      !existing && values.memberNumber === undefined ? { memberNumber: await nextMemberNumber(tx, memberRow.organizationId) } : {};
-
-    const [row] = await tx
-      .insert(clubMemberships)
-      .values({ memberId: memberRow.id, joinedAt: memberRow.createdAt.toISOString().slice(0, 10), ...generated, ...values })
-      .onConflictDoUpdate({ target: clubMemberships.memberId, set: { ...values, updatedAt: new Date() } })
-      .returning();
-    return row;
-  });
-}
 
 const updateSelfSchema = z.object({
-  birthDate: z.string().date().nullable().optional(),
-  emergencyContactName: z.string().max(200).optional(),
-  emergencyContactPhone: z.string().max(50).optional(),
+  birthDate: optDate,
+  emergencyContactName: optText(200),
+  emergencyContactPhone: optText(50),
+  street: optText(200),
+  postalCode: optText(20),
+  city: optText(120),
+  phone: optText(50),
+  contactEmail: optEmail,
 });
 
-clubMemberRoutes.patch(
-  "/me",
-  zValidator("json", updateSelfSchema, (result) => {
-    if (!result.success) throw new ValidationError("Invalid request body", { details: result.error.issues });
-  }),
-  async (c) => {
-    const membership = c.get("membership");
-    const body = c.req.valid("json");
+/** Drops keys the client did not send (undefined) so a PATCH only touches what it names. */
+function definedOnly<T extends Record<string, unknown>>(body: T): Partial<T> {
+  return Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
 
-    const row = await upsertMembership(membership, body);
+clubMemberRoutes.patch("/me", zValidator("json", updateSelfSchema, validationHook), async (c) => {
+  const membership = c.get("membership");
+  const changes = definedOnly(c.req.valid("json"));
 
-    return c.json({ data: row });
-  },
-);
+  const current = await ensureClubMember(db, membership);
+  const [updated] = await db
+    .update(clubMembers)
+    .set({ ...changes, updatedAt: new Date() })
+    .where(eq(clubMembers.id, current.id))
+    .returning();
+
+  return c.json({ data: await shapeOne(updated!, callerOf(c), true) });
+});
+
+// --- Member list / detail / create / update --------------------------------
 
 clubMemberRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
-  const roleTypes = c.get("clubRoleTypes");
-  const includeSensitive = hasClubPermission(roleTypes, "members:read_sensitive");
 
-  const rows = await db.query.member.findMany({ where: eq(member.organizationId, clubId) });
-  const shaped = await Promise.all(rows.map((row) => shapeMember(row, includeSensitive)));
+  // Repair accounts that joined through a path that bypassed the Better Auth hook (should not happen; cheap check).
+  const missing = await db
+    .select({ row: member })
+    .from(member)
+    .leftJoin(clubMembers, eq(clubMembers.memberId, member.id))
+    .where(and(eq(member.organizationId, clubId), isNull(clubMembers.id)));
+  for (const { row } of missing) await ensureClubMember(db, row);
 
-  return c.json({ data: shaped });
+  const rows = await db.select().from(clubMembers).where(eq(clubMembers.clubId, clubId)).orderBy(asc(clubMembers.displayName), asc(clubMembers.id));
+  return c.json({ data: await shapeClubMembers(rows, callerOf(c)) });
 });
 
-clubMemberRoutes.get("/:memberId", async (c) => {
+const createMemberSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(200),
+    firstName: optText(100),
+    lastName: optText(100),
+    categoryId: z.string().uuid().optional(),
+    categoryKey: z.string().trim().min(1).max(50).optional(),
+    // Only "live" statuses can be assigned at creation; leaving the club goes through the exit workflow.
+    status: z.enum(["interessent", "probe", "aktiv", "ruhend"]).optional(),
+    joinedAt: z.string().date().optional(),
+    memberNumber: z.string().trim().min(1).max(50).optional(),
+    birthDate: optDate,
+    street: optText(200),
+    postalCode: optText(20),
+    city: optText(120),
+    phone: optText(50),
+    contactEmail: optEmail,
+    emergencyContactName: optText(200),
+    emergencyContactPhone: optText(50),
+  })
+  .refine((body) => body.categoryId !== undefined || body.categoryKey !== undefined, { message: "categoryId or categoryKey is required", path: ["categoryId"] });
+
+clubMemberRoutes.post("/", zValidator("json", createMemberSchema, validationHook), async (c) => {
   const clubId = c.get("clubId");
-  const callerMembership = c.get("membership");
-  const roleTypes = c.get("clubRoleTypes");
-  const memberId = c.req.param("memberId");
+  const actor = c.get("membership");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
 
-  const row = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
-  if (!row) throw new NotFoundError("Member not found");
+  const { categoryId, categoryKey, memberNumber, displayName, status, joinedAt, ...rest } = c.req.valid("json");
+  const category = await resolveCategory(clubId, { categoryId, categoryKey });
 
-  const includeSensitive = row.id === callerMembership.id || hasClubPermission(roleTypes, "members:read_sensitive");
-  return c.json({ data: await shapeMember(row, includeSensitive) });
+  const created = await db.transaction(async (tx) => {
+    let number: string;
+    if (memberNumber !== undefined) {
+      if (await memberNumberTaken(tx, clubId, memberNumber)) throw new ConflictError("Member number is already in use");
+      number = memberNumber;
+    } else {
+      number = await nextMemberNumber(tx, clubId);
+    }
+
+    const [row] = await tx
+      .insert(clubMembers)
+      .values({ ...definedOnly(rest), clubId, displayName, memberNumber: number, categoryId: category!.id, status: status ?? "aktiv", joinedAt: joinedAt ?? today() })
+      .returning();
+
+    await tx.insert(clubMemberStatusHistory).values({
+      clubMemberId: row!.id,
+      fromStatus: null,
+      toStatus: row!.status,
+      toCategoryId: category!.id,
+      effectiveOn: row!.joinedAt,
+      reason: "created",
+      changedBy: actor.id,
+    });
+    await tx.insert(auditLog).values({
+      eventType: "club_member.create",
+      subjectId: row!.id,
+      payload: { clubId, memberNumber: number, categoryId: category!.id, status: row!.status, createdBy: actor.id },
+    });
+    return row!;
+  });
+
+  return c.json({ data: await shapeOne(created, callerOf(c), true) }, 201);
+});
+
+clubMemberRoutes.get("/:id", async (c) => {
+  const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
+  return c.json({ data: await shapeOne(row, callerOf(c)) });
 });
 
 const updateMemberSchema = z.object({
-  memberNumber: z.string().max(50).nullable().optional(),
-  category: z.enum(["aktiv", "passiv", "foerdernd", "ehrenmitglied", "jugend"]).optional(),
-  leftAt: z.string().date().nullable().optional(),
-  birthDate: z.string().date().optional(),
-  emergencyContactName: z.string().max(200).optional(),
-  emergencyContactPhone: z.string().max(50).optional(),
+  displayName: z.string().trim().min(1).max(200).optional(),
+  firstName: optText(100),
+  lastName: optText(100),
+  // `memberNumber: null` clears the number, but only when the field is explicitly present in the body.
+  memberNumber: z
+    .string()
+    .trim()
+    .max(50)
+    .nullable()
+    .optional()
+    .transform((v) => (v === "" ? null : v)),
+  categoryId: z.string().uuid().optional(),
+  // Older clients send the category key as `category`; categoryKey is the explicit alias.
+  category: z.string().trim().min(1).max(50).optional(),
+  categoryKey: z.string().trim().min(1).max(50).optional(),
+  // Legacy field kept for existing clients. The status workflow (B5/B6) owns real exits.
+  leftAt: optDate,
+  birthDate: optDate,
+  street: optText(200),
+  postalCode: optText(20),
+  city: optText(120),
+  phone: optText(50),
+  contactEmail: optEmail,
+  emergencyContactName: optText(200),
+  emergencyContactPhone: optText(50),
+  // Status changes are not possible here (they need date/reason/history, see the status workflow).
+  status: z.never({ error: "status cannot be changed via PATCH /club-members/:id" }).optional(),
 });
 
-clubMemberRoutes.patch(
-  "/:memberId",
-  zValidator("json", updateMemberSchema, (result) => {
-    if (!result.success) throw new ValidationError("Invalid request body", { details: result.error.issues });
-  }),
-  async (c) => {
-    const clubId = c.get("clubId");
-    const roleTypes = c.get("clubRoleTypes");
-    if (!hasClubPermission(roleTypes, "members:write")) {
-      throw new ForbiddenError("Missing members:write permission");
+clubMemberRoutes.patch("/:id", zValidator("json", updateMemberSchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  const actor = c.get("membership");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const target = await resolveClubMember(clubId, c.req.param("id"));
+  const { categoryId, category: categoryKeyLegacy, categoryKey, ...fields } = c.req.valid("json");
+  const category = await resolveCategory(clubId, { categoryId, categoryKey: categoryKey ?? categoryKeyLegacy });
+  const changes = definedOnly(fields);
+
+  const updated = await db.transaction(async (tx) => {
+    if (typeof changes.memberNumber === "string" && (await memberNumberTaken(tx, clubId, changes.memberNumber, target.id))) {
+      throw new ConflictError("Member number is already in use");
     }
+    const [row] = await tx
+      .update(clubMembers)
+      .set({ ...changes, ...(category ? { categoryId: category.id } : {}), updatedAt: new Date() })
+      .where(and(eq(clubMembers.id, target.id), eq(clubMembers.clubId, clubId)))
+      .returning();
 
-    const memberId = c.req.param("memberId");
-    const body = c.req.valid("json");
-
-    const row = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
-    if (!row) throw new NotFoundError("Member not found");
-
-    const updated = await upsertMembership(row, body);
-
-    await db.insert(auditLog).values({
+    await tx.insert(auditLog).values({
       eventType: "club_member.update",
-      subjectId: memberId,
-      payload: { clubId, changes: body },
+      subjectId: target.id,
+      // Field names only -- master data (address, phone, birth date) must not be copied into the audit log.
+      payload: { clubId, changedFields: [...Object.keys(changes), ...(category ? ["categoryId"] : [])], changedBy: actor.id },
     });
+    return row!;
+  });
 
-    return c.json({ data: updated });
-  },
-);
+  return c.json({ data: await shapeOne(updated, callerOf(c), true) });
+});
 
-// --- Role assignment ----------------------------------------------------
+// --- Department assignment ---------------------------------------------------
+
+const assignDepartmentSchema = z.object({ departmentId: z.string().uuid(), since: z.string().date().optional() });
+
+clubMemberRoutes.get("/:id/departments", async (c) => {
+  const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
+  const rows = await db
+    .select({ id: departments.id, name: departments.name, since: clubMemberDepartments.since, until: clubMemberDepartments.until })
+    .from(clubMemberDepartments)
+    .innerJoin(departments, eq(departments.id, clubMemberDepartments.departmentId))
+    .where(eq(clubMemberDepartments.clubMemberId, row.id))
+    .orderBy(asc(departments.name), asc(clubMemberDepartments.since));
+  return c.json({ data: rows });
+});
+
+clubMemberRoutes.post("/:id/departments", zValidator("json", assignDepartmentSchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const target = await resolveClubMember(clubId, c.req.param("id"));
+  const body = c.req.valid("json");
+  const department = await db.query.departments.findFirst({ where: and(eq(departments.id, body.departmentId), eq(departments.clubId, clubId)) });
+  if (!department) throw new NotFoundError("Department not found");
+
+  let created;
+  try {
+    [created] = await db
+      .insert(clubMemberDepartments)
+      .values({ clubMemberId: target.id, departmentId: department.id, since: body.since ?? today() })
+      .returning();
+  } catch (err) {
+    if (isUniqueViolation(err)) throw new ConflictError("Member is already assigned to this department");
+    throw err;
+  }
+
+  await db.insert(auditLog).values({ eventType: "club_member.department_assign", subjectId: target.id, payload: { clubId, departmentId: department.id } });
+  return c.json({ data: { id: department.id, name: department.name, since: created!.since, until: created!.until } }, 201);
+});
+
+// Ends the open assignment (sets `until`, default today) so the history stays; re-assigning later creates a new row.
+clubMemberRoutes.delete("/:id/departments/:departmentId", async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const target = await resolveClubMember(clubId, c.req.param("id"));
+  const departmentId = c.req.param("departmentId");
+  if (!isUuid(departmentId)) throw new NotFoundError("Department assignment not found");
+  const untilParam = c.req.query("until");
+  const until = untilParam === undefined ? today() : z.string().date().safeParse(untilParam).data;
+  if (until === undefined) throw new ValidationError("until must be a date (YYYY-MM-DD)");
+
+  const [ended] = await db
+    .update(clubMemberDepartments)
+    .set({ until })
+    .where(and(eq(clubMemberDepartments.clubMemberId, target.id), eq(clubMemberDepartments.departmentId, departmentId), isNull(clubMemberDepartments.until)))
+    .returning();
+  if (!ended) throw new NotFoundError("Department assignment not found");
+
+  await db.insert(auditLog).values({ eventType: "club_member.department_remove", subjectId: target.id, payload: { clubId, departmentId, until } });
+  return c.body(null, 204);
+});
+
+// --- Role assignment (needs a linked account) ----------------------------------
 
 const assignRoleSchema = z.object({
   roleType: z.enum(CLUB_ROLE_TYPES),
@@ -243,67 +493,46 @@ const assignRoleSchema = z.object({
   termEndsAt: z.string().date().optional(),
 });
 
-clubMemberRoutes.get("/:memberId/roles", async (c) => {
-  const clubId = c.get("clubId");
-  const memberId = c.req.param("memberId");
-
-  const row = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
-  if (!row) throw new NotFoundError("Member not found");
-
-  const rows = await db.query.clubRoles.findMany({ where: eq(clubRoles.memberId, memberId) });
+clubMemberRoutes.get("/:id/roles", async (c) => {
+  const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
+  const rows = await db.query.clubRoles.findMany({ where: eq(clubRoles.memberId, requireAccount(row)) });
   return c.json({ data: rows });
 });
 
-clubMemberRoutes.post(
-  "/:memberId/roles",
-  zValidator("json", assignRoleSchema, (result) => {
-    if (!result.success) throw new ValidationError("Invalid request body", { details: result.error.issues });
-  }),
-  async (c) => {
-    const clubId = c.get("clubId");
-    const roleTypes = c.get("clubRoleTypes");
-    if (!hasClubPermission(roleTypes, "roles:write")) {
-      throw new ForbiddenError("Missing roles:write permission");
-    }
-
-    const memberId = c.req.param("memberId");
-    const body = c.req.valid("json");
-
-    const row = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
-    if (!row) throw new NotFoundError("Member not found");
-
-    let created;
-    try {
-      [created] = await db.insert(clubRoles).values({ memberId, ...body }).returning();
-    } catch (err) {
-      if (isUniqueViolation(err)) throw new ConflictError("Member already holds this role");
-      throw err;
-    }
-
-    await db.insert(auditLog).values({
-      eventType: "club_role.assign",
-      subjectId: memberId,
-      payload: { clubId, roleType: body.roleType, departmentId: body.departmentId },
-    });
-
-    return c.json({ data: created }, 201);
-  },
-);
-
-clubMemberRoutes.delete("/:memberId/roles/:roleId", async (c) => {
+clubMemberRoutes.post("/:id/roles", zValidator("json", assignRoleSchema, validationHook), async (c) => {
   const clubId = c.get("clubId");
-  const roleTypes = c.get("clubRoleTypes");
-  if (!hasClubPermission(roleTypes, "roles:write")) {
-    throw new ForbiddenError("Missing roles:write permission");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "roles:write")) throw new ForbiddenError("Missing roles:write permission");
+
+  const row = await resolveClubMember(clubId, c.req.param("id"));
+  const memberId = requireAccount(row);
+  const body = c.req.valid("json");
+
+  let created;
+  try {
+    [created] = await db.insert(clubRoles).values({ memberId, ...body }).returning();
+  } catch (err) {
+    if (isUniqueViolation(err)) throw new ConflictError("Member already holds this role");
+    throw err;
   }
 
-  const memberId = c.req.param("memberId");
+  await db.insert(auditLog).values({
+    eventType: "club_role.assign",
+    subjectId: memberId,
+    payload: { clubId, clubMemberId: row.id, roleType: body.roleType, departmentId: body.departmentId },
+  });
+
+  return c.json({ data: created }, 201);
+});
+
+clubMemberRoutes.delete("/:id/roles/:roleId", async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "roles:write")) throw new ForbiddenError("Missing roles:write permission");
+
+  const row = await resolveClubMember(clubId, c.req.param("id"));
+  const memberId = requireAccount(row);
   const roleId = c.req.param("roleId");
 
-  const row = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
-  if (!row) throw new NotFoundError("Member not found");
-
-  const existing = await db.query.clubRoles.findFirst({ where: and(eq(clubRoles.id, roleId), eq(clubRoles.memberId, memberId)) });
+  const existing = isUuid(roleId) ? await db.query.clubRoles.findFirst({ where: and(eq(clubRoles.id, roleId), eq(clubRoles.memberId, memberId)) }) : undefined;
   if (!existing) throw new NotFoundError("Role assignment not found");
 
   await db.delete(clubRoles).where(eq(clubRoles.id, roleId));
@@ -311,88 +540,95 @@ clubMemberRoutes.delete("/:memberId/roles/:roleId", async (c) => {
   await db.insert(auditLog).values({
     eventType: "club_role.revoke",
     subjectId: memberId,
-    payload: { clubId, roleId, roleType: existing.roleType },
+    payload: { clubId, clubMemberId: row.id, roleId, roleType: existing.roleType },
   });
 
   return c.body(null, 204);
 });
 
-// --- Guardian links (externe Rolle: Erziehungsberechtigte) --------------
+// --- Guardian links (externe Rolle: Erziehungsberechtigte) --------------------
 // Board-managed only (members:write) -- a guardian must never be able to
 // self-grant visibility into an arbitrary member's data, see Data Model -
-// MyVerein Backend §6.
+// MyVerein Backend §6. The ward is a club_members row (may have no account);
+// the guardian must have an account (ADR-003).
 
-const guardianLinkSchema = z.object({ guardianMemberId: z.string().min(1) });
-
-clubMemberRoutes.get("/:memberId/guardians", async (c) => {
-  const clubId = c.get("clubId");
-  const memberId = c.req.param("memberId");
-
-  const row = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
-  if (!row) throw new NotFoundError("Member not found");
-
-  const rows = await db.query.guardianLinks.findMany({ where: eq(guardianLinks.wardMemberId, memberId) });
-  return c.json({ data: rows });
+const guardianLinkSchema = z.object({
+  // A club_members.id (preferred) or, for older clients, the guardian's Better Auth member.id.
+  guardianMemberId: z.string().min(1),
 });
 
-clubMemberRoutes.post(
-  "/:memberId/guardians",
-  zValidator("json", guardianLinkSchema, (result) => {
-    if (!result.success) throw new ValidationError("Invalid request body", { details: result.error.issues });
-  }),
-  async (c) => {
-    const clubId = c.get("clubId");
-    const roleTypes = c.get("clubRoleTypes");
-    if (!hasClubPermission(roleTypes, "members:write")) {
-      throw new ForbiddenError("Missing members:write permission");
-    }
+type GuardianLinkRow = typeof guardianLinks.$inferSelect;
 
-    const wardMemberId = c.req.param("memberId");
-    const { guardianMemberId } = c.req.valid("json");
+function shapeGuardianLink(link: GuardianLinkRow, ward: ClubMemberRow, guardian: ClubMemberRow | null) {
+  return {
+    id: link.id,
+    guardianMemberId: link.guardianMemberId,
+    guardianClubMemberId: guardian?.id ?? null,
+    guardianName: guardian?.displayName ?? null,
+    wardClubMemberId: link.wardClubMemberId,
+    // Compatibility: the ward's account id (null for members without an account).
+    wardMemberId: ward.memberId,
+    createdAt: link.createdAt,
+  };
+}
 
-    const [ward, guardian] = await Promise.all([
-      db.query.member.findFirst({ where: and(eq(member.id, wardMemberId), eq(member.organizationId, clubId)) }),
-      db.query.member.findFirst({ where: and(eq(member.id, guardianMemberId), eq(member.organizationId, clubId)) }),
-    ]);
-    if (!ward) throw new NotFoundError("Member not found");
-    if (!guardian) throw new NotFoundError("Guardian member not found in this club");
+clubMemberRoutes.get("/:id/guardians", async (c) => {
+  const ward = await resolveClubMember(c.get("clubId"), c.req.param("id"));
+  const rows = await db
+    .select({ link: guardianLinks, guardian: clubMembers })
+    .from(guardianLinks)
+    .leftJoin(clubMembers, eq(clubMembers.memberId, guardianLinks.guardianMemberId))
+    .where(eq(guardianLinks.wardClubMemberId, ward.id))
+    .orderBy(asc(guardianLinks.createdAt), asc(guardianLinks.id));
+  return c.json({ data: rows.map((r) => shapeGuardianLink(r.link, ward, r.guardian)) });
+});
 
-    const [created] = await db.insert(guardianLinks).values({ guardianMemberId, wardMemberId }).returning();
-
-    await db.insert(auditLog).values({
-      eventType: "guardian_link.create",
-      subjectId: wardMemberId,
-      payload: { clubId, guardianMemberId },
-    });
-
-    return c.json({ data: created }, 201);
-  },
-);
-
-clubMemberRoutes.delete("/:memberId/guardians/:guardianMemberId", async (c) => {
+clubMemberRoutes.post("/:id/guardians", zValidator("json", guardianLinkSchema, validationHook), async (c) => {
   const clubId = c.get("clubId");
-  const roleTypes = c.get("clubRoleTypes");
-  if (!hasClubPermission(roleTypes, "members:write")) {
-    throw new ForbiddenError("Missing members:write permission");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const ward = await resolveClubMember(clubId, c.req.param("id"));
+  const guardian = await resolveClubMember(clubId, c.req.valid("json").guardianMemberId).catch(() => {
+    throw new NotFoundError("Guardian member not found in this club");
+  });
+  const guardianAccountId = requireAccount(guardian);
+  if (guardian.id === ward.id) throw new ValidationError("A member cannot be their own guardian");
+
+  let created;
+  try {
+    [created] = await db.insert(guardianLinks).values({ guardianMemberId: guardianAccountId, wardClubMemberId: ward.id }).returning();
+  } catch (err) {
+    if (isUniqueViolation(err)) throw new ConflictError("Guardian link already exists");
+    throw err;
   }
 
-  const wardMemberId = c.req.param("memberId");
-  const guardianMemberId = c.req.param("guardianMemberId");
-
-  const ward = await db.query.member.findFirst({ where: and(eq(member.id, wardMemberId), eq(member.organizationId, clubId)) });
-  if (!ward) throw new NotFoundError("Member not found");
-
-  const existing = await db.query.guardianLinks.findFirst({
-    where: and(eq(guardianLinks.wardMemberId, wardMemberId), eq(guardianLinks.guardianMemberId, guardianMemberId)),
+  await db.insert(auditLog).values({
+    eventType: "guardian_link.create",
+    subjectId: ward.id,
+    payload: { clubId, guardianMemberId: guardianAccountId },
   });
-  if (!existing) throw new NotFoundError("Guardian link not found");
 
-  await db.delete(guardianLinks).where(and(eq(guardianLinks.wardMemberId, wardMemberId), eq(guardianLinks.guardianMemberId, guardianMemberId)));
+  return c.json({ data: shapeGuardianLink(created!, ward, guardian) }, 201);
+});
+
+clubMemberRoutes.delete("/:id/guardians/:guardianMemberId", async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const ward = await resolveClubMember(clubId, c.req.param("id"));
+  const guardian = await resolveClubMember(clubId, c.req.param("guardianMemberId")).catch(() => null);
+  if (!guardian?.memberId) throw new NotFoundError("Guardian link not found");
+
+  const [removed] = await db
+    .delete(guardianLinks)
+    .where(and(eq(guardianLinks.wardClubMemberId, ward.id), eq(guardianLinks.guardianMemberId, guardian.memberId)))
+    .returning();
+  if (!removed) throw new NotFoundError("Guardian link not found");
 
   await db.insert(auditLog).values({
     eventType: "guardian_link.delete",
-    subjectId: wardMemberId,
-    payload: { clubId, guardianMemberId },
+    subjectId: ward.id,
+    payload: { clubId, guardianMemberId: guardian.memberId },
   });
 
   return c.body(null, 204);

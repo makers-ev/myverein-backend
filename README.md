@@ -2,7 +2,7 @@
 
 A Hono API for MyVerein, a club-management product for German-style Vereine (Mitgliederverwaltung, Kalender/Treffen, Lager/Material, Standort-Infocenter — see the [MyVerein Concept](../../lpj-its-vault/20_Products/MyVerein/01_Concept%20&%20Planning/Concept%20-%20MyVerein.md) in the company vault). Forked from the Better Auth Template Suite's `_template_better-auth-backend`; Better Auth still owns identity end to end (sign-up, sign-in, sessions, two-factor, organizations, admin roles) — nothing here re-implements auth.
 
-A club is a Better Auth `organization`; a club membership is Better Auth's `member` row, extended with an app-owned `club_memberships` sidecar (member number, category, join/leave date, emergency contact) plus a `club_roles` table for fine-grained board/department roles (Vorsitz, Kassenwart, Trainer, ...) layered on top of Better Auth's own coarse `member.role`. See [Data model](#data-model) for the full shape and [Key decisions](#key-decisions) for why the role model is split this way.
+A club is a Better Auth `organization`; a person's club identity is an app-owned `club_members` row (Wave 7, [ADR-003](../lpj-its-vault/20_Products/MyVerein/Architecture%20%26%20ADRs/ADR-003%20-%20Mitglied%20ohne%20Konto%20als%20eigene%20Entitaet.md): master data, status, category, member number, optionally linked to Better Auth's `member` account row — members without an account, e.g. children, exist too), plus a `club_roles` table for fine-grained board/department roles (Vorsitz, Kassenwart, Trainer, ...) layered on top of Better Auth's own coarse `member.role`. See [Data model](#data-model) for the full shape and [Key decisions](#key-decisions) for why the role model is split this way.
 
 Clone it, set three environment variables, run `docker compose up`, and you have a working backend with an audit trail, rate limiting, and a real e-mail flow. The rest of this document explains what's actually in the box and why it's built the way it is.
 
@@ -135,13 +135,14 @@ Layout:
 ```
 src/
 ├── auth/             # Better Auth instance, generated schema, RBAC statements
-├── db/                # Drizzle client, migrations, app-owned schema (club_memberships, departments,
+├── db/                # Drizzle client, migrations, app-owned schema (club_members, member_categories, club_member_departments,
+│                       #   club_member_status_history, club_settings, club_exit_requests, club_memberships [deprecated, read-only], departments,
 │                       #   club_roles, guardian_links, club_info_pages, club_applications, audit_log, calendars,
 │                       #   calendar_visibility, events, event_attendees, availability_slots,
 │                       #   availability_exceptions, meetings, meeting_invitees, meeting_attendance,
 │                       #   meeting_resolutions, club_registrations, club_registration_documents)
 ├── lib/               # errors, email, logger, activity-stats, club-permissions, calendar-visibility,
-│                       #   availability-match, ics, member-number, club-slug, club-registrations, club-registration-mail — cross-cutting, no HTTP awareness
+│                       #   availability-match, ics, member-number, club-members, club-slug, club-registrations, club-registration-mail — cross-cutting, no HTTP awareness
 ├── middleware/         # session-guard, club-guard, rate-limit, request-id
 ├── routes/            # health, club-members, club-applications, club-registrations, admin-club-registrations, departments, club-info, calendars, events, availability,
 │                       #   meetings, internal-stats, admin-stats, admin-clubs
@@ -150,7 +151,7 @@ src/
 
 ## Data model
 
-Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns twenty-nine more: the Wave 1 set — `club_memberships`, `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents`. See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
+Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns thirty-five more: the Wave 1 set — `club_memberships` (deprecated since Wave 7, no longer written), `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents` — and the Wave 7 member-foundation set — `club_members`, `member_categories`, `club_member_departments`, `club_member_status_history`, `club_settings`, `club_exit_requests`. See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
 
 ```mermaid
 erDiagram
@@ -169,10 +170,19 @@ erDiagram
     user ||--o{ club_registrations : "reviews (reviewed_by)"
     organization ||--o| club_registrations : "created by (club_id)"
     club_registrations ||--o{ club_registration_documents : "proof"
-    member ||--o| club_memberships : "extends"
+    member ||--o| club_memberships : "extends (deprecated, read-only)"
+    organization ||--o{ club_members : "has"
+    member ||--o| club_members : "account of (member_id, nullable, unique)"
+    organization ||--o{ member_categories : "defines"
+    member_categories ||--o{ club_members : "categorises"
+    club_members ||--o{ club_member_departments : "belongs to"
+    departments ||--o{ club_member_departments : "has"
+    club_members ||--o{ club_member_status_history : "logs"
+    club_members ||--o{ club_exit_requests : "leaves via"
+    organization ||--o| club_settings : "configures"
+    club_members ||--o{ guardian_links : "is guarded (as ward)"
     member ||--o{ club_roles : "has"
     member ||--o{ guardian_links : "guards (as guardian)"
-    member ||--o{ guardian_links : "is guarded (as ward)"
     departments ||--o{ club_roles : "scopes (optional)"
     organization ||--o{ calendars : "has"
     departments ||--o{ calendars : "scopes (optional)"
@@ -224,6 +234,81 @@ erDiagram
         date birth_date
         text emergency_contact_name
         text emergency_contact_phone
+    }
+    club_members {
+        uuid id PK "canonical member id in the API"
+        text club_id FK
+        text member_id FK "Better Auth member, NULL = no account, unique, ON DELETE SET NULL"
+        text display_name
+        text first_name
+        text last_name
+        date birth_date
+        text street
+        text postal_code
+        text city
+        text phone
+        text contact_email
+        text emergency_contact_name
+        text emergency_contact_phone
+        text member_number "per club unique via API (409), not in DB"
+        uuid category_id FK
+        text status "interessent | probe | aktiv | ruhend | ausgetreten | ausgeschlossen | verstorben"
+        date joined_at
+        date left_at
+        text exit_reason
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    member_categories {
+        uuid id PK
+        text club_id FK
+        text key "UK with club_id"
+        text name
+        boolean voting_right
+        int min_age
+        int max_age
+        text auto_transition_to_key
+        int sort_order
+        timestamptz archived_at
+    }
+    club_member_departments {
+        uuid id PK
+        uuid club_member_id FK
+        uuid department_id FK
+        date since
+        date until "NULL = open, one open row per pair"
+    }
+    club_member_status_history {
+        uuid id PK
+        uuid club_member_id FK
+        text from_status
+        text to_status
+        uuid from_category_id FK
+        uuid to_category_id FK
+        date effective_on
+        text reason
+        text changed_by FK "member.id"
+    }
+    club_settings {
+        text club_id PK
+        int notice_period_days
+        text notice_mode "month_end | quarter_end | year_end | immediate"
+        text member_number_prefix
+        boolean allow_self_loans
+    }
+    club_exit_requests {
+        uuid id PK
+        uuid club_member_id FK
+        text kind "cancellation | exclusion"
+        text requested_by FK "member.id"
+        date requested_on
+        date desired_effective_on
+        date effective_on
+        text reason
+        text status "pending | approved | rejected | withdrawn"
+        text decided_by FK "member.id"
+        timestamptz decided_at
+        text decision_note
     }
     club_applications {
         uuid id PK
@@ -283,8 +368,8 @@ erDiagram
     }
     guardian_links {
         uuid id PK
-        text guardian_member_id FK
-        text ward_member_id FK
+        text guardian_member_id FK "member.id (account required)"
+        uuid ward_club_member_id FK "club_members.id (account optional)"
     }
     club_info_pages {
         uuid id PK
@@ -426,15 +511,17 @@ erDiagram
 
 **Two role concepts, deliberately layered, not merged.** Better Auth's `member.role` is the org plugin's own coarse role (`owner`/`member` by default, unmodified) and only matters for Better-Auth-native organization actions. Everything MyVerein-specific — who can edit member data, assign roles, manage departments or club info — is decided by `club_roles.role_type` via `src/lib/club-permissions.ts`'s `hasClubPermission()`, independent of `member.role`. A membership can hold several `club_roles` rows at once (e.g. `kassenwart` + `trainer`), but never the same role twice for the same department (unique constraint). See [Key decisions](#key-decisions).
 
-`club_memberships` is a 1:1 sidecar on Better Auth's `member` row (not on `organization` — MyHome's `household_profiles` uses the org-level version of this pattern, this is the same idea one level down), the same way you'd extend a library-owned table you can't otherwise touch.
+**`club_members` (Wave 7, ADR-003) is the club-side identity of a person** and replaces `club_memberships` as the home of master data. `member_id` (nullable, unique, `ON DELETE SET NULL`) links the Better Auth `member` account membership; `NULL` means "member without account" (e.g. a child). Everything that needs a login stays on `member.id` (`club_roles`, loans, RSVP, availability, `departments.lead_member_id`, `club_applications.decided_by`); `guardian_links.ward_club_member_id` points to `club_members.id` while `guardian_member_id` stays an account `member.id`. **Invariant: every `member` row has exactly one `club_members` row** — created by the Better Auth `afterAddMember`/`afterAcceptInvitation` hook (`src/auth/auth.ts`), and additionally by every explicit join path through `ensureClubMember` (`src/lib/club-members.ts`: application approval, club-registration approval, `seed:club`, `/me`, `GET /club-members`). Deleting a user account leaves the person as a member without account (`member_id` set to NULL), it does not delete the member. `member_number` is intentionally **not** unique in the database (legacy data may contain duplicates); the API enforces uniqueness per club with `409` on manual assignment. `member_categories` holds the per-club categories (the five defaults `aktiv`, `passiv`, `foerdernd`, `ehrenmitglied`, `jugend` are created per club by `ensureDefaultCategories`; voting right: `jugend` and `foerdernd` false); `club_member_departments` links members to departments with a validity period (`until IS NULL` = current; unique per open pair); `club_member_status_history` logs status/category changes (the creation via `POST /club-members` writes the first entry; the change workflow follows in B5); `club_settings` (notice period/mode, member-number prefix, `allow_self_loans`) and `club_exit_requests` (cancellation/exclusion) are schema only so far — their routes come with Wave 7 B6/B8. Migration `0014_member-foundation` creates the tables, **backfills** idempotently (default categories per club + unknown legacy categories as extra categories; one `club_members` row per `member` row with master data from `club_memberships` — status `ausgetreten` if `left_at <= today`, else `aktiv`; `joined_at` falls back to `member.created_at`; `display_name`/`contact_email` from the user), aborts with `club_members backfill count mismatch` if rows ≠ members (count check), moves `guardian_links` to `ward_club_member_id` (old `ward_member_id` dropped) and leaves `club_memberships` untouched as a read-only legacy table. The data part is tested against a scratch database migrated to Wave 6 state (`src/db/migration-member-foundation.test.ts`).
+
+`club_memberships` (deprecated, no longer written) was a 1:1 sidecar on Better Auth's `member` row (not on `organization` — MyHome's `household_profiles` uses the org-level version of this pattern, this is the same idea one level down), the same way you'd extend a library-owned table you can't otherwise touch.
 
 `club_applications` is the pending-approval queue behind `POST /club-members/apply`: `id`, `user_id` (FK `user`, cascade), `club_id` (FK `organization`, cascade), `category` (default `aktiv`), `birth_date` (nullable), `status` (`pending` | `rejected` | `approved`, free text validated in routes, default `pending`), `created_at`, `decided_at` (nullable), `decided_by` (nullable FK `member.id`, `ON DELETE SET NULL`). A partial unique index on `(user_id, club_id) WHERE status = 'pending'` allows only one open application per user and club. Migration `0012_club-applications`.
 
 `club_registrations` holds the Wave 6 "Verein gründen" applications (see [Club registration](#club-registration)): `user_id` (applicant, FK `user`, cascade), the club data (`club_name`, `legal_form`, `register_court`/`register_number` — required for `e_v` —, `street`/`postal_code`/`city`, `website_url`), `claimed_role`, `status` (`draft` | `pending` | `needs_info` | `approved` | `rejected`, free text validated in the routes), `review_note`, `reviewed_by` (FK `user`, `SET NULL`), `reviewed_at`, `club_id` (FK `organization`, `SET NULL`, set on approval), `slug_suggestion`, `created_at`/`updated_at`/`submitted_at`. A partial unique index on `(user_id) WHERE status IN ('draft','pending','needs_info')` allows only one open registration per user. `club_registration_documents` stores the proof files: `registration_id` (FK, cascade), `kind`, `storage_key` (private path `registrations/<registration id>/<uuid>-<sanitized filename>`, never exposed), `filename`, `mime_type`, `size_bytes`. Migration `0013_club-registrations`.
 
-<a id="member-numbers"></a>**Member numbers.** `club_memberships.member_number` is generated automatically in the format `<ABBR>-<NNNN>`: `ABBR` is the first 4 alphanumeric characters of the club slug, uppercased (`demo-sportverein` → `DEMO`, fallback `CLUB`), `NNNN` is the larger of the club's `club_memberships` row count and the highest numeric suffix already issued for that prefix, plus one, zero-padded to 4 digits (`DEMO-0001`). Implemented in `src/lib/member-number.ts` (`clubAbbreviation`, `nextMemberNumber`), which locks the club's `organization` row (`SELECT … FOR UPDATE`) inside the creating transaction so concurrent creations get distinct numbers. It is applied on approval and when `PATCH /club-members/me` / `PATCH /club-members/:memberId` create the sidecar row for the first time, unless `memberNumber` is sent explicitly; the board can always overwrite it via `PATCH /club-members/:memberId`. Deleted memberships therefore no longer cause a repeat, but a manually assigned number in a different format can still equal a later generated one — the column has no unique constraint.
+<a id="member-numbers"></a>**Member numbers.** `club_members.member_number` is generated automatically in the format `<ABBR>-<NNNN>`: `ABBR` is the first 4 alphanumeric characters of the club slug, uppercased (`demo-sportverein` → `DEMO`, fallback `CLUB`), `NNNN` is the larger of the club's `club_members` row count (members without account included) and the highest numeric suffix already issued for that prefix, plus one, zero-padded to 4 digits (`DEMO-0001`). Implemented in `src/lib/member-number.ts` (`clubAbbreviation`, `nextMemberNumber`), which locks the club's `organization` row (`SELECT … FOR UPDATE`) inside the creating transaction so concurrent creations get distinct numbers. It is applied whenever a `club_members` row is created (`ensureClubMember`: every join path; `POST /club-members` unless `memberNumber` is sent); the board can overwrite it via `PATCH /club-members/:id` — a manually set number that is already used by another member of the club answers `409`. Deleted members therefore no longer cause a repeat, but a manually assigned number in a different format can still equal a later generated one — the column has no unique constraint in the DB (legacy duplicates), uniqueness is enforced by the API on manual writes only.
 
-`guardian_links` is the scoping boundary for the externe Rolle (Erziehungsberechtigte, see the Concept doc's persona of the same name): a many-to-many table linking a guardian membership to the youth member(s) they're responsible for. Any route exposing per-member data to a `guest`-tier caller must check this table before returning anything about a member who isn't the caller's own row.
+`guardian_links` is the scoping boundary for the externe Rolle (Erziehungsberechtigte, see the Concept doc's persona of the same name): a many-to-many table linking a guardian account membership (`guardian_member_id` = `member.id`) to the youth club member(s) (`ward_club_member_id` = `club_members.id`, may have no account) they're responsible for. Any route exposing per-member data to a `guest`-tier caller must check this table before returning anything about a member who isn't the caller's own row.
 
 `audit_log` is written inside the same Postgres transaction as the domain mutation that triggered it (see `src/routes/club-members.ts`) and via a Better Auth `databaseHooks.session.create` hook (see `src/auth/auth.ts`) — session creation and every membership/role/department/info-page mutation leave a row. This only works because auth and domain data share one database.
 
@@ -468,16 +555,18 @@ erDiagram
 | `/health` | GET | none | Liveness — never touches the database, can't flap on a Postgres blip |
 | `/ready` | GET | none | Readiness — pings Postgres, returns 503 if unreachable |
 | `/my-clubs` | GET | session | Clubs the caller already belongs to (`clubId`/`clubName`/`memberId`/`orgRole` per row) — how a client picks a `clubId` for every other club-scoped route below. No "browse public clubs" directory in Wave 1 |
-| `/club-members/apply` | POST | session | Aufnahmeantrag — writes ONLY a `pending` row into `club_applications` (no `member`/`club_memberships` row until a board member approves, see `/club-applications`). Body `{ clubId or clubSlug, category?, birthDate? }` (a client only ever has the slug; `clubId` is accepted too for server-to-server use). `201 { data: { application } }`. 404 for an unknown slug/club, 409 if already a member or a `pending` application for this club already exists (partial unique index); re-applying after a `rejected` application is allowed. Audit `club_member.apply` (`subjectId` = application id) |
-| `/club-members` | GET | session + `clubGuard` | List the club's members. Sensitive fields (`memberNumber`/`birthDate`/`emergencyContact*`) are included only for the caller's own row or a caller with `members:read_sensitive` |
-| `/club-members/me` | GET | session + `clubGuard` | Caller's own membership, always including sensitive fields, plus `permissions` (the caller's `ClubPermission[]`, for client-side UI gating) |
-| `/club-members/me` | PATCH | session + `clubGuard` | Self-service update of `birthDate` (nullable)/`emergencyContactName`/`emergencyContactPhone`; upserts the `club_memberships` row for members that joined without an approved application (e.g. the founder); a newly created row gets an automatic member number (see [Member numbers](#member-numbers)) |
-| `/club-members/:memberId` | GET | session + `clubGuard` | One member, sensitive fields gated same as the list |
-| `/club-members/:memberId` | PATCH | session + `clubGuard` (`members:write`) | Board-only: category, member number (nullable — an explicit value, including `null`, always wins over auto-generation), `leftAt`, emergency contact; upserts the `club_memberships` row if missing (auto-generated member number on creation unless `memberNumber` is in the body) |
-| `/club-members/:memberId/roles` | GET, POST, DELETE `/:roleId` | session + `clubGuard` (write needs `roles:write`) | `club_roles` assignment — `roleType` one of `CLUB_ROLE_TYPES` (`src/lib/club-permissions.ts`), optional `departmentId`/`termEndsAt`; assigning a role the member already holds (same `roleType` + `departmentId`) returns `409` (`UNIQUE NULLS NOT DISTINCT` constraint) |
-| `/club-members/:memberId/guardians` | GET, POST, DELETE `/:guardianMemberId` | session + `clubGuard` (write needs `members:write`) | `guardian_links` for the externe Rolle — board-managed only, a guardian can never self-grant access to a member |
+| `/club-members/apply` | POST | session | Aufnahmeantrag — writes ONLY a `pending` row into `club_applications` (no `member`/`club_members` row until a board member approves, see `/club-applications`). Body `{ clubId or clubSlug, category?, birthDate? }` (a client only ever has the slug; `clubId` is accepted too for server-to-server use). `201 { data: { application } }`. 404 for an unknown slug/club, 409 if already a member or a `pending` application for this club already exists (partial unique index); re-applying after a `rejected` application is allowed. Audit `club_member.apply` (`subjectId` = application id) |
+| `/club-members` | GET | session + `clubGuard` | All members of the club, **with and without account** (no paging yet, ordered by name; paging/filters come with B9). Response: array of the [member shape](#club-members-api). E-mail, contact e-mail, member number, birth date, address, phone and emergency contact are included only for the caller's own row or with `members:read_sensitive` (closes the earlier leak where every member received every account e-mail) |
+| `/club-members` | POST | session + `clubGuard` (`members:write`) | Board creates a member **without account**. Body `{ displayName (required), categoryId \| categoryKey (one required), status? (interessent\|probe\|aktiv\|ruhend, default aktiv), joinedAt?, memberNumber?, firstName?, lastName?, birthDate?, street?, postalCode?, city?, phone?, contactEmail?, emergencyContactName?, emergencyContactPhone? }`. Member number is generated if absent; a manually set number already used in the club answers `409`. `201 { data: member }` (full shape). `422` for an unknown/archived/foreign category or invalid status. Writes the first `club_member_status_history` row and audit `club_member.create` |
+| `/club-members/me` | GET | session + `clubGuard` | Caller's own member (full shape incl. all own contact data) plus `clubMemberId` (= `id`) and `permissions` (the caller's `ClubPermission[]`, for client-side UI gating) |
+| `/club-members/me` | PATCH | session + `clubGuard` | Self-service update of `birthDate`, `emergencyContactName/Phone`, `street`, `postalCode`, `city`, `phone`, `contactEmail` (each nullable; `""` clears). Other fields (member number, category, status) are ignored. Returns the full member shape |
+| `/club-members/:id` | GET | session + `clubGuard` | One member; `:id` is the canonical `club_members.id` (uuid). **Transition:** an id that is not a uuid is resolved as the Better Auth `member.id` (ADR-003) — both are strictly club-scoped, another club's id is `404`. Sensitive fields gated as in the list |
+| `/club-members/:id` | PATCH | session + `clubGuard` (`members:write`) | Board-only master data: `displayName`, `firstName`, `lastName`, `memberNumber` (string, or `null` to clear — only when the key is in the body; duplicate in the club → `409`), `categoryId` or `categoryKey`/`category` (key; unknown → `422`), `leftAt` (legacy, kept for existing clients), `birthDate`, `street`, `postalCode`, `city`, `phone`, `contactEmail`, `emergencyContactName/Phone`. **`status` is rejected (`422`)** — status changes belong to the status workflow (B5). Returns the full member shape. Audit `club_member.update` lists only the changed field names |
+| `/club-members/:id/departments` | GET, POST, DELETE `/:departmentId` | session + `clubGuard` (POST/DELETE need `members:write`) | Department assignment with validity period. GET `[{ id, name, since, until }]`; POST `{ departmentId, since? }` → `201` (department must belong to the club, else `404`; already assigned → `409`); DELETE ends the open assignment (`until` = today or `?until=YYYY-MM-DD`) and keeps the history → `204`, `404` if none open |
+| `/club-members/:id/roles` | GET, POST, DELETE `/:roleId` | session + `clubGuard` (write needs `roles:write`) | `club_roles` assignment on the **linked account** — `roleType` one of `CLUB_ROLE_TYPES` (`src/lib/club-permissions.ts`), optional `departmentId`/`termEndsAt`; assigning a role the member already holds returns `409`. **A member without account answers `409 "Member has no account"`** on all three methods |
+| `/club-members/:id/guardians` | GET, POST, DELETE `/:guardianMemberId` | session + `clubGuard` (write needs `members:write`) | `guardian_links` for the externe Rolle — board-managed only. `:id` is the **ward** (any club member, account optional); `guardianMemberId` (body / path) is a `club_members.id` or, for older clients, the guardian's `member.id`, and the guardian must have an account (`409` otherwise, `404` if not in this club, `422` if equal to the ward, `409` for a duplicate). Link shape: `{ id, guardianMemberId (member.id), guardianClubMemberId, guardianName, wardClubMemberId, wardMemberId (account id or null), createdAt }` |
 | `/club-applications` | GET | session + `clubGuard` (`members:write`) | Pending Aufnahmeantraege of the club, oldest first: `{ data: [ { id, userId, name, email, category, birthDate, status, createdAt } ] }`. `birthDate` is sensitive, but `members:write` is the deciding role. 403 without the permission |
-| `/club-applications/:id/approve` | POST | session + `clubGuard` (`members:write`) | Approve a pending application: `auth.api.addMember({ role: 'member' })` + `club_memberships` insert (category/birthDate from the application, `joinedAt` = today, automatic member number) in one DB transaction, application set to `approved` with `decided_at`/`decided_by` (caller's `member.id`). `200 { data: { application, member, membership } }`. 404 for an unknown id or another club's application, 409 if not `pending` or if the applicant is already a member. If the transaction fails after Better Auth created the `member`, the member row is removed again (best effort) and the application stays `pending`. Audit `club_application.approve` |
+| `/club-applications/:id/approve` | POST | session + `clubGuard` (`members:write`) | Approve a pending application: `auth.api.addMember({ role: 'member' })` (its `afterAddMember` hook creates the `club_members` row), then in one DB transaction the row gets the application's category/birthDate, `joinedAt` = today, status `aktiv` and an automatic member number, application set to `approved` with `decided_at`/`decided_by` (caller's `member.id`). `200 { data: { application, member, membership, clubMember } }` (`membership` is the pre-Wave-7 shape, deprecated; `clubMember` is the canonical `club_members` row). 404 for an unknown id or another club's application, 409 if not `pending` or if the applicant is already a member. If the transaction fails after Better Auth created the `member`, the `club_members` and `member` rows are removed again (best effort) and the application stays `pending`. Audit `club_application.approve` |
 | `/club-applications/:id/reject` | POST | session + `clubGuard` (`members:write`) | Reject a pending application: status `rejected`, `decided_at`/`decided_by`, no member row. `200 { data: { application } }`. 404/409 as for approve. Audit `club_application.reject` |
 | `/departments` | GET, POST, PATCH `/:id`, DELETE `/:id` | session + `clubGuard` (write needs `departments:write`) | Club sub-units (Fußball, Tennis, ...) |
 | `/club-info` | GET | session + `clubGuard` | Aggregate Vereinsinfo: current board (members holding a board `role_type`), departments, info pages — one request instead of three |
@@ -567,7 +656,7 @@ End users create clubs themselves, but a club only exists after a platform admin
 
 All three decisions only work from `pending`; any other status (or a lost race between two admins) is `409`. A non-admin session on `/admin/club-registrations/*` is rejected by `adminGuard` with `401`, same as every other `/admin` route.
 
-<a id="club-registration-approval"></a>**Approval.** `approve` takes a row lock on the registration (`SELECT … FOR UPDATE`), so parallel approvals serialize and the loser answers 409 without creating a second club. Inside that lock it first re-checks the register key (court + number, same normalization as the submit guard) against already approved registrations (409 — two pending registrations can share a key), then calls `auth.api.createOrganization({ name, slug, userId })` (server-side, no session — makes the applicant `owner`; the organization's `metadata` carries `{ registrationId }`; if the call fails after inserting the organization but before its owner member, that owner-less organization is recognised by this tag and removed before the next slug is tried), then in the same transaction marks the registration `approved` (`club_id`, `reviewed_by`, `reviewed_at`), inserts the `club_memberships` row with the automatic member number (`<ABBR>-0001`, see [Member numbers](#member-numbers)) and a `club_roles` row for `claimed_role`, and writes audit `club_registration.approve`. `claimed_role` must grant `members:write` and `roles:write` (`vorsitz`, `stellv_vorsitz`, `schriftfuehrer` do; checked against `club-permissions.ts`), so the founder can run the club right away (e.g. `GET /club-applications`). If anything fails after the organization was created, the organization is deleted again and a failed cleanup is logged (`logger.error`), never swallowed; the registration stays `pending` and can be retried.
+<a id="club-registration-approval"></a>**Approval.** `approve` takes a row lock on the registration (`SELECT … FOR UPDATE`), so parallel approvals serialize and the loser answers 409 without creating a second club. Inside that lock it first re-checks the register key (court + number, same normalization as the submit guard) against already approved registrations (409 — two pending registrations can share a key), then calls `auth.api.createOrganization({ name, slug, userId })` (server-side, no session — makes the applicant `owner`; the organization's `metadata` carries `{ registrationId }`; if the call fails after inserting the organization but before its owner member, that owner-less organization is recognised by this tag and removed before the next slug is tried), then in the same transaction marks the registration `approved` (`club_id`, `reviewed_by`, `reviewed_at`), makes sure the founder has a `club_members` row (category `aktiv`, automatic member number `<ABBR>-0001`, see [Member numbers](#member-numbers); the five default categories are seeded) and inserts a `club_roles` row for `claimed_role`, and writes audit `club_registration.approve`. `claimed_role` must grant `members:write` and `roles:write` (`vorsitz`, `stellv_vorsitz`, `schriftfuehrer` do; checked against `club-permissions.ts`), so the founder can run the club right away (e.g. `GET /club-applications`). If anything fails after the organization was created, the organization is deleted again and a failed cleanup is logged (`logger.error`), never swallowed; the registration stays `pending` and can be retried.
 
 <a id="club-slug-rules"></a>**Slug rules** (`src/lib/club-slug.ts`). The slug is the public join key of a club (`clubSlug` in `POST /club-members/apply`) and is generated, not chosen by the applicant: lowercase, umlauts/ß transliterated (`ä→ae`, `ö→oe`, `ü→ue`, `ß→ss`, other accents dropped), legal-form additions (`e.V.`, `eV`, `eingetragener Verein`) removed, everything outside `a-z0-9` collapsed to single `-`, 3–50 characters (too short names get `-verein` appended, names without usable characters become `verein`). (`æ→ae`, `œ→oe`, `ø→o`, `ł→l`, `đ→d`, `þ→th` as well). Reserved slugs (`admin`, `api`, `app`, `www`, `demo`, `vereine`, `join`, `dashboard`, `docs`, `impressum`, `datenschutz`, `me`, …, see `RESERVED_SLUGS`; `verein` is deliberately allowed, it is the fallback) get `-verein` appended. The suggestion is stored at submit but only *assigned* on approval (open registrations reserve nothing, so no squatting); on collision `-2`, `-3`, … is appended, and a collision that happens between lookup and insert is retried (`organization_slug_uidx` is the final arbiter). An admin may override the slug in `approve` (`slug`, validated: `^[a-z0-9]+(-[a-z0-9]+)*$`, 3–50, not reserved, 422; already taken → 409, no automatic suffix). **The slug is immutable once assigned**: `POST /api/auth/organization/update` with a different `slug` is rejected (403, `beforeUpdateOrganization` hook in `src/auth/auth.ts`).
 
@@ -607,7 +696,7 @@ widgetRoutes.post(
 
 `.strict()` isn't decoration — it's what stops an extra body field from silently reaching a query.
 
-**3. Guard it.** `sessionGuard` (`src/middleware/session-guard.ts`) for anything that needs a logged-in user, `clubGuard` (`src/middleware/club-guard.ts`) additionally for anything club-scoped, `adminGuard` for admin-only, nothing at all for a genuinely public read. If a handler touches one specific row, filter by *both* the row's id and `clubId`/the caller's id in the same query, and respond with `NotFoundError` — never `ForbiddenError` — when it belongs to a different club or a different person. A 403 confirms the row exists; a 404 doesn't. `club-members.ts`'s `GET /:memberId` is the example. For a permission check *within* a club a caller does belong to (board-only write, etc.), use `hasClubPermission(c.get("clubRoleTypes"), "...")` from `src/lib/club-permissions.ts` and throw `ForbiddenError` on failure — that one legitimately is a 403, since the caller already knows the club/row exists.
+**3. Guard it.** `sessionGuard` (`src/middleware/session-guard.ts`) for anything that needs a logged-in user, `clubGuard` (`src/middleware/club-guard.ts`) additionally for anything club-scoped, `adminGuard` for admin-only, nothing at all for a genuinely public read. If a handler touches one specific row, filter by *both* the row's id and `clubId`/the caller's id in the same query, and respond with `NotFoundError` — never `ForbiddenError` — when it belongs to a different club or a different person. A 403 confirms the row exists; a 404 doesn't. `club-members.ts`'s `GET /:id` is the example. For a permission check *within* a club a caller does belong to (board-only write, etc.), use `hasClubPermission(c.get("clubRoleTypes"), "...")` from `src/lib/club-permissions.ts` and throw `ForbiddenError` on failure — that one legitimately is a 403, since the caller already knows the club/row exists.
 
 **4. Throw errors, don't format them.** Every class in `src/lib/errors.ts` (`NotFoundError`, `ConflictError`, `TooManyRequestsError`, ...) maps to its HTTP status in exactly one place: `app.onError` in `src/index.ts`. Throw the typed error from inside the route and stop thinking about status codes there.
 
@@ -631,6 +720,36 @@ Ordering only matters *within* a single file: a static path (`/search`) has to b
 **7. Test against a real session and a real second club, not a mock.** Add `widgets.test.ts` next to the route file. Mount just that router plus `app.onError` in a throwaway `Hono` instance, create real (verified) users and at least two clubs through `auth.api.createUser`/`signInEmail`/`createOrganization`, and reuse the session cookies — `club-members.test.ts`'s `signUpAndVerify` helper is the one to copy. Always include a cross-club case (a member of club A requesting club B's data gets 404) — that's the one class of bug a mocked session/club would never catch. This needs a real `DATABASE_URL` (`docker compose up -d db` gives you one).
 
 That's the whole loop — schema → route file → validate → guard → mount → test. None of it is a framework decision; it's copying `club-members.ts` and changing the domain-specific middle.
+
+<a id="club-members-api"></a>
+### Club members API contract (Wave 7 B3)
+
+`GET /club-members`, `GET|PATCH /club-members/:id`, `POST /club-members` and `/club-members/me` all return this **member shape** (`:id` / `id` = `club_members.id`):
+
+```jsonc
+{
+  "id": "uuid",                // club_members.id -- the canonical member id
+  "memberId": "string|null",   // Better Auth member.id (null = no account)
+  "userId": "string|null",
+  "hasAccount": true,
+  "name": "Display Name",      // club_members.display_name
+  "status": "aktiv",           // interessent|probe|aktiv|ruhend|ausgetreten|ausgeschlossen|verstorben
+  "category": "jugend",        // category KEY (string, unchanged from before Wave 7) or null
+  "categoryId": "uuid|null",
+  "categoryName": "Jugend",
+  "categoryObject": { "id": "uuid", "key": "jugend", "name": "Jugend", "votingRight": false },
+  "joinedAt": "2024-01-31", "leftAt": null,
+  "orgRole": "owner|member|null",      // Better Auth org role, null without account
+  "roles": [{ "id", "roleType", "departmentId", "termEndsAt" }],   // [] without account
+  "departments": [{ "id", "name", "since", "until" }],             // until != null = ended
+  // only for the own row or with members:read_sensitive:
+  "email": "account e-mail|null", "contactEmail": "...", "memberNumber": "DEMO-0001",
+  "birthDate": "2012-04-05", "street": "", "postalCode": "", "city": "", "phone": "",
+  "emergencyContactName": "", "emergencyContactPhone": ""
+}
+```
+
+Backward-compatibility decisions: `category` was a string key before Wave 7 and **stays one** (the object form is the additive `categoryObject`/`categoryId`/`categoryName`); `orgRole`, `roles`, `userId`, `joinedAt`, `leftAt` keep their meaning; `PATCH` responses switch from the old `club_memberships` row to the full member shape (it contains the former fields `memberNumber`, `birthDate`, `emergencyContact*`, `joinedAt`, `leftAt`, `category`; `memberId` stays the account id). `id` of a member changed from `member.id` to `club_members.id` — old calls with a `member.id` in the URL keep working during the transition (non-uuid ids resolve as `member.id`); clients should switch to `id`. `name` is the club-managed display name (set from the account name at join time; it is not kept in sync with later account renames).
 
 ## Configuration
 
@@ -689,7 +808,7 @@ Short version of decisions with real consequences if reversed. Full ADRs for the
 - **Resend with a console-log dev fallback for e-mail**, rather than requiring an e-mail provider account just to run the template locally. `requireEmailVerification: true` needs *some* way to actually send the verification link — logging it in development means the flow is fully testable with zero external accounts, and production just needs one API key.
 - **`/accounts` and `/examples` removed in Wave 1**, not kept alongside the real domain (see [MyCouple's precedent](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyCouple/Data%20Model%20-%20MyCouple%20Backend.md) for the same call in a sister product) — dead scaffold routes are attack surface and reader confusion, not a feature.
 - **Two-tier role model: Better Auth `member.role` (coarse) + `club_roles.roleType` (fine), never merged into one.** `member.role` only gates Better-Auth-native org actions; every MyVerein-specific permission (`members:write`, `roles:write`, `departments:write`, `club_info:write`) is derived from `club_roles` via `src/lib/club-permissions.ts`'s config-code mapping, not a database rights-matrix table — the mapping changes per deployment, not per club at runtime, so a table would be complexity with no real flexibility payoff. See the company vault's Architecture Overview - MyVerein §7 for the full reasoning.
-- **`POST /club-members/apply` creates a pending application; a board member decides.** Since Wave 5 the Concept doc's "digitaler Aufnahmeantrag" is a real approval queue: `/apply` only inserts into `club_applications` (`pending`), and `POST /club-applications/:id/approve` (needs `members:write`) creates the Better Auth `member` + `club_memberships` row, `/reject` closes it without one. One pending application per user+club (partial unique index `WHERE status = 'pending'`), re-applying after a rejection is allowed. This replaces the Wave 1 simplification of granting membership immediately.
+- **`POST /club-members/apply` creates a pending application; a board member decides.** Since Wave 5 the Concept doc's "digitaler Aufnahmeantrag" is a real approval queue: `/apply` only inserts into `club_applications` (`pending`), and `POST /club-applications/:id/approve` (needs `members:write`) creates the Better Auth `member` + `club_members` row, `/reject` closes it without one. One pending application per user+club (partial unique index `WHERE status = 'pending'`), re-applying after a rejection is allowed. This replaces the Wave 1 simplification of granting membership immediately.
 - **`guardian_links` is board-managed only, never self-service.** A guardian membership (externe Rolle) must never be able to grant itself visibility into an arbitrary member's data — only a caller with `members:write` can create or remove a guardian↔ward link.
 - **Calendars reuse the existing two-tier permission model, not a new rights system.** `calendars:write`/`meetings:write` are two more entries in `src/lib/club-permissions.ts`'s `ClubPermission` union and `ROLE_PERMISSIONS` map, same config-code pattern as `members:write`/`roles:write`/etc — no new database rights-matrix table for Wave 2. Reversing this (a bespoke calendar ACL system) would mean two different authorization models to reason about in one codebase for no real gain, since the existing mapping already handles "which roles can do X."
 - **Terminfindung shows raw overlap data, not an auto-ranked best-slot suggestion.** `GET /availability/overlap` and `GET /meetings/:id/overlap` return every candidate's per-member availability and stop there — the board picks manually. This is an explicit Wave 2 scope decision, not a missing feature; building a ranking/scoring algorithm on top would mean guessing at a board's real-world scheduling constraints (quorum, who's indispensable, etc.) that this data model doesn't capture.
@@ -783,7 +902,7 @@ Confirm `Domain=example.com` is present in the output. If it's missing, the *run
 
 ## Testing and CI
 
-`npm test` runs Vitest: 311 tests across 28 files as of this write. Unit tests for `club-slug.ts` (slugify rules, reserved words, collision suffixes), `club-registration-mail.ts`, the rate limiter (including per-user keys), `permissions.ts`, `club-permissions.ts`, `errors.ts`, the rate-limit middleware, `availability-match.ts`'s Terminfindung precedence logic, and `ics.ts`'s RFC 5545 writer need nothing running; the club-scoping/permission integration tests — `club-members.test.ts`, `club-applications.test.ts`, `club-registrations.test.ts` (Wave 6: closed `organization/create` and immutable slug, registration lifecycle, approval effects incl. owner/role/member number/immediate permissions, request-info + resubmit, double and parallel decisions, parallel slug collision, compensation, one open registration per user, IDOR, admin gating, upload hardening, duplicate guard, mail failures not blocking, owner cannot delete/rename the club or probe slugs, per-user submit limit, delete-vs-submit race, register-key duplicate on approve, orphan organization cleanup, audit of admin document access), `calendars.test.ts`, `events.test.ts`, `availability.test.ts`, `meetings.test.ts` — and the `internal-stats.test.ts` token-gate tests and `admin-clubs.test.ts` (admin gating, club total + pending-registration count, per-user clubs ordering/validation/limit) all need a real `DATABASE_URL` (the same Postgres `docker compose up -d db` gives you) since they exercise actual sign-up/sign-in/organization-creation against Better Auth and real cross-club IDOR checks rather than mocking either. `events.test.ts` covers the capacity-1 waitlist flow end to end (second RSVP gets `"warteliste"`, then gets promoted once the first cancels) sequentially — it doesn't fire concurrent requests, so the row lock itself is exercised by inspection/code review rather than a dedicated race test. `.github/workflows/ci.yml` runs lint, `tsc --noEmit`, migrations, build, and the full test suite against a Postgres service container on every push and pull request.
+`npm test` runs Vitest: 338 tests across 30 files as of this write. Unit tests for `club-slug.ts` (slugify rules, reserved words, collision suffixes), `club-registration-mail.ts`, the rate limiter (including per-user keys), `permissions.ts`, `club-permissions.ts`, `errors.ts`, the rate-limit middleware, `availability-match.ts`'s Terminfindung precedence logic, and `ics.ts`'s RFC 5545 writer need nothing running; the club-scoping/permission integration tests — `club-members.test.ts`, `club-applications.test.ts`, `club-registrations.test.ts` (Wave 6: closed `organization/create` and immutable slug, registration lifecycle, approval effects incl. owner/role/member number/immediate permissions, request-info + resubmit, double and parallel decisions, parallel slug collision, compensation, one open registration per user, IDOR, admin gating, upload hardening, duplicate guard, mail failures not blocking, owner cannot delete/rename the club or probe slugs, per-user submit limit, delete-vs-submit race, register-key duplicate on approve, orphan organization cleanup, audit of admin document access), `club-members-foundation.test.ts` (Wave 7 B2/B3: every join path creates `club_members`, account-less members, `POST/PATCH` rules, member-number `409`, e-mail/address only with `members:read_sensitive`, IDOR with `club_members` ids and foreign ids, `member.id` fallback, roles `409` without account, departments, guardians with an account-less ward), `migration-member-foundation.test.ts` (migrates a scratch database to Wave 6 state, loads sample data, applies `0014`, checks backfill, count check, idempotency and the guardian move; needs a role that may `CREATE DATABASE`), `calendars.test.ts`, `events.test.ts`, `availability.test.ts`, `meetings.test.ts` — and the `internal-stats.test.ts` token-gate tests and `admin-clubs.test.ts` (admin gating, club total + pending-registration count, per-user clubs ordering/validation/limit) all need a real `DATABASE_URL` (the same Postgres `docker compose up -d db` gives you) since they exercise actual sign-up/sign-in/organization-creation against Better Auth and real cross-club IDOR checks rather than mocking either. `events.test.ts` covers the capacity-1 waitlist flow end to end (second RSVP gets `"warteliste"`, then gets promoted once the first cancels) sequentially — it doesn't fire concurrent requests, so the row lock itself is exercised by inspection/code review rather than a dedicated race test. `.github/workflows/ci.yml` runs lint, `tsc --noEmit`, migrations, build, and the full test suite against a Postgres service container on every push and pull request.
 
 ## How this fits into the template suite
 
