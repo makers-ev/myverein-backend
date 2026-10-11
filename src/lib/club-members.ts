@@ -4,7 +4,7 @@ import { member, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMembers, clubMemberStatusHistory, LEFT_STATUSES, memberCategories, type ClubMemberRow, type MemberCategoryRow } from "../db/schema/club-members.js";
 import { nextMemberNumber } from "./member-number.js";
-import { NotFoundError } from "./errors.js";
+import { ConflictError, NotFoundError } from "./errors.js";
 
 /** Either the pool-backed `db` or a transaction handle -- both expose the same query API. */
 export type DbExecutor = typeof db | Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -55,6 +55,25 @@ export interface EnsureClubMemberDefaults {
   user?: { name: string; email: string };
 }
 
+/** Statuses a plain account re-join must never undo (only an explicit board `reopen` transition can). */
+const NO_AUTO_REJOIN_STATUSES = ["ausgeschlossen", "verstorben"];
+
+/**
+ * A person who was excluded (`ausgeschlossen`) or marked deceased (`verstorben`) in this club cannot come back by
+ * re-joining with the same account (application approval, invitation, addMember): the board has to reopen the member
+ * first (`POST /club-members/:id/transition` with `reopen`). Throws 409.
+ */
+export async function assertRejoinAllowed(executor: DbExecutor, clubId: string, userId: string): Promise<void> {
+  const blocked = await executor.query.clubMembers.findFirst({
+    where: and(eq(clubMembers.clubId, clubId), eq(clubMembers.lastUserId, userId), isNull(clubMembers.memberId), inArray(clubMembers.status, NO_AUTO_REJOIN_STATUSES)),
+  });
+  if (blocked) {
+    throw new ConflictError("This person was excluded from the club or is marked deceased; the member must be reopened by the board before re-joining", {
+      details: { code: "member_rejoin_blocked", clubMemberId: blocked.id, status: blocked.status },
+    });
+  }
+}
+
 /**
  * Guarantees the invariant "every account member has exactly one club_members
  * row" (ADR-003). Returns the existing row untouched if there is one;
@@ -73,6 +92,8 @@ export async function ensureClubMember(executor: DbExecutor, memberRow: MemberAc
 
     const account = defaults.user ?? (await tx.query.user.findFirst({ where: eq(user.id, memberRow.userId) }));
     if (!account) throw new NotFoundError("User not found");
+
+    await assertRejoinAllowed(tx, memberRow.organizationId, memberRow.userId);
 
     // Re-join of a person whose account membership was removed earlier: reuse the old row (same member number and
     // history) instead of creating a duplicate.
@@ -101,9 +122,9 @@ export async function ensureClubMember(executor: DbExecutor, memberRow: MemberAc
     }
 
     await ensureDefaultCategories(memberRow.organizationId, tx);
-    const category =
-      (defaults.categoryKey ? await findCategoryByKey(tx, memberRow.organizationId, defaults.categoryKey) : null) ??
-      (await findCategoryByKey(tx, memberRow.organizationId, DEFAULT_CATEGORY_KEY));
+    const requested = defaults.categoryKey ? await findCategoryByKey(tx, memberRow.organizationId, defaults.categoryKey) : null;
+    // An archived category is never assigned to new members; unknown/archived keys fall back to the default.
+    const category = requested && !requested.archivedAt ? requested : await findCategoryByKey(tx, memberRow.organizationId, DEFAULT_CATEGORY_KEY);
 
     const memberNumber = defaults.memberNumber === undefined ? await nextMemberNumber(tx, memberRow.organizationId) : defaults.memberNumber;
 

@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, ilike, inArray, isNotNull, isNull, lte, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
@@ -11,6 +11,8 @@ import {
   clubMemberDepartments,
   clubMembers,
   clubMemberStatusHistory,
+  LEFT_STATUSES,
+  MEMBER_STATUSES,
   memberCategories,
   type ClubMemberRow,
   type MemberCategoryRow,
@@ -19,9 +21,11 @@ import { clubRoles } from "../db/schema/club-roles.js";
 import { departments } from "../db/schema/departments.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { CLUB_ROLE_TYPES, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
-import { ensureClubMember, ensureDefaultCategories, findCategoryByKey, isUuid, markDetachedMembersLeft, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
+import { DEFAULT_CATEGORY_KEY, type DbExecutor, ensureClubMember, ensureDefaultCategories, findCategoryByKey, isUuid, markDetachedMembersLeft, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
+import { canReadClubStats } from "../lib/club-stats.js";
+import { effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayUtc, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
 import { nextMemberNumber } from "../lib/member-number.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -42,24 +46,27 @@ const validationHook = (result: { success: boolean; error?: { issues: unknown } 
  *
  * Always present: id (= club_members.id), memberId (Better Auth member.id | null), userId, hasAccount, name,
  * status, category (KEY string -- kept for older clients), categoryId, categoryName, categoryObject, joinedAt,
- * leftAt, orgRole, roles, departments.
+ * leftAt, effectiveStatus (status derived at read time: left_at <= today => ausgetreten), orgRole, roles, departments.
+ * `suggestedCategory` ({id,key,name} | null, age transition proposal) only for the own row or `members:read_sensitive`,
+ * because it is derived from the birth date.
  * Only for the member's own row or callers with `members:read_sensitive`: email (account e-mail), contactEmail,
  * memberNumber, birthDate, street, postalCode, city, phone, emergencyContactName/Phone.
  *
  * Batch-loads everything it needs, so the list endpoint does not run N+1 queries.
  */
-async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: string; canReadSensitive: boolean }, forceSensitive = false) {
+async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: string; canReadSensitive: boolean }, forceSensitive = false, today = todayUtc()) {
   if (rows.length === 0) return [];
 
   const memberIds = rows.map((r) => r.memberId).filter((v): v is string => v !== null);
-  const categoryIds = [...new Set(rows.map((r) => r.categoryId).filter((v): v is string => v !== null))];
+  const hasCategories = rows.some((r) => r.categoryId !== null);
 
   const [accountRows, roleRows, categoryRows, departmentRows] = await Promise.all([
     memberIds.length > 0
       ? db.select({ member, email: user.email, userName: user.name }).from(member).innerJoin(user, eq(user.id, member.userId)).where(inArray(member.id, memberIds))
       : Promise.resolve([]),
     memberIds.length > 0 ? db.select().from(clubRoles).where(inArray(clubRoles.memberId, memberIds)) : Promise.resolve([]),
-    categoryIds.length > 0 ? db.select().from(memberCategories).where(inArray(memberCategories.id, categoryIds)) : Promise.resolve([]),
+    // The club's categories (a handful of rows): needed for the shape and for the age transition target.
+    hasCategories ? db.select().from(memberCategories).where(eq(memberCategories.clubId, rows[0]!.clubId)) : Promise.resolve([]),
     db
       .select({ clubMemberId: clubMemberDepartments.clubMemberId, id: departments.id, name: departments.name, since: clubMemberDepartments.since, until: clubMemberDepartments.until })
       .from(clubMemberDepartments)
@@ -72,6 +79,7 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: strin
   const rolesByMember = new Map<string, typeof roleRows>();
   for (const r of roleRows) rolesByMember.set(r.memberId, [...(rolesByMember.get(r.memberId) ?? []), r]);
   const categoryById = new Map<string, MemberCategoryRow>(categoryRows.map((c) => [c.id, c]));
+  const categoryByKey = new Map<string, MemberCategoryRow>(categoryRows.map((c) => [c.key, c]));
   const departmentsByMember = new Map<string, Array<{ id: string; name: string; since: string; until: string | null }>>();
   for (const d of departmentRows) {
     departmentsByMember.set(d.clubMemberId, [...(departmentsByMember.get(d.clubMemberId) ?? []), { id: d.id, name: d.name, since: d.since, until: d.until }]);
@@ -81,6 +89,7 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: strin
     const account = row.memberId ? accountById.get(row.memberId) : undefined;
     const category = row.categoryId ? categoryById.get(row.categoryId) : undefined;
     const sensitive = forceSensitive || caller.canReadSensitive || (row.memberId !== null && row.memberId === caller.memberId);
+    const suggestion = sensitive ? suggestCategory(row, categoryById, categoryByKey, today) : null;
 
     return {
       id: row.id,
@@ -89,6 +98,8 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: strin
       hasAccount: account !== undefined,
       name: row.displayName,
       status: row.status,
+      // Derived at read time (no job): a stored non-left status with left_at <= today reads as "ausgetreten".
+      effectiveStatus: effectiveStatus(row, today),
       // `category` stays the category KEY string (what the clubs-members contract returned before Wave 7);
       // the richer forms are additive.
       category: category?.key ?? null,
@@ -112,6 +123,7 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: { memberId: strin
             phone: row.phone,
             emergencyContactName: row.emergencyContactName,
             emergencyContactPhone: row.emergencyContactPhone,
+            suggestedCategory: suggestion ? { id: suggestion.to.id, key: suggestion.to.key, name: suggestion.to.name } : null,
           }
         : {}),
     };
@@ -250,7 +262,7 @@ clubMemberRoutes.get("/me", async (c) => {
   // Safety net for accounts whose club_members row is missing (normally created by the Better Auth hook).
   const row = await ensureClubMember(db, membership);
   const shaped = await shapeOne(row, callerOf(c), true);
-  return c.json({ data: { ...shaped, clubMemberId: row.id, permissions: clubPermissionsFor(c.get("clubRoleTypes")) } });
+  return c.json({ data: { ...shaped, clubMemberId: row.id, permissions: [...clubPermissionsFor(c.get("clubRoleTypes")), ...(canReadClubStats(c.get("clubRoleTypes")) ? ["club_stats:read"] : [])] } });
 });
 
 const updateSelfSchema = z.object({
@@ -285,8 +297,50 @@ clubMemberRoutes.patch("/me", zValidator("json", updateSelfSchema, validationHoo
 
 // --- Member list / detail / create / update --------------------------------
 
-clubMemberRoutes.get("/", async (c) => {
+const csv = (v: string) => {
+  const parts = v.split(",").map((x) => x.trim()).filter(Boolean);
+  return parts.length > 0 ? parts : undefined;
+};
+
+const listQuerySchema = z.object({
+  q: z.string().trim().max(100).optional(),
+  status: z.string().transform(csv).pipe(z.array(z.enum(MEMBER_STATUSES)).max(MEMBER_STATUSES.length).optional()).optional(),
+  category: z.string().transform(csv).pipe(z.array(z.string().max(50)).max(20).optional()).optional(),
+  departmentId: z.string().uuid().optional(),
+  ageMin: z.coerce.number().int().min(0).max(150).optional(),
+  ageMax: z.coerce.number().int().min(0).max(150).optional(),
+  hasAccount: z.enum(["true", "false"]).optional(),
+  sort: z.enum(["name", "joinedAt", "memberNumber"]).default("name"),
+  order: z.enum(["asc", "desc"]).default("asc"),
+  page: z.coerce.number().int().min(1).max(100_000).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+});
+
+/** Filter on the EFFECTIVE status (see member-lifecycle.ts): left_at <= today turns a live status into ausgetreten. */
+function effectiveStatusCondition(status: (typeof MEMBER_STATUSES)[number], today: string): SQL {
+  const left = [...LEFT_STATUSES];
+  if (status === "ausgetreten") return or(eq(clubMembers.status, "ausgetreten"), and(notInArray(clubMembers.status, left), lte(clubMembers.leftAt, today)))!;
+  if (isLeftStatus(status)) return eq(clubMembers.status, status);
+  return and(eq(clubMembers.status, status), or(isNull(clubMembers.leftAt), gt(clubMembers.leftAt, today)))!;
+}
+
+/**
+ * Member list with search, filters, sorting and paging (B9). Response `{ data, page, pageSize, total }`; without any
+ * query parameter the first 50 members by name come back (clients must read `total`/page for larger clubs).
+ * Free-text search covers the name; member number and e-mail (contact + account) only count for callers with
+ * `members:read_sensitive` (otherwise they are ignored -- no oracle). Age filter and sorting by member number need
+ * `members:read_sensitive` too (403 otherwise). Sorting is stable (secondary key `id`). Departments/roles/categories are
+ * batch-loaded for the page only (no N+1).
+ */
+clubMemberRoutes.get("/", zValidator("query", listQuerySchema, validationHook), async (c) => {
   const clubId = c.get("clubId");
+  const query = c.req.valid("query");
+  const caller = callerOf(c);
+  const today = todayUtc();
+
+  if ((query.ageMin !== undefined || query.ageMax !== undefined) && !caller.canReadSensitive) throw new ForbiddenError("Missing members:read_sensitive permission for the age filter");
+  if (query.sort === "memberNumber" && !caller.canReadSensitive) throw new ForbiddenError("Missing members:read_sensitive permission to sort by member number");
+  if (query.ageMin !== undefined && query.ageMax !== undefined && query.ageMin > query.ageMax) throw new ValidationError("ageMin must not exceed ageMax");
 
   // Repair accounts that joined through a path that bypassed the Better Auth hook (should not happen; cheap check).
   const missing = await db
@@ -303,8 +357,62 @@ clubMemberRoutes.get("/", async (c) => {
   }
   await markDetachedMembersLeft(db, clubId).catch((err) => logger.error({ err, clubId }, "[club-members] could not close detached members"));
 
-  const rows = await db.select().from(clubMembers).where(eq(clubMembers.clubId, clubId)).orderBy(asc(clubMembers.displayName), asc(clubMembers.id));
-  return c.json({ data: await shapeClubMembers(rows, callerOf(c)) });
+  const conditions: Array<SQL | undefined> = [eq(clubMembers.clubId, clubId)];
+  if (query.q) {
+    const pattern = `%${query.q.replace(/[\\%_]/g, "\\$&")}%`;
+    conditions.push(
+      caller.canReadSensitive
+        ? or(ilike(clubMembers.displayName, pattern), ilike(clubMembers.memberNumber, pattern), ilike(clubMembers.contactEmail, pattern), ilike(user.email, pattern))
+        : ilike(clubMembers.displayName, pattern),
+    );
+  }
+  if (query.status && query.status.length > 0) conditions.push(or(...query.status.map((st) => effectiveStatusCondition(st, today))));
+  if (query.category && query.category.length > 0) {
+    conditions.push(
+      inArray(
+        clubMembers.categoryId,
+        db
+          .select({ id: memberCategories.id })
+          .from(memberCategories)
+          .where(and(eq(memberCategories.clubId, clubId), inArray(memberCategories.key, query.category.map((k) => k.toLowerCase())))),
+      ),
+    );
+  }
+  if (query.departmentId) {
+    conditions.push(
+      sql`EXISTS (SELECT 1 FROM club_member_departments d WHERE d.club_member_id = ${clubMembers.id} AND d.department_id = ${query.departmentId} AND (d.until IS NULL OR d.until > ${today}))`,
+    );
+  }
+  if (query.hasAccount) conditions.push(query.hasAccount === "true" ? isNotNull(clubMembers.memberId) : isNull(clubMembers.memberId));
+  // age >= ageMin  <=>  born on or before today - ageMin years;  age <= ageMax  <=>  born after today - (ageMax + 1) years
+  if (query.ageMin !== undefined) conditions.push(lte(clubMembers.birthDate, subtractYears(today, query.ageMin)));
+  if (query.ageMax !== undefined) conditions.push(gt(clubMembers.birthDate, subtractYears(today, query.ageMax + 1)));
+
+  const where = and(...conditions);
+  const dir = query.order === "desc" ? desc : asc;
+  const nameKey = sql`lower(${clubMembers.displayName})`;
+  const orderBy =
+    query.sort === "joinedAt"
+      ? [dir(clubMembers.joinedAt), asc(nameKey), asc(clubMembers.id)]
+      : query.sort === "memberNumber"
+        ? [query.order === "desc" ? sql`${clubMembers.memberNumber} DESC NULLS LAST` : sql`${clubMembers.memberNumber} ASC NULLS LAST`, asc(clubMembers.id)]
+        : [dir(nameKey), asc(clubMembers.id)];
+
+  const base = () => db.select({ row: clubMembers }).from(clubMembers).leftJoin(member, eq(member.id, clubMembers.memberId)).leftJoin(user, eq(user.id, member.userId));
+  const [totalRow] = await db
+    .select({ n: count() })
+    .from(clubMembers)
+    .leftJoin(member, eq(member.id, clubMembers.memberId))
+    .leftJoin(user, eq(user.id, member.userId))
+    .where(where);
+  const pageRows = await base()
+    .where(where)
+    .orderBy(...orderBy)
+    .limit(query.pageSize)
+    .offset((query.page - 1) * query.pageSize);
+
+  const data = await shapeClubMembers(pageRows.map((r) => r.row), caller, false, today);
+  return c.json({ data, page: query.page, pageSize: query.pageSize, total: totalRow?.n ?? 0 });
 });
 
 const createMemberSchema = z
@@ -371,6 +479,363 @@ clubMemberRoutes.post("/", zValidator("json", createMemberSchema, validationHook
   return c.json({ data: await shapeOne(created, callerOf(c)) }, 201);
 });
 
+// --- Member categories (B5) -------------------------------------------------------
+// Registered BEFORE `/:id` so the static segments are not swallowed by the member-id routes.
+
+type CategoryRow = MemberCategoryRow;
+
+function shapeCategory(row: CategoryRow, memberCount?: number) {
+  return {
+    id: row.id,
+    key: row.key,
+    name: row.name,
+    votingRight: row.votingRight,
+    minAge: row.minAge,
+    maxAge: row.maxAge,
+    autoTransitionToKey: row.autoTransitionToKey,
+    sortOrder: row.sortOrder,
+    archived: row.archivedAt !== null,
+    archivedAt: row.archivedAt,
+    ...(memberCount !== undefined ? { memberCount } : {}),
+  };
+}
+
+/** Members that still belong to the club (effective status not left), per category id. */
+async function activeMemberCounts(clubId: string, today: string): Promise<Map<string, number>> {
+  const rows = await db
+    .select({ categoryId: clubMembers.categoryId, n: count() })
+    .from(clubMembers)
+    .where(and(eq(clubMembers.clubId, clubId), notInArray(clubMembers.status, [...LEFT_STATUSES]), or(isNull(clubMembers.leftAt), gt(clubMembers.leftAt, today))))
+    .groupBy(clubMembers.categoryId);
+  return new Map(rows.filter((r) => r.categoryId !== null).map((r) => [r.categoryId!, r.n]));
+}
+
+const ageField = z.number().int().min(0).max(120).nullable().optional();
+const categoryKeySchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z0-9][a-z0-9_-]{0,49}$/, { message: "key must be 1-50 characters of a-z, 0-9, _ or - and start with a letter or digit" });
+
+const createCategorySchema = z.object({
+  key: categoryKeySchema.optional(),
+  name: z.string().trim().min(1).max(100),
+  votingRight: z.boolean().optional(),
+  minAge: ageField,
+  maxAge: ageField,
+  autoTransitionToKey: z.string().trim().min(1).max(50).nullable().optional(),
+  sortOrder: z.number().int().min(0).max(10_000).optional(),
+});
+
+const updateCategorySchema = z.object({
+  // The key is the stable identifier (older clients, imports, auto transitions refer to it): immutable after creation.
+  key: z.never({ error: "key cannot be changed after creation" }).optional(),
+  name: z.string().trim().min(1).max(100).optional(),
+  votingRight: z.boolean().optional(),
+  minAge: ageField,
+  maxAge: ageField,
+  autoTransitionToKey: z.string().trim().min(1).max(50).nullable().optional(),
+  sortOrder: z.number().int().min(0).max(10_000).optional(),
+});
+
+/** Derives a category key from a name: lower case ASCII, umlauts transliterated, other characters become "-". */
+function keyFromName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/ß/g, "ss")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 50);
+}
+
+/** Age range + auto transition rules of a category (the resulting state, so a PATCH is validated as a whole). */
+async function validateCategoryRules(
+  clubId: string,
+  state: { key: string; minAge: number | null; maxAge: number | null; autoTransitionToKey: string | null },
+): Promise<void> {
+  if (state.minAge !== null && state.maxAge !== null && state.minAge > state.maxAge) throw new ValidationError("minAge must not exceed maxAge");
+  if (state.autoTransitionToKey === null) return;
+  if (state.maxAge === null) throw new ValidationError("autoTransitionToKey requires maxAge");
+  const target = state.autoTransitionToKey.toLowerCase();
+  if (target === state.key) throw new ValidationError("autoTransitionToKey must point to another category");
+  const all = await db.select().from(memberCategories).where(eq(memberCategories.clubId, clubId));
+  const targetRow = all.find((c) => c.key === target);
+  if (!targetRow || targetRow.archivedAt) throw new ValidationError("autoTransitionToKey must name an existing, non-archived category of this club");
+  if (wouldCreateCycle(all, state.key, target)) throw new ValidationError("autoTransitionToKey would create a cycle between categories");
+}
+
+async function loadCategory(clubId: string, idParam: string): Promise<CategoryRow> {
+  const row = isUuid(idParam) ? await db.query.memberCategories.findFirst({ where: and(eq(memberCategories.id, idParam), eq(memberCategories.clubId, clubId)) }) : undefined;
+  if (!row) throw new NotFoundError("Category not found");
+  return row;
+}
+
+clubMemberRoutes.get("/categories", async (c) => {
+  const clubId = c.get("clubId");
+  const canWrite = hasClubPermission(c.get("clubRoleTypes"), "members:write");
+  const includeArchived = c.req.query("includeArchived") === "true";
+  if (includeArchived && !canWrite) throw new ForbiddenError("Missing members:write permission");
+  await ensureDefaultCategories(clubId);
+  const rows = await db
+    .select()
+    .from(memberCategories)
+    .where(and(eq(memberCategories.clubId, clubId), includeArchived ? undefined : isNull(memberCategories.archivedAt)))
+    .orderBy(asc(memberCategories.sortOrder), asc(memberCategories.name), asc(memberCategories.id));
+  const counts = await activeMemberCounts(clubId, todayUtc());
+  return c.json({ data: rows.map((r) => shapeCategory(r, counts.get(r.id) ?? 0)) });
+});
+
+clubMemberRoutes.post("/categories", zValidator("json", createCategorySchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  const actor = c.get("membership");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+  const body = c.req.valid("json");
+
+  const key = body.key ?? keyFromName(body.name);
+  if (!categoryKeySchema.safeParse(key).success) throw new ValidationError("Could not derive a valid key from the name; send an explicit key");
+  await ensureDefaultCategories(clubId);
+  const rules = { key, minAge: body.minAge ?? null, maxAge: body.maxAge ?? null, autoTransitionToKey: body.autoTransitionToKey ?? null };
+  await validateCategoryRules(clubId, rules);
+
+  let created: CategoryRow;
+  try {
+    created = await db.transaction(async (tx) => {
+      const [last] = await tx.select({ n: sql<number>`coalesce(max(${memberCategories.sortOrder}), -1)` }).from(memberCategories).where(eq(memberCategories.clubId, clubId));
+      const [row] = await tx
+        .insert(memberCategories)
+        .values({ clubId, name: body.name, votingRight: body.votingRight ?? true, ...rules, sortOrder: body.sortOrder ?? Number(last?.n ?? -1) + 1 })
+        .returning();
+      await tx.insert(auditLog).values({ eventType: "member_category.create", subjectId: row!.id, payload: { clubId, key, createdBy: actor.id } });
+      return row!;
+    });
+  } catch (err) {
+    if (isUniqueViolation(err)) throw new ConflictError("A category with this key already exists (archived categories keep their key)");
+    throw err;
+  }
+  return c.json({ data: shapeCategory(created, 0) }, 201);
+});
+
+clubMemberRoutes.patch("/categories/:id", zValidator("json", updateCategorySchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  const actor = c.get("membership");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const current = await loadCategory(clubId, c.req.param("id"));
+  const { key: _ignored, ...body } = c.req.valid("json");
+  void _ignored;
+  const changes = definedOnly(body);
+  const next = {
+    key: current.key,
+    minAge: changes.minAge === undefined ? current.minAge : changes.minAge,
+    maxAge: changes.maxAge === undefined ? current.maxAge : changes.maxAge,
+    autoTransitionToKey: changes.autoTransitionToKey === undefined ? current.autoTransitionToKey : changes.autoTransitionToKey,
+  };
+  if (current.archivedAt && changes.autoTransitionToKey) throw new ConflictError("Category is archived");
+  if (!current.archivedAt) await validateCategoryRules(clubId, next);
+
+  const [updated] = await db.transaction(async (tx) => {
+    const rows = await tx.update(memberCategories).set(changes).where(and(eq(memberCategories.id, current.id), eq(memberCategories.clubId, clubId))).returning();
+    await tx.insert(auditLog).values({ eventType: "member_category.update", subjectId: current.id, payload: { clubId, changedFields: Object.keys(changes), changedBy: actor.id } });
+    return rows;
+  });
+  const counts = await activeMemberCounts(clubId, todayUtc());
+  return c.json({ data: shapeCategory(updated!, counts.get(current.id) ?? 0) });
+});
+
+/**
+ * "Delete" = archive (history and references keep working). Members that still belong to the club must be moved:
+ * `?moveTo=<categoryId>` is mandatory when there are any (409 with the count otherwise). The default category `aktiv`
+ * (fallback for every new member) cannot be archived.
+ */
+clubMemberRoutes.delete("/categories/:id", async (c) => {
+  const clubId = c.get("clubId");
+  const actor = c.get("membership");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const category = await loadCategory(clubId, c.req.param("id"));
+  const moveToParam = c.req.query("moveTo");
+  const today = todayUtc();
+
+  const result = await db.transaction(async (tx) => {
+    const [locked] = await tx.select().from(memberCategories).where(eq(memberCategories.id, category.id)).for("update");
+    if (!locked || locked.archivedAt) throw new ConflictError("Category is already archived");
+    if (locked.key === DEFAULT_CATEGORY_KEY) throw new ConflictError(`The default category "${DEFAULT_CATEGORY_KEY}" cannot be archived`);
+
+    const active = await tx
+      .select()
+      .from(clubMembers)
+      .where(and(eq(clubMembers.clubId, clubId), eq(clubMembers.categoryId, locked.id), notInArray(clubMembers.status, [...LEFT_STATUSES]), or(isNull(clubMembers.leftAt), gt(clubMembers.leftAt, today))))
+      .for("update");
+
+    if (active.length > 0) {
+      if (!moveToParam) throw new ConflictError("Category still has members; pass moveTo=<categoryId> to move them", { details: { memberCount: active.length } });
+      const target = isUuid(moveToParam) ? await tx.query.memberCategories.findFirst({ where: and(eq(memberCategories.id, moveToParam), eq(memberCategories.clubId, clubId)) }) : undefined;
+      if (!target || target.archivedAt || target.id === locked.id) throw new ValidationError("moveTo must be another, non-archived category of this club");
+      await tx.update(clubMembers).set({ categoryId: target.id, updatedAt: new Date() }).where(inArray(clubMembers.id, active.map((m) => m.id)));
+      await tx.insert(clubMemberStatusHistory).values(
+        active.map((m) => ({ clubMemberId: m.id, fromStatus: m.status, toStatus: m.status, fromCategoryId: locked.id, toCategoryId: target.id, effectiveOn: today, reason: "Kategorie archiviert", changedBy: actor.id })),
+      );
+    }
+
+    // Other categories must not keep pointing at an archived one.
+    const cleared = await tx
+      .update(memberCategories)
+      .set({ autoTransitionToKey: null })
+      .where(and(eq(memberCategories.clubId, clubId), eq(memberCategories.autoTransitionToKey, locked.key)))
+      .returning({ id: memberCategories.id });
+    const [archived] = await tx.update(memberCategories).set({ archivedAt: new Date() }).where(eq(memberCategories.id, locked.id)).returning();
+    await tx.insert(auditLog).values({
+      eventType: "member_category.archive",
+      subjectId: locked.id,
+      payload: { clubId, key: locked.key, movedMembers: active.length, movedTo: active.length > 0 ? moveToParam : null, clearedAutoTransitions: cleared.length, changedBy: actor.id },
+    });
+    return { archived: archived!, moved: active.length, cleared: cleared.length };
+  });
+
+  return c.json({ data: { ...shapeCategory(result.archived), movedMembers: result.moved, clearedAutoTransitions: result.cleared } });
+});
+
+// --- Age transition suggestions (B5) -------------------------------------------------
+// Derived at read time; nothing is changed until the board applies them (scheduler: Wave 9).
+
+async function loadSuggestions(tx: DbExecutor, clubId: string, today: string, onlyIds?: string[]) {
+  const categories = await tx.select().from(memberCategories).where(eq(memberCategories.clubId, clubId));
+  const byId = new Map(categories.map((cat) => [cat.id, cat]));
+  const byKey = new Map(categories.map((cat) => [cat.key, cat]));
+  const sourceIds = categories.filter((cat) => cat.autoTransitionToKey && cat.maxAge !== null && !cat.archivedAt).map((cat) => cat.id);
+  if (sourceIds.length === 0) return { rows: [] as ClubMemberRow[], suggestions: new Map<string, ReturnType<typeof suggestCategory>>() };
+  const base = tx
+    .select()
+    .from(clubMembers)
+    .where(and(eq(clubMembers.clubId, clubId), inArray(clubMembers.categoryId, sourceIds), isNotNull(clubMembers.birthDate), onlyIds ? inArray(clubMembers.id, onlyIds) : undefined));
+  const rows = await (onlyIds ? base.for("update") : base);
+  const suggestions = new Map(rows.map((row) => [row.id, suggestCategory(row, byId, byKey, today)]));
+  return { rows, suggestions };
+}
+
+clubMemberRoutes.get("/transition-suggestions", async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+  const { rows, suggestions } = await loadSuggestions(db, clubId, todayUtc());
+  const data = rows
+    .flatMap((row) => {
+      const s = suggestions.get(row.id);
+      return s ? [{ id: row.id, name: row.displayName, category: { id: s.from.id, key: s.from.key, name: s.from.name }, suggestedCategory: { id: s.to.id, key: s.to.key, name: s.to.name } }] : [];
+    })
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  return c.json({ data });
+});
+
+const applySuggestionsSchema = z.object({ memberIds: z.array(z.string().uuid()).min(1).max(500) });
+
+clubMemberRoutes.post("/transition-suggestions/apply", zValidator("json", applySuggestionsSchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  const actor = c.get("membership");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+  const ids = [...new Set(c.req.valid("json").memberIds)];
+  const today = todayUtc();
+
+  const result = await db.transaction(async (tx) => {
+    // Suggestions are recomputed on the locked rows: a stale client list can't move someone who no longer qualifies.
+    const { rows, suggestions } = await loadSuggestions(tx, clubId, today, ids);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const applied: Array<{ id: string; fromCategoryId: string; toCategoryId: string }> = [];
+    const skipped: Array<{ id: string; reason: "no_suggestion" }> = [];
+    for (const id of ids) {
+      const row = byId.get(id);
+      const s = row ? suggestions.get(id) : null;
+      if (!row || !s) {
+        skipped.push({ id, reason: "no_suggestion" });
+        continue;
+      }
+      await tx.update(clubMembers).set({ categoryId: s.to.id, updatedAt: new Date() }).where(eq(clubMembers.id, row.id));
+      await tx.insert(clubMemberStatusHistory).values({
+        clubMemberId: row.id,
+        fromStatus: row.status,
+        toStatus: row.status,
+        fromCategoryId: s.from.id,
+        toCategoryId: s.to.id,
+        effectiveOn: today,
+        reason: "Altersübergang",
+        changedBy: actor.id,
+      });
+      applied.push({ id: row.id, fromCategoryId: s.from.id, toCategoryId: s.to.id });
+    }
+    if (applied.length > 0) {
+      await tx.insert(auditLog).values({ eventType: "club_member.age_transition", subjectId: clubId, payload: { clubId, count: applied.length, memberIds: applied.map((a) => a.id), changedBy: actor.id } });
+    }
+    return { applied, skipped };
+  });
+  return c.json({ data: result });
+});
+
+// --- Status / category transition (B5) ----------------------------------------------------
+
+const transitionSchema = z
+  .object({
+    toStatus: z.enum(MEMBER_STATUSES).optional(),
+    categoryId: z.string().uuid().optional(),
+    categoryKey: z.string().trim().min(1).max(50).optional(),
+    effectiveOn: z.string().date().optional(),
+    reason: z.string().trim().max(1000).nullable().optional(),
+    reopen: z.boolean().optional(),
+  })
+  .refine((b) => b.toStatus !== undefined || b.categoryId !== undefined || b.categoryKey !== undefined, { message: "toStatus or categoryId/categoryKey is required", path: ["toStatus"] });
+
+clubMemberRoutes.post("/:id/transition", zValidator("json", transitionSchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  const actor = c.get("membership");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const target = await resolveClubMember(clubId, c.req.param("id"));
+  const body = c.req.valid("json");
+  const category = await resolveCategory(clubId, { categoryId: body.categoryId, categoryKey: body.categoryKey });
+  const today = todayUtc();
+
+  const result = await db.transaction(async (tx) => {
+    const done = await transitionMember(tx, clubId, target.id, { toStatus: body.toStatus, category, effectiveOn: body.effectiveOn, reason: body.reason, reopen: body.reopen }, actor.id, today);
+    await tx.insert(auditLog).values({
+      eventType: "club_member.transition",
+      subjectId: target.id,
+      // Status/category ids and dates only; the free-text reason stays in club_member_status_history.
+      payload: { clubId, kind: done.kind, fromStatus: done.fromStatus, toStatus: done.toStatus, fromCategoryId: done.fromCategoryId, toCategoryId: done.toCategoryId, effectiveOn: done.effectiveOn, changedBy: actor.id },
+    });
+    return done;
+  });
+
+  return c.json({
+    data: await shapeOne(result.row, callerOf(c)),
+    transition: { kind: result.kind, fromStatus: result.fromStatus, toStatus: result.toStatus, fromCategoryId: result.fromCategoryId, toCategoryId: result.toCategoryId, effectiveOn: result.effectiveOn },
+  });
+});
+
+// Status/category history of one member (exit reasons are personal data: board with members:read_sensitive only).
+clubMemberRoutes.get("/:id/history", async (c) => {
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive")) throw new ForbiddenError("Missing members:read_sensitive permission");
+  const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
+  const rows = await db
+    .select()
+    .from(clubMemberStatusHistory)
+    .where(eq(clubMemberStatusHistory.clubMemberId, row.id))
+    .orderBy(desc(clubMemberStatusHistory.createdAt), desc(clubMemberStatusHistory.id));
+  return c.json({
+    data: rows.map((h) => ({
+      id: h.id,
+      fromStatus: h.fromStatus,
+      toStatus: h.toStatus,
+      fromCategoryId: h.fromCategoryId,
+      toCategoryId: h.toCategoryId,
+      effectiveOn: h.effectiveOn,
+      reason: h.reason,
+      changedBy: h.changedBy,
+      createdAt: h.createdAt,
+    })),
+  });
+});
+
 clubMemberRoutes.get("/:id", async (c) => {
   const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
   return c.json({ data: await shapeOne(row, callerOf(c)) });
@@ -420,6 +885,17 @@ clubMemberRoutes.patch("/:id", zValidator("json", updateMemberSchema, validation
       .where(and(eq(clubMembers.id, target.id), eq(clubMembers.clubId, clubId)))
       .returning();
 
+    if (category && category.id !== target.categoryId) {
+      await tx.insert(clubMemberStatusHistory).values({
+        clubMemberId: target.id,
+        fromStatus: target.status,
+        toStatus: target.status,
+        fromCategoryId: target.categoryId,
+        toCategoryId: category.id,
+        effectiveOn: today(),
+        changedBy: actor.id,
+      });
+    }
     await tx.insert(auditLog).values({
       eventType: "club_member.update",
       subjectId: target.id,

@@ -113,6 +113,13 @@
       "when": 1791736670635,
       "tag": "0015_member-lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1791737365917,
+      "tag": "0017_member-search-index",
+      "breakpoints": true
     }
   ]
 }

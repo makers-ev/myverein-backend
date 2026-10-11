@@ -99,13 +99,15 @@ describe("migrations 0014/0015 edge cases", () => {
     const pool = await wave6Database("rerun", seedLegacy);
     pools.push(pool);
     await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS });
+    // Every journal entry is applied exactly once (the count follows the journal, so new migrations don't break this).
+    const journalEntries = (JSON.parse(await readFile(path.join(MIGRATIONS, "meta", "_journal.json"), "utf8")) as { entries: unknown[] }).entries.length;
     const snapshot = async () => (await pool.query(`SELECT id, member_id, member_number, category_id, status FROM club_members ORDER BY id`)).rows;
     const before = await snapshot();
     const categories = (await pool.query(`SELECT count(*) AS n FROM member_categories`)).rows[0].n;
     await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS });
     expect(await snapshot()).toEqual(before);
     expect((await pool.query(`SELECT count(*) AS n FROM member_categories`)).rows[0].n).toBe(categories);
-    expect((await pool.query(`SELECT count(*) AS n FROM drizzle.__drizzle_migrations`)).rows[0].n).toBe("16");
+    expect((await pool.query(`SELECT count(*) AS n FROM drizzle.__drizzle_migrations`)).rows[0].n).toBe(String(journalEntries));
   });
 
   it("rolls back completely when the migration fails half-way (nothing is left half-migrated)", async () => {

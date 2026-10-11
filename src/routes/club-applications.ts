@@ -7,7 +7,7 @@ import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import { clubMembers } from "../db/schema/club-members.js";
-import { ensureClubMember, findCategoryByKey } from "../lib/club-members.js";
+import { assertRejoinAllowed, ensureClubMember, findCategoryByKey } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
@@ -76,6 +76,8 @@ clubApplicationRoutes.post("/:id/approve", async (c) => {
     where: and(eq(member.organizationId, clubId), eq(member.userId, application.userId)),
   });
   if (existing) throw new ConflictError("Applicant is already a member of this club");
+  // Excluded / deceased persons cannot be re-admitted by an application; the board must reopen them first.
+  await assertRejoinAllowed(db, clubId, application.userId);
 
   // addMember returns the created member row directly (not wrapped), see
   // node_modules/better-auth/dist/plugins/organization/routes/crud-members.mjs.

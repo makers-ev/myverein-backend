@@ -9,7 +9,8 @@ import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plu
 import { organization as organizationTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
-import { ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
+import { assertRejoinAllowed, ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
+import { ConflictError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
 import { notification, notificationTemplate } from "../db/schema/notifications.js";
 import { sendEmail } from "../lib/email.js";
@@ -34,6 +35,12 @@ if (!authSecret) {
  * and token validation end to end via `trustedOrigins` + its own
  * server-side session table lookups.
  */
+/** Maps the domain 409 of `assertRejoinAllowed` to a Better Auth error so the join attempt is rejected. */
+function rejoinBlocked(err: unknown): never {
+  if (err instanceof ConflictError) throw new APIError("CONFLICT", { message: err.message });
+  throw err;
+}
+
 export const auth = betterAuth({
   secret: authSecret,
   // Explicit instead of inferred from the request host -- matters once this
@@ -149,6 +156,13 @@ export const auth = betterAuth({
         // club_members row, so no join path can slip past. A failure is logged, not thrown: the account membership
         // already exists at this point and the explicit join flows (application approval, club approval, seed) as well
         // as GET /club-members and /me call ensureClubMember again and repair it.
+        // Excluded / deceased persons can't re-join through addMember or an invitation (409); the board reopens first.
+        beforeAddMember: async ({ member: adding }) => {
+          await assertRejoinAllowed(db, adding.organizationId, adding.userId).catch(rejoinBlocked);
+        },
+        beforeAcceptInvitation: async ({ invitation, user: accepting }) => {
+          await assertRejoinAllowed(db, invitation.organizationId, accepting.id).catch(rejoinBlocked);
+        },
         afterAddMember: async ({ member: addedMember }) => {
           try {
             await ensureClubMember(db, addedMember);

@@ -83,6 +83,8 @@ export const clubMembers = pgTable(
     index("club_members_club_last_user_idx").on(table.clubId, table.lastUserId),
     index("club_members_club_status_idx").on(table.clubId, table.status),
     index("club_members_club_member_number_idx").on(table.clubId, table.memberNumber),
+    // Name sort/search of the member list (B9): ORDER BY lower(display_name), id within one club.
+    index("club_members_club_name_idx").on(table.clubId, sql`lower(${table.displayName})`),
   ],
 );
 
