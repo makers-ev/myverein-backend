@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { MemberCategoryRow } from "../db/schema/club-members.js";
 import { MEMBER_STATUSES } from "../db/schema/club-members.js";
-import { ageOn, effectiveStatus, isLeftStatus, STATUS_TRANSITIONS, subtractYears, suggestCategory, wouldCreateCycle } from "./member-lifecycle.js";
+import { ageOn, effectiveStatus, isLeftStatus, STATUS_TRANSITIONS, subtractYears, suggestCategory, todayBerlin, wouldCreateCycle } from "./member-lifecycle.js";
 
 const category = (over: Partial<MemberCategoryRow>): MemberCategoryRow => ({
   id: "c-" + (over.key ?? "x"),
@@ -115,5 +115,29 @@ describe("wouldCreateCycle", () => {
   it("accepts chains", () => {
     expect(wouldCreateCycle(cats, "d", "a")).toBe(false);
     expect(wouldCreateCycle(cats, "c", "d")).toBe(false);
+  });
+});
+
+describe("todayBerlin (A8)", () => {
+  it("is the Berlin calendar day, not the UTC one, around midnight", () => {
+    // 00:30 CEST on 1 July = 22:30 UTC on 30 June
+    expect(todayBerlin(new Date("2026-06-30T22:30:00Z"))).toBe("2026-07-01");
+    // 23:30 UTC on 30 June is already 01:30 CEST on 1 July
+    expect(todayBerlin(new Date("2026-06-30T23:30:00Z"))).toBe("2026-07-01");
+    // winter time (CET = UTC+1): 00:30 CET on 1 January = 23:30 UTC on 31 December
+    expect(todayBerlin(new Date("2026-12-31T23:30:00Z"))).toBe("2027-01-01");
+    // 21:59 UTC on 30 June is still 30 June 23:59 CEST
+    expect(todayBerlin(new Date("2026-06-30T21:59:00Z"))).toBe("2026-06-30");
+    // DST switch (29 March 2026, 02:00 CET -> 03:00 CEST)
+    expect(todayBerlin(new Date("2026-03-28T23:30:00Z"))).toBe("2026-03-29");
+  });
+
+  it("makes an exit dated 'today' (Berlin) effective right after midnight CEST, and a birthday count at 00:30 CEST", () => {
+    const justAfterMidnight = todayBerlin(new Date("2026-06-30T22:30:00Z")); // 2026-07-01 00:30 CEST
+    expect(effectiveStatus({ status: "aktiv", leftAt: "2026-07-01" }, justAfterMidnight)).toBe("ausgetreten");
+    // with UTC "today" (the old behaviour) the member would still be aktiv for another 1.5 hours
+    expect(effectiveStatus({ status: "aktiv", leftAt: "2026-07-01" }, "2026-06-30")).toBe("aktiv");
+    expect(ageOn("2016-07-01", justAfterMidnight)).toBe(10);
+    expect(ageOn("2016-07-01", "2026-06-30")).toBe(9);
   });
 });

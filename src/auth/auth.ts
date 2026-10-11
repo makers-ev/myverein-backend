@@ -11,6 +11,7 @@ import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { assertRejoinAllowed, ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
 import { ConflictError } from "../lib/errors.js";
+import { inviteLinkContext } from "../lib/invite-context.js";
 import { logger } from "../lib/logger.js";
 import { notification, notificationTemplate } from "../db/schema/notifications.js";
 import { sendEmail } from "../lib/email.js";
@@ -164,6 +165,8 @@ export const auth = betterAuth({
           await assertRejoinAllowed(db, invitation.organizationId, accepting.id).catch(rejoinBlocked);
         },
         afterAddMember: async ({ member: addedMember }) => {
+          // Accepting a member invitation links the EXISTING club_members row afterwards (lib/member-invites.ts).
+          if (inviteLinkContext.getStore()) return;
           try {
             await ensureClubMember(db, addedMember);
           } catch (err) {

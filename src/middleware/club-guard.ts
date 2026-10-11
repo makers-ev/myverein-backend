@@ -4,9 +4,11 @@ import { and, eq } from "drizzle-orm";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
+import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { IMPLICIT_ROLE_TYPE } from "../lib/club-permissions.js";
 import { BadRequestError, NotFoundError } from "../lib/errors.js";
+import { effectiveStatus, isLeftStatus, todayBerlin } from "../lib/member-lifecycle.js";
 import type { SessionEnv } from "./session-guard.js";
 
 type MemberRow = typeof member.$inferSelect;
@@ -47,6 +49,14 @@ export const clubGuard = createMiddleware<ClubEnv>(async (c: Context, next: Next
   });
 
   if (!membership) {
+    throw new NotFoundError("Club not found");
+  }
+
+  const clubMember = await db.query.clubMembers.findFirst({
+    where: eq(clubMembers.memberId, membership.id),
+    columns: { status: true, leftAt: true },
+  });
+  if (clubMember && isLeftStatus(effectiveStatus(clubMember, todayBerlin()))) {
     throw new NotFoundError("Club not found");
   }
 

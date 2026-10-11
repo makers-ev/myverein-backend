@@ -327,7 +327,13 @@ describe("club_members foundation (Wave 7 B2/B3)", () => {
         expect(res.status).toBe(409);
         expect(JSON.stringify(await res.json())).toContain("Member has no account");
       }
-      expect(await db.select().from(clubRoles).where(eq(clubRoles.roleType, "trainer"))).toHaveLength(0);
+      // scoped to this club: the test database is shared with test files running in parallel
+      const trainers = await db
+        .select({ id: clubRoles.id })
+        .from(clubRoles)
+        .innerJoin(member, eq(member.id, clubRoles.memberId))
+        .where(and(eq(member.organizationId, clubA), eq(clubRoles.roleType, "trainer")));
+      expect(trainers).toHaveLength(0);
     });
 
     it("assigns and revokes roles via club_members.id and via member.id (transition), written on the account", async () => {

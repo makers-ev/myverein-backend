@@ -17,6 +17,8 @@ import { toAppError } from "../lib/errors.js";
 import { adminClubRegistrationRoutes } from "./admin-club-registrations.js";
 import { adminClubRoutes } from "./admin-clubs.js";
 import { clubStatsRoutes } from "./club-stats.js";
+import { clubExitRequestRoutes } from "./club-exit-requests.js";
+import { clubSettingsRoutes } from "./club-settings.js";
 import { adminEmailRoutes } from "./admin-emails.js";
 import { adminNotificationRoutes } from "./admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./admin-notification-templates.js";
@@ -40,8 +42,10 @@ import { notificationRoutes } from "./notifications.js";
 
 /**
  * Rights matrix (Wave 7 B12 part, deny-by-default): EVERY registered writing route (POST/PATCH/PUT/DELETE)
- * is called by an account member who holds ONLY the implicit role `mitglied` and must be denied (403, or 404
- * where the route scopes the resource first). Self-service routes are listed explicitly in SELF_SERVICE.
+ * is called by an account member who holds ONLY the implicit role `mitglied` -- and once more by an external guest --
+ * and must be denied with 403 (404 only where listed in MAY_BE_404; 401 is NOT accepted: a dead session would make
+ * the whole matrix pass vacuously, so the sessions are verified first). Self-service routes are listed explicitly in
+ * SELF_SERVICE. Handlers registered with `.all()` are not enumerated per method and therefore forbidden (test below).
  * A new route that is neither denied nor on the allowlist fails this test -- add a permission check or,
  * deliberately, an allowlist entry with a reason.
  */
@@ -55,6 +59,8 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/admin", "adminEmailRoutes", adminEmailRoutes],
   ["/admin", "adminClubRoutes", adminClubRoutes],
   ["/club-stats", "clubStatsRoutes", clubStatsRoutes],
+  ["/club-settings", "clubSettingsRoutes", clubSettingsRoutes],
+  ["/club-exit-requests", "clubExitRequestRoutes", clubExitRequestRoutes],
   ["/notifications", "notificationRoutes", notificationRoutes],
   ["/admin/notifications", "adminNotificationRoutes", adminNotificationRoutes],
   ["/admin/notification-templates", "adminNotificationTemplateRoutes", adminNotificationTemplateRoutes],
@@ -109,10 +115,21 @@ const SELF_SERVICE: Record<string, string> = {
   "PATCH /inventory-items/:id/loans/:loanId": "return of the own loan (borrower or inventory:write)",
   "POST /inventory-items/:id/damage-reports": "self-service damage report",
   "POST /media": "photo upload for damage reports; TODO B18: move behind the central media layer",
+  "POST /club-members/invites/accept": "accepting an own invitation (session only; bound to the secret token and the account e-mail, no club membership needed)",
+  "POST /club-exit-requests": "the member's own cancellation (recording a cancellation for others and exclusions need members:write, asserted in the B6 test)",
+  "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
 };
 
 /** Routes that may answer 404 instead of 403 (the resource is resolved/scoped before the permission check). */
 const MAY_BE_404: Record<string, string> = {};
+
+/** Read routes a plain mitglied may use but an external guest must NOT (guests: 403, or 404 where the resource is hidden). */
+const GUEST_DENIED_READS: Array<[string, string]> = [
+  ["GET", "/meetings"],
+  ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}`],
+  ["GET", "/club-members"],
+  ["GET", "/club-members?status=aktiv"],
+];
 
 /** Routes whose body validation runs before the permission check need a valid sample body. Default `{}`. */
 const SOME_ID = "00000000-0000-4000-8000-000000000001";
@@ -122,6 +139,8 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /club-members/categories": { name: "Neue Kategorie" },
   "POST /club-members/transition-suggestions/apply": { memberIds: [SOME_ID] },
   "POST /club-members/:id/transition": { toStatus: "aktiv" },
+  "POST /club-members/:id/invite": { email: "nobody@example.com" },
+  "POST /club-exit-requests/:id/reject": { note: "Nein" },
   "POST /club-members/:id/roles": { roleType: "kassenwart" },
   "POST /club-members/:id/guardians": { guardianMemberId: SOME_ID },
   "POST /departments": { name: "Abteilung" },
@@ -220,7 +239,19 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     }
   });
 
-  it("denies every non-self-service writing route to a plain mitglied", async () => {
+  it("has valid sessions for every test account (otherwise a 401 wall would make the matrix vacuous)", async () => {
+    for (const [label, cookie] of [["founder", cookieFounder], ["plain", cookiePlain], ["guest", cookieGuest]] as const) {
+      const res = await req("/club-members/me", cookie);
+      expect(res.status, label).toBe(200);
+    }
+  });
+
+  it("has no .all() handlers (they would escape the per-method matrix); only middleware may use ALL", () => {
+    const catchAll = app.routes.filter((r) => r.method === "ALL" && !/\*$/.test(r.path));
+    expect(catchAll.map((r) => r.path)).toEqual([]);
+  });
+
+  async function denialProblems(cookie: string): Promise<{ problems: string[]; checked: number }> {
     const writes = [...new Set(app.routes.filter((r) => WRITE_METHODS.includes(r.method)).map((r) => `${r.method} ${r.path}`))];
     expect(writes.length).toBeGreaterThan(50);
 
@@ -229,16 +260,50 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     for (const key of writes) {
       if (key in SELF_SERVICE) continue;
       const [method, path] = key.split(" ");
-      const res = await req(fillParams(path), cookiePlain, { method, body: SAMPLE_BODIES[key] ?? {} });
+      const res = await req(fillParams(path), cookie, { method, body: SAMPLE_BODIES[key] ?? {} });
       checked += 1;
-      const allowed = key in MAY_BE_404 ? [401, 403, 404] : [401, 403];
+      // adminGuard (src/middleware/session-guard.ts) answers an authenticated NON-admin with 401 "Admin privileges
+      // required" (legacy contract of the admin dashboard); the sessions were verified above, so 401 cannot be a dead session.
+      const allowed = key in MAY_BE_404 ? [403, 404] : path.startsWith("/admin") ? [401, 403] : [403];
       if (!allowed.includes(res.status)) {
         problems.push(`${key} -> ${res.status}${res.status === 422 ? " (validation ran first: add a valid body to SAMPLE_BODIES)" : ""}`);
       }
     }
+    return { problems, checked };
+  }
+
+  it("denies every non-self-service writing route to a plain mitglied (403 only)", async () => {
+    const { problems, checked } = await denialProblems(cookiePlain);
     expect(checked).toBeGreaterThan(40);
     expect(problems, problems.join("\n")).toEqual([]);
   }, 120_000);
+
+  it("denies every non-self-service writing route to an external guest too (403 only)", async () => {
+    const { problems, checked } = await denialProblems(cookieGuest);
+    expect(checked).toBeGreaterThan(40);
+    expect(problems, problems.join("\n")).toEqual([]);
+  }, 120_000);
+
+  it("keeps the sensitive reads (meetings, member list) closed for an external guest", async () => {
+    for (const [method, path] of GUEST_DENIED_READS) {
+      const res = await req(path, cookieGuest, { method });
+      expect([403, 404], `${method} ${path} -> ${res.status}`).toContain(res.status);
+    }
+    // ... while a plain member reads them, and the guest still reaches the own profile.
+    expect((await req("/meetings", cookiePlain)).status).toBe(200);
+    expect((await req("/club-members", cookiePlain)).status).toBe(200);
+    expect((await req("/club-members/me", cookieGuest)).status).toBe(200);
+  });
+
+  it("denies the board-only exit-request variants and settings changes to a plain mitglied", async () => {
+    const other = (await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, adminMemberId) }))!;
+    const asBoard = await req("/club-exit-requests", cookiePlain, { method: "POST", body: { clubMemberId: other.id, kind: "cancellation" } });
+    expect(asBoard.status).toBe(403);
+    const exclusion = await req("/club-exit-requests", cookiePlain, { method: "POST", body: { clubMemberId: other.id, kind: "exclusion", reason: "x" } });
+    expect(exclusion.status).toBe(403);
+    expect((await req("/club-exit-requests", cookiePlain)).status).toBe(403);
+    expect((await req("/club-settings", cookiePlain, { method: "PATCH", body: { allowSelfLoans: false } })).status).toBe(403);
+  });
 
   it("is not vacuous: the same kind of request succeeds for a board role", async () => {
     const created = await req("/meetings", cookieFounder, { method: "POST", body: { type: "vorstandssitzung", title: "Matrix control" } });
@@ -262,7 +327,7 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
       const plain = await json(await req("/club-members/me", cookiePlain));
       expect(plain.data.permissions).toEqual([]);
       const board = (await json(await req("/club-members/me", cookieFounder))).data.permissions as string[];
-      expect(board).toEqual(expect.arrayContaining(["meetings:write", "meetings:read_board", "locations:write", "locations:read_access"]));
+      expect(board).toEqual(expect.arrayContaining(["meetings:write", "meetings:read_board", "locations:write", "locations:read_access", "club_stats:read"]));
     });
 
     it("gives read permissions along the agreed roles", () => {

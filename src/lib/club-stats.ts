@@ -9,14 +9,8 @@
  *   history of the club. byCategory/byDepartment/ageBuckets describe the counted population.
  * - Effective status = stored status, except `left_at <= today` => `ausgetreten` (see member-lifecycle.ts).
  */
-import { BOARD_ROLE_TYPES } from "./club-permissions.js";
 import { COUNTED_STATUSES, ageOn, effectiveStatus, isLeftStatus } from "./member-lifecycle.js";
 import { MEMBER_STATUSES } from "../db/schema/club-members.js";
-
-/** Read right for `GET /club-stats`: the board roles. Deliberately not a `ClubPermission` (kept out of club-permissions.ts). */
-export function canReadClubStats(roleTypes: readonly string[]): boolean {
-  return roleTypes.some((r) => (BOARD_ROLE_TYPES as readonly string[]).includes(r));
-}
 
 export const AGE_BUCKETS = [
   { label: "0–5", max: 5 },

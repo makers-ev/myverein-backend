@@ -54,11 +54,17 @@ function withLegacyGuestFlag<T extends { visibility: string }>(row: T) {
   return { ...row, visibleToGuests: row.visibility === "gast" };
 }
 
-/** Legacy clients send `visibleToGuests`; `visibility` wins if both are present. */
-function resolveVisibility(body: { visibility?: LocationVisibility; visibleToGuests?: boolean }): LocationVisibility | undefined {
+/**
+ * Legacy clients send `visibleToGuests`; `visibility` wins if both are present. `visibleToGuests: false` only means
+ * "not for guests": it lowers a `gast` row to `mitglied` but must never RAISE a `vorstand` row (the old flag knows no
+ * third level), so on PATCH pass the row's `current` visibility. On create there is no current value (-> `mitglied`).
+ */
+function resolveVisibility(body: { visibility?: LocationVisibility; visibleToGuests?: boolean }, current?: string): LocationVisibility | undefined {
   if (body.visibility !== undefined) return body.visibility;
   if (body.visibleToGuests === undefined) return undefined;
-  return body.visibleToGuests ? "gast" : "mitglied";
+  if (body.visibleToGuests) return "gast";
+  if (current === undefined || current === "gast") return "mitglied";
+  return undefined; // already mitglied or vorstand: unchanged
 }
 
 const visibilityField = z.enum(LOCATION_VISIBILITIES);
@@ -345,11 +351,12 @@ locationRoutes.patch(
     });
     if (!existing) throw new NotFoundError("WiFi network not found");
 
-    const [row] = await db
-      .update(locationWifiNetworks)
-      .set({ label: body.label, ssid: body.ssid, password: body.password, visibility: resolveVisibility(body) })
-      .where(eq(locationWifiNetworks.id, wifiId))
-      .returning();
+    // Only the fields that were sent; an update without any effective change (e.g. the legacy visibleToGuests=false on a
+    // row that is not 'gast') leaves the row as it is.
+    const changes = Object.fromEntries(
+      Object.entries({ label: body.label, ssid: body.ssid, password: body.password, visibility: resolveVisibility(body, existing.visibility) }).filter(([, v]) => v !== undefined),
+    );
+    const [row] = Object.keys(changes).length === 0 ? [existing] : await db.update(locationWifiNetworks).set(changes).where(eq(locationWifiNetworks.id, wifiId)).returning();
 
     await db.insert(auditLog).values({
       eventType: "location_wifi.update",
@@ -470,11 +477,10 @@ locationRoutes.patch(
     });
     if (!existing) throw new NotFoundError("Link not found");
 
-    const [row] = await db
-      .update(locationLinks)
-      .set({ title: body.title, url: body.url, icon: body.icon, visibility: resolveVisibility(body) })
-      .where(eq(locationLinks.id, linkId))
-      .returning();
+    const changes = Object.fromEntries(
+      Object.entries({ title: body.title, url: body.url, icon: body.icon, visibility: resolveVisibility(body, existing.visibility) }).filter(([, v]) => v !== undefined),
+    );
+    const [row] = Object.keys(changes).length === 0 ? [existing] : await db.update(locationLinks).set(changes).where(eq(locationLinks.id, linkId)).returning();
 
     await db.insert(auditLog).values({
       eventType: "location_link.update",

@@ -4,7 +4,8 @@
  * this category" are derived on every read from `left_at` / `birth_date` against `today` (same idea as
  * `inventory-status.ts`); the scheduler arrives with Wave 9.
  *
- * All dates are ISO `YYYY-MM-DD` strings in UTC, like the rest of the backend.
+ * All dates are ISO `YYYY-MM-DD` strings. "Today" is the calendar day in Europe/Berlin (`todayBerlin`): a club's key
+ * dates (exit at month end, birthdays) must not flip an hour early/late around midnight because of UTC.
  */
 import { and, eq } from "drizzle-orm";
 
@@ -34,7 +35,13 @@ export function isLeftStatus(status: string): boolean {
   return (LEFT_STATUSES as readonly string[]).includes(status);
 }
 
-export const todayUtc = (now: Date = new Date()): string => now.toISOString().slice(0, 10);
+const berlinDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Berlin", year: "numeric", month: "2-digit", day: "2-digit" });
+
+/** The calendar day (`YYYY-MM-DD`) of `now` in Europe/Berlin, e.g. 00:30 CEST on 1 July is "2026-07-01" although UTC still says 30 June. */
+export const todayBerlin = (now: Date = new Date()): string => {
+  const parts = Object.fromEntries(berlinDate.formatToParts(now).map((p) => [p.type, p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+};
 
 /**
  * The status to show/filter/count: a stored non-left status whose `left_at` is today or earlier is `ausgetreten`

@@ -1,8 +1,9 @@
-import { and, eq, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
 
 import { member, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMembers, clubMemberStatusHistory, LEFT_STATUSES, memberCategories, type ClubMemberRow, type MemberCategoryRow } from "../db/schema/club-members.js";
+import { todayBerlin } from "./member-lifecycle.js";
 import { nextMemberNumber } from "./member-number.js";
 import { ConflictError, NotFoundError } from "./errors.js";
 
@@ -98,7 +99,8 @@ export async function ensureClubMember(executor: DbExecutor, memberRow: MemberAc
     // Re-join of a person whose account membership was removed earlier: reuse the old row (same member number and
     // history) instead of creating a duplicate.
     const detached = await tx.query.clubMembers.findFirst({
-      where: and(eq(clubMembers.clubId, memberRow.organizationId), eq(clubMembers.lastUserId, memberRow.userId), isNull(clubMembers.memberId)),
+      // A row the board deliberately unlinked (account_unlinked_at) is not reused: the person starts as a new member.
+      where: and(eq(clubMembers.clubId, memberRow.organizationId), eq(clubMembers.lastUserId, memberRow.userId), isNull(clubMembers.memberId), isNull(clubMembers.accountUnlinkedAt)),
       orderBy: (t, { desc }) => [desc(t.updatedAt)],
     });
     if (detached) {
@@ -114,7 +116,7 @@ export async function ensureClubMember(executor: DbExecutor, memberRow: MemberAc
           toStatus: "aktiv",
           fromCategoryId: detached.categoryId,
           toCategoryId: detached.categoryId,
-          effectiveOn: new Date().toISOString().slice(0, 10),
+          effectiveOn: todayBerlin(),
           reason: "Konto-Mitgliedschaft wiederhergestellt",
         });
         return relinked;
@@ -171,7 +173,7 @@ export async function resolveClubMember(clubId: string, idParam: string, executo
   }
   if (!row) throw new NotFoundError("Member not found");
   // A row whose account membership was removed meanwhile (leave / user deletion do not fire a hook) is closed lazily.
-  if (row.memberId === null && row.lastUserId !== null && !LEFT_STATUSES.includes(row.status as never)) {
+  if (row.memberId === null && row.lastUserId !== null && row.accountUnlinkedAt === null && !LEFT_STATUSES.includes(row.status as never)) {
     await markDetachedMembersLeft(executor, clubId);
     row = (await executor.query.clubMembers.findFirst({ where: eq(clubMembers.id, row.id) })) ?? row;
   }
@@ -179,13 +181,14 @@ export async function resolveClubMember(clubId: string, idParam: string, executo
 }
 
 /**
- * Closes club_members rows whose account membership no longer exists (removed, left, or the user was deleted):
+ * Closes club_members rows whose account membership no longer exists (removed, left, or the user was deleted; NOT a
+ * deliberate board unlink, see `accountUnlinkedAt`):
  * status `ausgetreten`, `left_at` today, reason + history entry. Rows that never had an account (`last_user_id IS NULL`,
  * e.g. children created by the board) are untouched. Idempotent; returns the number of rows closed.
  */
 export async function markDetachedMembersLeft(executor: DbExecutor, clubId?: string): Promise<number> {
   return executor.transaction(async (tx) => {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayBerlin();
     const stale = await tx
       .select({ id: clubMembers.id, status: clubMembers.status, categoryId: clubMembers.categoryId })
       .from(clubMembers)
@@ -193,10 +196,13 @@ export async function markDetachedMembersLeft(executor: DbExecutor, clubId?: str
         and(
           isNull(clubMembers.memberId),
           isNotNull(clubMembers.lastUserId),
+          // A deliberate unlink (POST /club-members/:id/unlink) is not an exit.
+          isNull(clubMembers.accountUnlinkedAt),
           notInArray(clubMembers.status, [...LEFT_STATUSES]),
           clubId ? eq(clubMembers.clubId, clubId) : undefined,
         ),
       )
+      .orderBy(asc(clubMembers.id))
       .for("update");
     if (stale.length === 0) return 0;
     await tx

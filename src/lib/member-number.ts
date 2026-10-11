@@ -23,7 +23,10 @@ export async function nextMemberNumber(tx: DbTransaction, clubId: string): Promi
   const locked = await tx.execute<{ slug: string | null }>(sql`SELECT slug FROM organization WHERE id = ${clubId} FOR UPDATE`);
   const slug = locked.rows[0]?.slug ?? null;
 
-  const abbr = clubAbbreviation(slug);
+  // A prefix from the club settings (letters/digits only, validated on write) wins over the slug abbreviation.
+  const settings = await tx.execute<{ prefix: string | null }>(sql`SELECT member_number_prefix AS prefix FROM club_settings WHERE club_id = ${clubId}`);
+  const configured = settings.rows[0]?.prefix?.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  const abbr = configured || clubAbbreviation(slug);
 
   // Highest numeric suffix already handed out ("DEMO-0007" -> 7; at most 9 digits, longer suffixes are manual numbers and ignored so the cast can never overflow) or the plain `club_members` row count (account-less members included), whichever is larger: the
   // count alone would repeat a number once a member with a lower number was deleted.

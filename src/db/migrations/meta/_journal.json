@@ -127,6 +127,13 @@
       "when": 1791737365917,
       "tag": "0017_member-search-index",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1791738714250,
+      "tag": "0018_member-invites-exit-requests",
+      "breakpoints": true
     }
   ]
 }

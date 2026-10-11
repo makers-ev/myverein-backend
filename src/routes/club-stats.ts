@@ -4,11 +4,12 @@ import { Hono } from "hono";
 import { db } from "../db/client.js";
 import { clubMemberDepartments, clubMembers, clubMemberStatusHistory, LEFT_STATUSES, memberCategories } from "../db/schema/club-members.js";
 import { departments } from "../db/schema/departments.js";
-import { canReadClubStats, computeClubStats } from "../lib/club-stats.js";
+import { computeClubStats } from "../lib/club-stats.js";
 import { ensureDefaultCategories, markDetachedMembersLeft } from "../lib/club-members.js";
+import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
-import { todayUtc } from "../lib/member-lifecycle.js";
+import { todayBerlin } from "../lib/member-lifecycle.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -25,7 +26,7 @@ clubStatsRoutes.use("*", clubGuard);
  */
 clubStatsRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
-  if (!canReadClubStats(c.get("clubRoleTypes"))) throw new ForbiddenError("Missing board role for club statistics");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "club_stats:read")) throw new ForbiddenError("Missing board role for club statistics");
 
   await markDetachedMembersLeft(db, clubId).catch((err) => logger.error({ err, clubId }, "[club-stats] could not close detached members"));
   await ensureDefaultCategories(clubId);
@@ -49,5 +50,5 @@ clubStatsRoutes.get("/", async (c) => {
       .where(and(eq(clubMembers.clubId, clubId), inArray(clubMemberStatusHistory.toStatus, [...LEFT_STATUSES]))),
   ]);
 
-  return c.json({ data: computeClubStats({ members, categories, departments: depts, assignments, exits }, todayUtc()) });
+  return c.json({ data: computeClubStats({ members, categories, departments: depts, assignments, exits }, todayBerlin()) });
 });

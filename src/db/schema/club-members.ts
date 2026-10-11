@@ -74,6 +74,9 @@ export const clubMembers = pgTable(
     joinedAt: date("joined_at", { mode: "string" }).notNull(),
     leftAt: date("left_at", { mode: "string" }),
     exitReason: text("exit_reason"),
+    // Set when the board deliberately unlinked the account (POST /:id/unlink): the member stays as is (no exit) and the
+    // row is not reused when the same person joins again. Cleared when an account is linked.
+    accountUnlinkedAt: timestamp("account_unlinked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

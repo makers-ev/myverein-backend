@@ -1,4 +1,5 @@
-import { date, index, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { date, index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 import { member } from "../../auth/auth-schema.js";
 import { clubMembers } from "./club-members.js";
@@ -6,7 +7,7 @@ import { clubMembers } from "./club-members.js";
 export const EXIT_KINDS = ["cancellation", "exclusion"] as const;
 export const EXIT_STATUSES = ["pending", "approved", "rejected", "withdrawn"] as const;
 
-/** Cancellation by the member or exclusion by the board (routes follow in Wave 7 B6; schema only for now). */
+/** Cancellation by the member or exclusion by the board (routes: `routes/club-exit-requests.ts`, Wave 7 B6). At most one pending request per member. */
 export const clubExitRequests = pgTable(
   "club_exit_requests",
   {
@@ -28,7 +29,13 @@ export const clubExitRequests = pgTable(
     decisionNote: text("decision_note"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("club_exit_requests_member_idx").on(table.clubMemberId), index("club_exit_requests_status_idx").on(table.status)],
+  (table) => [
+    index("club_exit_requests_member_idx").on(table.clubMemberId),
+    index("club_exit_requests_status_idx").on(table.status),
+    uniqueIndex("club_exit_requests_pending_uidx")
+      .on(table.clubMemberId)
+      .where(sql`${table.status} = 'pending'`),
+  ],
 );
 
 export type ClubExitRequestRow = typeof clubExitRequests.$inferSelect;

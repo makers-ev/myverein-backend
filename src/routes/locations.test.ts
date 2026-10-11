@@ -457,6 +457,7 @@ describe("locations routes", () => {
         ids[`wifi-${level}`] = ((await wifi.json()) as { data: { id: string; visibility: string; visibleToGuests: boolean } }).data.id;
         const link = await call(`/${scopedLocationId}/links`, cookieBoard, "POST", { title: `link-${level}`, url: `https://example.com/${level}`, visibility: level });
         expect(link.status).toBe(201);
+        ids[`link-${level}`] = ((await link.json()) as { data: { id: string } }).data.id;
       }
     });
 
@@ -466,12 +467,22 @@ describe("locations routes", () => {
     });
 
     it("maps the legacy visibleToGuests flag (true -> gast, false -> mitglied) and derives it in responses", async () => {
-      const res = await call(`/${scopedLocationId}/wifi/${ids["wifi-vorstand"]}`, cookieBoard, "PATCH", { visibleToGuests: false });
+      const res = await call(`/${scopedLocationId}/wifi/${ids["wifi-gast"]}`, cookieBoard, "PATCH", { visibleToGuests: false });
       expect(res.status).toBe(200);
       expect(((await res.json()) as { data: { visibility: string; visibleToGuests: boolean } }).data).toMatchObject({ visibility: "mitglied", visibleToGuests: false });
       // restore for the following tests
-      const back = await call(`/${scopedLocationId}/wifi/${ids["wifi-vorstand"]}`, cookieBoard, "PATCH", { visibility: "vorstand" });
-      expect(((await back.json()) as { data: { visibility: string } }).data.visibility).toBe("vorstand");
+      const back = await call(`/${scopedLocationId}/wifi/${ids["wifi-gast"]}`, cookieBoard, "PATCH", { visibleToGuests: true });
+      expect(((await back.json()) as { data: { visibility: string } }).data.visibility).toBe("gast");
+    });
+
+    it("the legacy visibleToGuests=false never raises a 'vorstand' row to 'mitglied' (A10)", async () => {
+      for (const [kind, key] of [["wifi", "wifi-vorstand"], ["links", "link-vorstand"]] as const) {
+        const res = await call(`/${scopedLocationId}/${kind}/${ids[key]}`, cookieBoard, "PATCH", { visibleToGuests: false });
+        expect(res.status, kind).toBe(200);
+        expect(((await res.json()) as { data: { visibility: string; visibleToGuests: boolean } }).data, kind).toMatchObject({ visibility: "vorstand", visibleToGuests: false });
+      }
+      // The plain member still must not see it.
+      expect(await labels(`/${scopedLocationId}/wifi`, cookiePlain, "label")).not.toContain("wifi-vorstand");
     });
 
     it("guests see only 'gast', members 'gast' + 'mitglied', locations:write 'vorstand' too", async () => {

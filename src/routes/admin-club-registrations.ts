@@ -20,6 +20,7 @@ import { documentResponse, findDocument, isUuid, recordAdminDocumentAccess, regi
 import { assertValidClubSlug, slugifyClubName, uniqueClubSlug } from "../lib/club-slug.js";
 import { ConflictError, InternalError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
+import { todayBerlin } from "../lib/member-lifecycle.js";
 import { ensureClubMember } from "../lib/club-members.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { adminGuard, type SessionEnv } from "../middleware/session-guard.js";
@@ -298,7 +299,7 @@ adminClubRegistrationRoutes.post("/:id/approve", async (c) => {
       // Founder = first club member: category "aktiv", automatic member number (<ABBR>-0001). The Better Auth
       // afterAddMember hook has normally created the row already; this makes it certain (idempotent) and also seeds
       // the default categories.
-      const founder = await ensureClubMember(tx, owner, { categoryKey: "aktiv", joinedAt: new Date().toISOString().slice(0, 10) });
+      const founder = await ensureClubMember(tx, owner, { categoryKey: "aktiv", joinedAt: todayBerlin() });
       const memberNumber = founder.memberNumber;
       await tx.insert(clubRoles).values({ memberId: owner.id, roleType: reg.claimedRole });
 

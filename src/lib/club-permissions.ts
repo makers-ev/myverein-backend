@@ -50,7 +50,8 @@ export type ClubPermission =
   | "locations:write" // manage locations/key holders/wifi networks/links
   | "meetings:read_board" // read Vorstandssitzungen (incl. minutes, resolutions, attendance) without being invited
   | "locations:read_access" // read key holders, access notes and 'vorstand'-level wifi/links
-  | "inventory:write"; // manage inventory items/loans/damage reports
+  | "inventory:write" // manage inventory items/loans/damage reports
+  | "club_stats:read"; // association KPIs (GET /club-stats): counts only, board roles
 
 /**
  * Which permissions each role_type grants. A membership can hold several
@@ -78,6 +79,7 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "inventory:write",
     "meetings:read_board",
     "locations:read_access",
+    "club_stats:read",
   ],
   stellv_vorsitz: [
     "members:write",
@@ -91,13 +93,14 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "inventory:write",
     "meetings:read_board",
     "locations:read_access",
+    "club_stats:read",
   ],
-  kassenwart: ["members:read_sensitive"],
+  kassenwart: ["members:read_sensitive", "club_stats:read"],
   // A schriftfuehrer's real-world job in a German Verein is literally running
   // meeting agendas/Protokolle, so meetings:write is a natural fit here.
-  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access"],
-  // Beisitzer sit on the board, so they may read Vorstandssitzungen (but write nothing).
-  beisitzer: ["meetings:read_board"],
+  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read"],
+  // Beisitzer sit on the board, so they may read Vorstandssitzungen and the club KPIs (but write nothing).
+  beisitzer: ["meetings:read_board", "club_stats:read"],
   // Also calendars:write/locations:write/inventory:write, on top of
   // departments:write -- an Abteilungsleitung needs to manage calendars,
   // venues, and equipment day to day, not just the board (same

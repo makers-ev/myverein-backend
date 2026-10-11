@@ -28,12 +28,21 @@ function canReadAllMeetings(roleTypes: readonly string[]) {
 }
 
 /**
+ * External guests (`member.role === "guest"`, e.g. guardians) never read meetings: 404, like a meeting that does not
+ * exist (Wave 10 brings dedicated guardian routes). Applied to the list and to every route that loads a meeting.
+ */
+function denyGuests(c: Context<ClubEnv>) {
+  if (c.get("membership").role === "guest") throw new NotFoundError("Meeting not found");
+}
+
+/**
  * Loads a meeting scoped to the caller's club AND to what the caller may read, 404s (never 403, never leaks
  * existence) otherwise. Read scoping (B8): a `vorstandssitzung` is only visible to invitees and to
  * meetings:write / meetings:read_board; `mitgliederversammlung` and `sonstige` are visible to every member.
  */
 async function loadClubMeeting(c: Context<ClubEnv>, id: string) {
   const clubId = c.get("clubId");
+  denyGuests(c);
   const row = await db.query.meetings.findFirst({ where: and(eq(meetings.id, id), eq(meetings.clubId, clubId)) });
   if (!row) throw new NotFoundError("Meeting not found");
   if (row.type === "vorstandssitzung" && !canReadAllMeetings(c.get("clubRoleTypes"))) {
@@ -49,6 +58,7 @@ async function loadClubMeeting(c: Context<ClubEnv>, id: string) {
 
 meetingRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
+  denyGuests(c);
 
   // Vorstandssitzungen are filtered out unless the caller is board-level or invited.
   const visible = canReadAllMeetings(c.get("clubRoleTypes"))

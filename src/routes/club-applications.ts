@@ -11,6 +11,7 @@ import { assertRejoinAllowed, ensureClubMember, findCategoryByKey } from "../lib
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
+import { effectiveStatus, todayBerlin, transitionMember } from "../lib/member-lifecycle.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -75,7 +76,12 @@ clubApplicationRoutes.post("/:id/approve", async (c) => {
   const existing = await db.query.member.findFirst({
     where: and(eq(member.organizationId, clubId), eq(member.userId, application.userId)),
   });
-  if (existing) throw new ConflictError("Applicant is already a member of this club");
+  if (existing) {
+    // A former member (ausgetreten) who re-applied is re-admitted by reopening the existing club_members row.
+    const former = await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, existing.id) });
+    if (!former || effectiveStatus(former, todayBerlin()) !== "ausgetreten") throw new ConflictError("Applicant is already a member of this club");
+    return c.json(await readmit(c.get("clubId"), application, existing, former, decider.id));
+  }
   // Excluded / deceased persons cannot be re-admitted by an application; the board must reopen them first.
   await assertRejoinAllowed(db, clubId, application.userId);
 
@@ -98,7 +104,7 @@ clubApplicationRoutes.post("/:id/approve", async (c) => {
   }
   if (!createdMember) throw new ConflictError("Could not create membership");
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayBerlin();
   try {
     const result = await db.transaction(async (tx) => {
       // Claim the application first: only one concurrent decision can flip it out of 'pending'.
@@ -161,6 +167,68 @@ clubApplicationRoutes.post("/:id/approve", async (c) => {
     throw err;
   }
 });
+
+/**
+ * Re-admission of a former member (status ausgetreten, account membership still present): no new account membership,
+ * the existing club_members row is reopened (history entry with reason) and the application's category applied.
+ */
+async function readmit(
+  clubId: string,
+  application: typeof clubApplications.$inferSelect,
+  account: typeof member.$inferSelect,
+  former: typeof clubMembers.$inferSelect,
+  deciderId: string,
+) {
+  const today = todayBerlin();
+  const result = await db.transaction(async (tx) => {
+    const [decided] = await tx
+      .update(clubApplications)
+      .set({ status: "approved", decidedAt: new Date(), decidedBy: deciderId })
+      .where(and(eq(clubApplications.id, application.id), eq(clubApplications.status, "pending")))
+      .returning();
+    if (!decided) throw new ConflictError("Application has already been decided");
+
+    const category = await findCategoryByKey(tx, clubId, application.category);
+    const done = await transitionMember(
+      tx,
+      clubId,
+      former.id,
+      { toStatus: "aktiv", reopen: true, reason: "Wiederaufnahme per Aufnahmeantrag", category: category && !category.archivedAt ? category : undefined },
+      deciderId,
+      today,
+    );
+    const [clubMember] = application.birthDate
+      ? await tx.update(clubMembers).set({ birthDate: application.birthDate, updatedAt: new Date() }).where(eq(clubMembers.id, former.id)).returning()
+      : [done.row];
+    await tx.insert(auditLog).values({
+      eventType: "club_application.approve",
+      subjectId: application.id,
+      payload: { clubId, userId: application.userId, memberId: account.id, clubMemberId: former.id, decidedBy: deciderId, readmission: true },
+    });
+    return { application: decided, clubMember: clubMember! };
+  });
+  const { clubMember } = result;
+  return {
+    data: {
+      application: result.application,
+      member: account,
+      membership: {
+        id: clubMember.id,
+        memberId: account.id,
+        memberNumber: clubMember.memberNumber,
+        category: application.category,
+        joinedAt: clubMember.joinedAt,
+        leftAt: clubMember.leftAt,
+        birthDate: clubMember.birthDate,
+        emergencyContactName: clubMember.emergencyContactName,
+        emergencyContactPhone: clubMember.emergencyContactPhone,
+        createdAt: clubMember.createdAt,
+        updatedAt: clubMember.updatedAt,
+      },
+      clubMember,
+    },
+  };
+}
 
 clubApplicationRoutes.post("/:id/reject", async (c) => {
   const clubId = c.get("clubId");

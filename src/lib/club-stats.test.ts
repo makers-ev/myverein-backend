@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { canReadClubStats, computeClubStats, lastMonths, type ClubStatsInput, type StatsMember } from "./club-stats.js";
+import { clubPermissionsFor, hasClubPermission } from "./club-permissions.js";
+import { computeClubStats, lastMonths, type ClubStatsInput, type StatsMember } from "./club-stats.js";
 
 const today = "2026-10-11";
 const m = (id: string, over: Partial<StatsMember>): StatsMember => ({ id, memberId: null, status: "aktiv", joinedAt: "2020-01-01", leftAt: null, birthDate: null, categoryId: "cat-a", ...over });
@@ -94,9 +95,10 @@ describe("helpers", () => {
   it("lastMonths wraps over year boundaries", () => {
     expect(lastMonths("2026-02-10", 4)).toEqual(["2025-11", "2025-12", "2026-01", "2026-02"]);
   });
-  it("only board roles may read club stats", () => {
-    for (const r of ["vorsitz", "stellv_vorsitz", "schriftfuehrer", "kassenwart", "beisitzer"]) expect(canReadClubStats([r])).toBe(true);
-    for (const r of ["abteilungsleitung", "trainer", "erziehungsberechtigt"]) expect(canReadClubStats([r])).toBe(false);
-    expect(canReadClubStats([])).toBe(false);
+  it("only board roles hold club_stats:read (a real ClubPermission)", () => {
+    for (const r of ["vorsitz", "stellv_vorsitz", "schriftfuehrer", "kassenwart", "beisitzer"]) expect(hasClubPermission([r], "club_stats:read")).toBe(true);
+    for (const r of ["mitglied", "abteilungsleitung", "trainer", "erziehungsberechtigt"]) expect(hasClubPermission([r], "club_stats:read")).toBe(false);
+    expect(hasClubPermission([], "club_stats:read")).toBe(false);
+    expect(clubPermissionsFor(["kassenwart"])).toContain("club_stats:read");
   });
 });
