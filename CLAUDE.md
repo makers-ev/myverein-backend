@@ -25,7 +25,11 @@ You are the lead for this repo. Workflow for every task:
    leftovers to "Weiterhin offen", and tick the matching task package in the
    wave's `20_Products/MyVerein/PRDs/Implementation Plan - MyVerein Wave N.md`.
    Do this as part of the same piece of work (a paired vault commit on a
-   branch of the same name). A feature is not done until it is ticked off. If
+   branch of the same name). Also create or update the matching training
+   material in the vault's `20_Products/MyVerein/Schulung/` (template
+   `tpl-schulung`: where to find it on website/app, how it works, who may use
+   it, FAQ) and link it from `Schulung - Übersicht und Lernpfade`. A feature
+   is not done until it is ticked off and has its Schulung entry. If
    the vault is not available in the session, say so explicitly in the summary
    and list the exact Feature List entries that still need to be made.
 9. **All-in-one sanity check.** Before you summarize, think again about
