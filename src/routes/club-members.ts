@@ -1,7 +1,9 @@
 import { zValidator } from "@hono/zod-validator";
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNotNull, isNull, lte, notInArray, or, sql, type SQL } from "drizzle-orm";
+import type { Context } from "hono";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
+import { createMiddleware } from "hono/factory";
 import { z } from "zod";
 
 import { member, organization, user } from "../auth/auth-schema.js";
@@ -33,6 +35,8 @@ import { clubMemberInvites, type ClubMemberInviteRow } from "../db/schema/club-m
 import { COUNTED_STATUSES, effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
 import { findMemberPhotoMedia, canSeeMemberPhoto, isMinor, memberPhotoUrls, removeMemberPhoto, replaceMemberPhoto, type PhotoCaller } from "../lib/member-photos.js";
 import { MAX_PHOTO_BYTES, streamMedia } from "../lib/media.js";
+import { buildCsv, importMaxBytes } from "../lib/member-csv.js";
+import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADERS, importFingerprint, verifyImportToken } from "../lib/member-import.js";
 import { nextMemberNumber } from "../lib/member-number.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -664,6 +668,268 @@ clubMemberRoutes.post("/", zValidator("json", createMemberSchema, validationHook
 
   return c.json({ data: await shapeOne(created, callerOf(c)) }, 201);
 });
+
+// --- CSV import / export (B10) ------------------------------------------------------------------
+// Registered BEFORE `/:id` so `export` / `import-template` are not taken for member ids. Parsing, mapping, duplicate
+// detection and the confirmation token live in lib/member-import.ts / lib/member-csv.ts (README "Member CSV import/export").
+
+const csvWriteLimiter = rateLimit({ windowMs: 60_000, max: Math.max(1, Number.parseInt(process.env.MEMBER_CSV_RATE_LIMIT_PER_MINUTE ?? "", 10) || 10), key: (c) => `member-csv:${c.get("user")?.id ?? "anonymous"}` });
+const importBodyLimit = bodyLimit({
+  // JSON escaping can double a CSV (\n, \"); the exact byte cap on the CSV itself is enforced in analyzeImport.
+  maxSize: importMaxBytes() * 2 + 64 * 1024,
+  onError: () => {
+    throw new ValidationError(`Request exceeds the maximum import size of ${importMaxBytes()} bytes`, { details: { code: "csv_too_large" } });
+  },
+});
+
+const importSchema = z.object({
+  csv: z.string().min(1),
+  /** true (default): only check and report. false: write -- needs the `confirmToken` of a dry run on the same file. */
+  dryRun: z.boolean().default(true),
+  confirmToken: z.string().min(10).max(1000).optional(),
+  /** Header text as in the file -> field name, or "ignore". Optional; headers are detected automatically otherwise. */
+  mapping: z.record(z.string().max(200), z.enum([...IMPORT_FIELDS, "ignore"])).optional(),
+  defaultCategoryKey: z.string().trim().min(1).max(50).optional(),
+});
+
+function requireMembersWrite(c: { get(k: "clubRoleTypes"): string[] }) {
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+}
+
+/** Runs before body parsing/validation so a caller without the right learns nothing about the payload rules. */
+const requireMembersWriteMiddleware = createMiddleware<ClubEnv>(async (c, next) => {
+  requireMembersWrite(c);
+  await next();
+});
+
+clubMemberRoutes.get("/import-template", csvWriteLimiter, (c) => {
+  requireMembersWrite(c);
+  const header = IMPORT_FIELDS.map((f) => IMPORT_TEMPLATE_HEADERS[f]);
+  const example: Record<(typeof IMPORT_FIELDS)[number], string> = {
+    memberNumber: "",
+    displayName: "",
+    firstName: "Max",
+    lastName: "Mustermann",
+    birthDate: "01.02.1990",
+    category: "aktiv",
+    status: "aktiv",
+    joinedAt: "01.01.2024",
+    street: "Musterstraße 1",
+    postalCode: "12345",
+    city: "Musterstadt",
+    phone: "",
+    contactEmail: "max@example.com",
+    emergencyContactName: "",
+    emergencyContactPhone: "",
+  };
+  return csvResponse(c, buildCsv(header, [IMPORT_FIELDS.map((f) => example[f])]), "mitglieder-import-vorlage.csv");
+});
+
+/** Bulk import from CSV. Dry run (default) answers 200 with a per-row report and a `confirmToken`; the commit (201) re-checks everything in one transaction. */
+clubMemberRoutes.post("/import", csvWriteLimiter, requireMembersWriteMiddleware, importBodyLimit, zValidator("json", importSchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  const actor = c.get("membership");
+  const userId = c.get("user").id;
+  const body = c.req.valid("json");
+  const options = { mapping: body.mapping, defaultCategoryKey: body.defaultCategoryKey };
+  const fingerprint = importFingerprint(body.csv, options);
+
+  if (body.dryRun) {
+    await ensureDefaultCategories(clubId);
+    const analysis = await analyzeImport(db, clubId, body.csv, options);
+    const { token, expiresAt } = createImportToken(clubId, userId, fingerprint);
+    return c.json({
+      data: {
+        dryRun: true,
+        committable: analysis.summary.errors === 0 && analysis.summary.ok > 0,
+        delimiter: analysis.delimiter,
+        columns: analysis.columns,
+        summary: analysis.summary,
+        rows: analysis.rows,
+        confirmToken: token,
+        confirmTokenExpiresAt: expiresAt,
+      },
+    });
+  }
+
+  if (!body.confirmToken || !verifyImportToken(body.confirmToken, clubId, userId, fingerprint)) {
+    throw new ValidationError("A valid confirmToken from a dry run of exactly this file is required to import", { details: { code: "import_not_confirmed" } });
+  }
+
+  const result = await db.transaction(async (tx) => {
+    await ensureDefaultCategories(clubId, tx);
+    // Lock order as everywhere: categories -> member rows -> organization row.
+    await lockClubCategories(tx, clubId, "share");
+    await tx.execute(sql`SELECT 1 FROM organization WHERE id = ${clubId} FOR UPDATE`);
+    const analysis = await analyzeImport(tx, clubId, body.csv, options);
+    if (analysis.summary.errors > 0) {
+      throw new ValidationError("The file contains errors; fix them and run the dry run again", { details: { code: "import_has_errors", summary: analysis.summary, rows: analysis.rows.filter((r) => r.status === "error") } });
+    }
+    if (analysis.valid.length === 0) {
+      throw new ValidationError("Nothing to import: every row is a duplicate", { details: { code: "import_nothing_to_do", summary: analysis.summary } });
+    }
+
+    // Explicit member numbers first, so the generated ones can never collide with a later row of the same file.
+    const ordered = [...analysis.valid.filter((r) => r.values.memberNumber !== null), ...analysis.valid.filter((r) => r.values.memberNumber === null)];
+    const created: Array<{ id: string; categoryId: string; status: string; joinedAt: string }> = [];
+    for (const { values } of ordered) {
+      const number = values.memberNumber ?? (await nextMemberNumber(tx, clubId));
+      const [row] = await tx
+        .insert(clubMembers)
+        .values({ ...values, clubId, memberNumber: number })
+        .returning({ id: clubMembers.id, categoryId: clubMembers.categoryId, status: clubMembers.status, joinedAt: clubMembers.joinedAt });
+      created.push({ id: row!.id, categoryId: values.categoryId, status: row!.status, joinedAt: row!.joinedAt });
+    }
+    await tx.insert(clubMemberStatusHistory).values(
+      created.map((m) => ({ clubMemberId: m.id, fromStatus: null, toStatus: m.status, toCategoryId: m.categoryId, effectiveOn: m.joinedAt, reason: "import", changedBy: actor.id })),
+    );
+    // No personal data in the audit trail: counts, actor and a hash of the file only.
+    await tx.insert(auditLog).values({
+      eventType: "club_member.import",
+      subjectId: clubId,
+      payload: { clubId, created: created.length, skippedDuplicates: analysis.summary.duplicates, rows: analysis.summary.rows, importedBy: actor.id, fileSha256: fingerprint },
+    });
+    return { analysis, created: created.length };
+  });
+
+  return c.json({ data: { dryRun: false, created: result.created, skippedDuplicates: result.analysis.summary.duplicates, summary: result.analysis.summary, rows: result.analysis.rows } }, 201);
+});
+
+type ExportRow = { row: ClubMemberRow; categoryKey: string | null; accountEmail: string | null; departments: string };
+interface ExportColumn {
+  header: string;
+  /** Needs `members:read_sensitive` (same split as the member shape: birth date, address, contact, member number, ...). */
+  sensitive: boolean;
+  value: (r: ExportRow, today: string) => string | null;
+}
+const EXPORT_COLUMNS: Record<string, ExportColumn> = {
+  memberNumber: { header: IMPORT_TEMPLATE_HEADERS.memberNumber, sensitive: true, value: (r) => r.row.memberNumber },
+  displayName: { header: IMPORT_TEMPLATE_HEADERS.displayName, sensitive: false, value: (r) => r.row.displayName },
+  firstName: { header: IMPORT_TEMPLATE_HEADERS.firstName, sensitive: false, value: (r) => r.row.firstName },
+  lastName: { header: IMPORT_TEMPLATE_HEADERS.lastName, sensitive: false, value: (r) => r.row.lastName },
+  birthDate: { header: IMPORT_TEMPLATE_HEADERS.birthDate, sensitive: true, value: (r) => r.row.birthDate },
+  category: { header: IMPORT_TEMPLATE_HEADERS.category, sensitive: false, value: (r) => r.categoryKey },
+  status: { header: IMPORT_TEMPLATE_HEADERS.status, sensitive: false, value: (r, today) => effectiveStatus(r.row, today) },
+  joinedAt: { header: IMPORT_TEMPLATE_HEADERS.joinedAt, sensitive: false, value: (r) => r.row.joinedAt },
+  leftAt: { header: "Austrittsdatum", sensitive: false, value: (r) => r.row.leftAt },
+  street: { header: IMPORT_TEMPLATE_HEADERS.street, sensitive: true, value: (r) => r.row.street },
+  postalCode: { header: IMPORT_TEMPLATE_HEADERS.postalCode, sensitive: true, value: (r) => r.row.postalCode },
+  city: { header: IMPORT_TEMPLATE_HEADERS.city, sensitive: true, value: (r) => r.row.city },
+  phone: { header: IMPORT_TEMPLATE_HEADERS.phone, sensitive: true, value: (r) => r.row.phone },
+  contactEmail: { header: IMPORT_TEMPLATE_HEADERS.contactEmail, sensitive: true, value: (r) => r.row.contactEmail },
+  emergencyContactName: { header: IMPORT_TEMPLATE_HEADERS.emergencyContactName, sensitive: true, value: (r) => r.row.emergencyContactName },
+  emergencyContactPhone: { header: IMPORT_TEMPLATE_HEADERS.emergencyContactPhone, sensitive: true, value: (r) => r.row.emergencyContactPhone },
+  departments: { header: "Abteilungen", sensitive: false, value: (r) => r.departments },
+  accountEmail: { header: "Konto-E-Mail", sensitive: true, value: (r) => r.accountEmail },
+};
+const EXPORT_COLUMN_KEYS = Object.keys(EXPORT_COLUMNS);
+const NON_SENSITIVE_EXPORT_COLUMNS = EXPORT_COLUMN_KEYS.filter((k) => !EXPORT_COLUMNS[k]!.sensitive);
+const MAX_EXPORT_ROWS = 50_000;
+
+const exportQuerySchema = z.object({
+  columns: z.string().transform(csv).pipe(z.array(z.string().max(50)).max(EXPORT_COLUMN_KEYS.length).optional()).optional(),
+  status: z.string().transform(csv).pipe(z.array(z.enum(MEMBER_STATUSES)).max(MEMBER_STATUSES.length).optional()).optional(),
+  category: z.string().transform(csv).pipe(z.array(z.string().max(50)).max(20).optional()).optional(),
+  departmentId: z.string().uuid().optional(),
+  /** Without `status`, former members (left) are left out unless this is "true". */
+  includeFormer: z.enum(["true", "false"]).optional(),
+});
+
+function csvResponse(c: Context<ClubEnv>, body: string, filename: string) {
+  return c.body(body, 200, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": `attachment; filename="${filename}"`,
+    "Cache-Control": "private, no-store",
+  });
+}
+
+/**
+ * Member export as Excel-DE friendly CSV (UTF-8 BOM, `;`, CRLF; cells starting with `=`, `+`, `-`, `@` are neutralised).
+ * Needs `members:write` or `members:read_sensitive`; every column marked sensitive additionally needs
+ * `members:read_sensitive` (403 if requested without; the default selection then only has the non-sensitive ones).
+ */
+async function exportMembers(c: Context<ClubEnv>) {
+  const clubId = c.get("clubId");
+  const caller = callerOf(c);
+  if (c.get("membership").role === "guest" || !(caller.canReadSensitive || caller.canWrite)) {
+    throw new ForbiddenError("Missing members:read_sensitive or members:write permission");
+  }
+  const parsed = exportQuerySchema.safeParse(c.req.query());
+  if (!parsed.success) throw new ValidationError("Invalid query", { details: parsed.error.issues });
+  const query = parsed.data;
+
+  const columnKeys = query.columns && query.columns.length > 0 ? [...new Set(query.columns)] : caller.canReadSensitive ? EXPORT_COLUMN_KEYS : NON_SENSITIVE_EXPORT_COLUMNS;
+  const unknown = columnKeys.filter((k) => !EXPORT_COLUMNS[k]);
+  if (unknown.length > 0) throw new ValidationError("Unknown export column", { details: { code: "unknown_column", columns: unknown, allowed: EXPORT_COLUMN_KEYS } });
+  if (!caller.canReadSensitive) {
+    const denied = columnKeys.filter((k) => EXPORT_COLUMNS[k]!.sensitive);
+    if (denied.length > 0) throw new ForbiddenError("Missing members:read_sensitive permission for the requested columns", { details: { columns: denied } });
+  }
+
+  const today = todayBerlin();
+  const conditions: Array<SQL | undefined> = [eq(clubMembers.clubId, clubId)];
+  if (query.status && query.status.length > 0) conditions.push(or(...query.status.map((st) => effectiveStatusCondition(st, today))));
+  else if (query.includeFormer !== "true") conditions.push(and(notInArray(clubMembers.status, [...LEFT_STATUSES]), or(isNull(clubMembers.leftAt), gt(clubMembers.leftAt, today))));
+  if (query.category && query.category.length > 0) {
+    conditions.push(
+      inArray(
+        clubMembers.categoryId,
+        db
+          .select({ id: memberCategories.id })
+          .from(memberCategories)
+          .where(and(eq(memberCategories.clubId, clubId), inArray(memberCategories.key, query.category.map((k) => k.toLowerCase())))),
+      ),
+    );
+  }
+  if (query.departmentId) {
+    conditions.push(
+      sql`EXISTS (SELECT 1 FROM club_member_departments d WHERE d.club_member_id = ${clubMembers.id} AND d.department_id = ${query.departmentId} AND (d.until IS NULL OR d.until > ${today}))`,
+    );
+  }
+
+  const rows = await db
+    .select({ row: clubMembers, categoryKey: memberCategories.key, accountEmail: user.email })
+    .from(clubMembers)
+    .leftJoin(memberCategories, eq(memberCategories.id, clubMembers.categoryId))
+    .leftJoin(member, eq(member.id, clubMembers.memberId))
+    .leftJoin(user, eq(user.id, member.userId))
+    .where(and(...conditions))
+    .orderBy(asc(sql`lower(${clubMembers.displayName})`), asc(clubMembers.id))
+    .limit(MAX_EXPORT_ROWS + 1);
+  if (rows.length > MAX_EXPORT_ROWS) throw new ValidationError(`The export is limited to ${MAX_EXPORT_ROWS} members; narrow it with filters`, { details: { code: "export_too_large" } });
+
+  const departmentsByMember = new Map<string, string[]>();
+  if (columnKeys.includes("departments") && rows.length > 0) {
+    const deptRows = await db
+      .select({ clubMemberId: clubMemberDepartments.clubMemberId, name: departments.name })
+      .from(clubMemberDepartments)
+      .innerJoin(departments, eq(departments.id, clubMemberDepartments.departmentId))
+      .where(and(eq(departments.clubId, clubId), or(isNull(clubMemberDepartments.until), gt(clubMemberDepartments.until, today))))
+      .orderBy(asc(departments.name));
+    for (const d of deptRows) departmentsByMember.set(d.clubMemberId, [...(departmentsByMember.get(d.clubMemberId) ?? []), d.name]);
+  }
+
+  const columns = columnKeys.map((k) => EXPORT_COLUMNS[k]!);
+  const body = buildCsv(
+    columns.map((col) => col.header),
+    rows.map((r) => {
+      const exportRow: ExportRow = { row: r.row, categoryKey: r.categoryKey, accountEmail: r.accountEmail, departments: (departmentsByMember.get(r.row.id) ?? []).join(", ") };
+      return columns.map((col) => col.value(exportRow, today));
+    }),
+  );
+
+  // No personal data in the audit trail: who exported which columns/filters and how many rows.
+  await db.insert(auditLog).values({
+    eventType: "club_member.export",
+    subjectId: clubId,
+    payload: { clubId, exportedBy: c.get("membership").id, columns: columnKeys, rows: rows.length, filters: { status: query.status ?? null, category: query.category ?? null, departmentId: query.departmentId ?? null, includeFormer: query.includeFormer === "true" } },
+  });
+
+  return csvResponse(c, body, `mitglieder-export-${today}.csv`);
+}
+
+clubMemberRoutes.get("/export", csvWriteLimiter, exportMembers);
+clubMemberRoutes.get("/export.csv", csvWriteLimiter, exportMembers);
 
 // --- Member categories (B5) -------------------------------------------------------
 // Registered BEFORE `/:id` so the static segments are not swallowed by the member-id routes.

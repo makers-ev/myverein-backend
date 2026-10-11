@@ -11,6 +11,10 @@ import { locations } from "./locations.js";
  * network passwords, not a secret worth the added key-management
  * complexity, and access is already gated by club/location permissions.
  */
+/** Security type of a WLAN (drives the `WIFI:T:` part of the QR code): open = no password. */
+export const WIFI_SECURITY_TYPES = ["open", "wpa", "wep", "wpa3"] as const;
+export type WifiSecurity = (typeof WIFI_SECURITY_TYPES)[number];
+
 export const locationWifiNetworks = pgTable(
   "location_wifi_networks",
   {
@@ -21,6 +25,8 @@ export const locationWifiNetworks = pgTable(
     label: text("label").notNull(),
     ssid: text("ssid").notNull(),
     password: text("password").notNull(),
+    // One of WIFI_SECURITY_TYPES (Zod-validated). 'wpa' = WPA/WPA2 (migration 0021).
+    security: text("security").notNull().default("wpa"),
     // One of LOCATION_VISIBILITIES (Zod-validated). Replaces the old boolean visible_to_guests (migration 0016).
     visibility: text("visibility").notNull().default("mitglied"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

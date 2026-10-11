@@ -148,6 +148,13 @@
       "when": 1791743766173,
       "tag": "0020_media-legacy-photo-keys",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1791744078444,
+      "tag": "0021_key-history-wifi-security",
+      "breakpoints": true
     }
   ]
 }
