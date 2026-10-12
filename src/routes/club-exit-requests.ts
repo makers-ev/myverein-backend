@@ -1,6 +1,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { and, count, desc, eq, inArray, isNull } from "drizzle-orm";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
@@ -14,8 +15,12 @@ import { loadClubSettings } from "../lib/club-settings.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { addDays, earliestExitDate } from "../lib/exit-notice.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
+import { closeExitSubmission, currentExitDefinition, insertExitSubmission, loadExitSubmission, prepareExitAnswers, reasonOfAnswers, type PreparedExitAnswers } from "../lib/form-exit.js";
+import { renderAnswers } from "../lib/form-review.js";
+import { ANSWERS_BODY_LIMIT, applicantCategories } from "../lib/forms.js";
 import { assertExitAllowed } from "../lib/member-protection.js";
 import { effectiveStatus, isLeftStatus, todayBerlin, transitionMember } from "../lib/member-lifecycle.js";
+import type { FormField } from "../lib/form-schema.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -96,6 +101,8 @@ function shapeRequest(request: ClubExitRequestRow, member: ClubMemberRow, settin
     earliestEffectiveOn: earliest,
     proposedEffectiveOn: earliest !== null ? (request.desiredEffectiveOn && request.desiredEffectiveOn > earliest ? request.desiredEffectiveOn : earliest) : null,
     reason: request.reason,
+    // The exit form the member filled in (answers: `GET /club-exit-requests/:id`); NULL for a request without a form.
+    formSubmissionId: request.formSubmissionId,
     decidedBy: request.decidedBy,
     decidedAt: request.decidedAt,
     decisionNote: request.decisionNote,
@@ -152,6 +159,14 @@ clubExitRequestRoutes.get("/preview", zValidator("query", previewQuerySchema, va
   });
 });
 
+// --- Exit form -------------------------------------------------------------------------------
+
+/** Any member: the published exit form (`austritt`) to render before `POST /` with `answers`. Definition only, no admin data. */
+clubExitRequestRoutes.get("/form", async (c) => {
+  c.header("Cache-Control", "private, no-cache");
+  return c.json({ data: await currentExitDefinition(c.get("clubId")) });
+});
+
 // --- Own requests ----------------------------------------------------------------------------
 
 clubExitRequestRoutes.get("/mine", async (c) => {
@@ -202,8 +217,19 @@ clubExitRequestRoutes.get("/:id", async (c) => {
   const involved = request.requestedBy === actor.id || member.memberId === actor.id;
   if (!canWrite(c) && !involved) throw new NotFoundError("Exit request not found");
 
-  const [settings, checklist] = await Promise.all([loadClubSettings(db, clubId), returnChecklist(clubId, member.memberId)]);
-  return c.json({ data: { ...shapeRequest(request, member, settings), checklist } });
+  const [settings, checklist, submission] = await Promise.all([loadClubSettings(db, clubId), returnChecklist(clubId, member.memberId), loadExitSubmission(clubId, request.formSubmissionId)]);
+  // The answers rendered against the version the member filled in. `sensitive` fields: members:read_sensitive or the submitter.
+  const canReadSensitive = hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive") || submission?.sub.submittedByUserId === c.get("user").id;
+  const rendered = submission
+    ? {
+        id: submission.sub.id,
+        formVersionId: submission.version.id,
+        version: submission.version.version,
+        submittedAt: submission.sub.submittedAt,
+        answers: renderAnswers(submission.version.fields as FormField[], submission.sub.answers, { categories: await applicantCategories(clubId), canReadSensitive }),
+      }
+    : null;
+  return c.json({ data: { ...shapeRequest(request, member, settings), checklist, submission: rendered } });
 });
 
 // --- Create ----------------------------------------------------------------------------------------
@@ -217,9 +243,20 @@ const createSchema = z.object({
   // Board: the date the exit takes effect (cancellation: not before the earliest date; exclusion: today or earlier).
   effectiveOn: z.string().date().nullable().optional(),
   reason: z.string().trim().max(2000).nullable().optional(),
+  // Wave 8 B9: the answers of the club's exit form (`GET /club-exit-requests/form`), validated by the form engine. Optional:
+  // a request without them behaves exactly as before. They never influence the dates, which come from `club_settings`.
+  answers: z.unknown().optional(),
+  formVersionId: z.uuid().optional(),
 });
 
-clubExitRequestRoutes.post("/", zValidator("json", createSchema, validationHook), async (c) => {
+const createBodyLimit = bodyLimit({
+  maxSize: ANSWERS_BODY_LIMIT,
+  onError: () => {
+    throw new ValidationError("Request body too large");
+  },
+});
+
+clubExitRequestRoutes.post("/", createBodyLimit, zValidator("json", createSchema, validationHook), async (c) => {
   const clubId = c.get("clubId");
   const actor = c.get("membership");
   const body = c.req.valid("json");
@@ -230,12 +267,19 @@ clubExitRequestRoutes.post("/", zValidator("json", createSchema, validationHook)
   const own = await ensureClubMember(db, actor);
   const targetId = body.clubMemberId ?? own.id;
   const selfCancellation = targetId === own.id && kind === "cancellation";
+  if (body.formVersionId !== undefined && body.answers === undefined) throw new ValidationError("answers are required together with formVersionId");
+  if (body.answers !== undefined && kind !== "cancellation") throw new ValidationError("The exit form belongs to a cancellation; an exclusion has no answers");
 
   if (!selfCancellation) {
     // Recording a cancellation for someone else (e.g. a member without account) or excluding anyone is a board action.
     requireWrite(c);
     if (kind === "exclusion" && targetId === own.id) throw new ValidationError("You cannot exclude yourself");
   }
+
+  // Form answers are validated before any lock is taken (a bad form is a 422/409 without side effects).
+  const prepared: PreparedExitAnswers | null = body.answers === undefined ? null : await prepareExitAnswers(clubId, body.answers, body.formVersionId);
+  // An explicit reason wins; otherwise the free-text reason of the form is what the request shows.
+  const requestReason = reason ?? (prepared ? reasonOfAnswers(prepared.version, prepared.answers) : null);
 
   const settings = await loadClubSettings(db, clubId);
   const earliest = earliestExitDate(today, settings);
@@ -248,18 +292,22 @@ clubExitRequestRoutes.post("/", zValidator("json", createSchema, validationHook)
       const row = await lockMember(tx, clubId, own.id);
       await assertExitAllowed(tx, row, c.get("clubRoleTypes"));
       await assertCanLeave(tx, row, today);
+      // The submission is written only after all checks passed; if the request insert fails (double submit), it rolls back with it.
+      const submission = prepared ? await insertExitSubmission(tx, prepared, { clubId, submittedByUserId: c.get("user").id, subjectClubMemberId: row.id }) : null;
       const [inserted] = await insertRequest(tx, {
         clubMemberId: row.id,
         kind: "cancellation",
         requestedBy: actor.id,
         requestedOn: today,
         desiredEffectiveOn: body.desiredEffectiveOn ?? null,
-        reason,
+        reason: requestReason,
+        formSubmissionId: submission?.id ?? null,
       });
       await tx.insert(auditLog).values({
         eventType: "club_exit_request.create",
         subjectId: inserted!.id,
-        payload: { clubId, clubMemberId: row.id, kind: "cancellation", requestedBy: actor.id, desiredEffectiveOn: inserted!.desiredEffectiveOn },
+        // Ids only: the answers (reason text, ...) are never part of an audit entry.
+        payload: { clubId, clubMemberId: row.id, kind: "cancellation", requestedBy: actor.id, desiredEffectiveOn: inserted!.desiredEffectiveOn, ...(submission ? { formSubmissionId: submission.id, formVersionId: submission.formVersionId } : {}) },
       });
       return { request: inserted!, member: row };
     });
@@ -290,28 +338,34 @@ clubExitRequestRoutes.post("/", zValidator("json", createSchema, validationHook)
 
     if (kind === "exclusion") {
       // An exclusion overrides a cancellation that has not been decided yet.
-      await tx
+      const replaced = await tx
         .update(clubExitRequests)
         .set({ status: "rejected", decidedBy: actor.id, decidedAt: new Date(), decisionNote: "Ersetzt durch Ausschluss" })
-        .where(and(eq(clubExitRequests.clubMemberId, row.id), eq(clubExitRequests.status, "pending")));
+        .where(and(eq(clubExitRequests.clubMemberId, row.id), eq(clubExitRequests.status, "pending")))
+        .returning({ formSubmissionId: clubExitRequests.formSubmissionId });
+      for (const r of replaced) await closeExitSubmission(tx, r.formSubmissionId, "rejected", actor.id);
     }
 
+    const submission = prepared ? await insertExitSubmission(tx, prepared, { clubId, submittedByUserId: c.get("user").id, subjectClubMemberId: row.id }) : null;
     const [inserted] = await insertRequest(tx, {
       clubMemberId: row.id,
       kind,
       requestedBy: actor.id,
       requestedOn: today,
       effectiveOn,
-      reason,
+      reason: requestReason,
+      formSubmissionId: submission?.id ?? null,
       status: "approved",
       decidedBy: actor.id,
       decidedAt: new Date(),
     });
-    const done = await transitionMember(tx, clubId, row.id, { toStatus: kind === "exclusion" ? "ausgeschlossen" : "ausgetreten", effectiveOn, reason }, actor.id, today);
+    const done = await transitionMember(tx, clubId, row.id, { toStatus: kind === "exclusion" ? "ausgeschlossen" : "ausgetreten", effectiveOn, reason: requestReason }, actor.id, today);
+    // The board recorded the cancellation itself: the answers are decided with it.
+    await closeExitSubmission(tx, submission?.id ?? null, "accepted", actor.id);
     await tx.insert(auditLog).values({
       eventType: "club_exit_request.create",
       subjectId: inserted!.id,
-      payload: { clubId, clubMemberId: row.id, kind, requestedBy: actor.id, decidedBy: actor.id, effectiveOn, status: "approved" },
+      payload: { clubId, clubMemberId: row.id, kind, requestedBy: actor.id, decidedBy: actor.id, effectiveOn, status: "approved", ...(submission ? { formSubmissionId: submission.id, formVersionId: submission.formVersionId } : {}) },
     });
     return { request: inserted!, member: done.row, transition: done };
   });
@@ -390,6 +444,7 @@ clubExitRequestRoutes.post("/:id/approve", zValidator("json", approveSchema, val
       .where(and(eq(clubExitRequests.id, loaded.request.id), eq(clubExitRequests.status, "pending")))
       .returning();
     if (!claimed) throw new ConflictError("Exit request has already been decided");
+    await closeExitSubmission(tx, claimed.formSubmissionId, "accepted", actor.id);
 
     // Same transition logic as POST /club-members/:id/transition: a future date becomes a scheduled exit (status stays,
     // left_at is set), today or earlier takes effect at once. A failure (member already left, ...) rolls the claim back.
@@ -432,6 +487,7 @@ clubExitRequestRoutes.post("/:id/reject", zValidator("json", rejectSchema, valid
       .where(and(eq(clubExitRequests.id, loaded.request.id), eq(clubExitRequests.status, "pending")))
       .returning();
     if (!row) throw new ConflictError("Exit request has already been decided");
+    await closeExitSubmission(tx, row.formSubmissionId, "rejected", actor.id);
     await tx.insert(auditLog).values({
       eventType: "club_exit_request.reject",
       subjectId: row.id,
@@ -487,6 +543,7 @@ clubExitRequestRoutes.post("/:id/withdraw", zValidator("json", withdrawSchema, v
       .where(and(eq(clubExitRequests.id, current.id), inArray(clubExitRequests.status, ["pending", "approved"])))
       .returning();
     if (!withdrawn) throw new ConflictError("Exit request can no longer be withdrawn");
+    await closeExitSubmission(tx, withdrawn.formSubmissionId, "withdrawn", null);
     await tx.insert(auditLog).values({
       eventType: "club_exit_request.withdraw",
       subjectId: withdrawn.id,
