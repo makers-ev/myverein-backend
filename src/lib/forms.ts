@@ -5,11 +5,13 @@ import { db } from "../db/client.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
-import { forms, formSubmissions, formVersions, memberFieldDefinitions, type FormPurpose, type FormRow, type FormVersionRow } from "../db/schema/forms.js";
+import { forms, formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, type FormPurpose, type FormRow, type FormVersionRow } from "../db/schema/forms.js";
 import { IMPLICIT_ROLE_TYPE } from "./club-permissions.js";
 import type { DbExecutor } from "./club-members.js";
 import { ConflictError, ValidationError, type AppErrorOptions } from "./errors.js";
-import { type FieldErrorCode, type FormField, resolveFieldOptions } from "./form-schema.js";
+import { ensureClubFormDefaults } from "./form-defaults.js";
+import { FIELD_KEY_RE, type FieldErrorCode, type FormField, resolveFieldOptions } from "./form-schema.js";
+import { markMediaDeleted } from "./media.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "./member-lifecycle.js";
 
 /**
@@ -20,6 +22,13 @@ import { effectiveStatus, isLeftStatus, todayBerlin } from "./member-lifecycle.j
 
 export const MAX_FILES_PER_SUBMISSION = 5;
 export const MAX_DRAFTS_PER_CLUB = 3;
+/** Open drafts of one user over ALL clubs. */
+export const MAX_DRAFTS_PER_USER = 10;
+/** Files over all open drafts of one user in one club. */
+export const MAX_DRAFT_FILES_PER_USER_CLUB = 10;
+/** Editor caps: active forms per club and versions per form. */
+export const MAX_ACTIVE_FORMS_PER_CLUB = 50;
+export const MAX_VERSIONS_PER_FORM = 200;
 /** JSON bodies of answers (60 fields x up to 5000 characters) and of field definitions. */
 export const ANSWERS_BODY_LIMIT = 512 * 1024;
 export const DEFINITION_BODY_LIMIT = 1024 * 1024;
@@ -29,13 +38,25 @@ function hourlyLimit(name: string, fallback: number): number {
   const parsed = Number(process.env[name]);
   return Number.isFinite(parsed) && parsed >= 1 ? Math.min(Math.floor(parsed), 10_000) : fallback;
 }
+function intEnv(name: string, fallback: number, min: number, max: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed >= min ? Math.min(Math.floor(parsed), max) : fallback;
+}
+/** Bytes over all open drafts of one user in one club (`FORM_DRAFT_MAX_BYTES_PER_USER`, default 25 MiB). */
+export const draftMaxBytesPerUser = () => intEnv("FORM_DRAFT_MAX_BYTES_PER_USER", 25 * 1024 * 1024, 1024, 1024 * 1024 * 1024);
+/** Idle days after which a draft (and its files) is swept (`FORM_DRAFT_TTL_DAYS`, default 30). */
+export const draftTtlDays = () => intEnv("FORM_DRAFT_TTL_DAYS", 30, 1, 365);
 export const uploadsPerHour = () => hourlyLimit("FORM_UPLOADS_PER_HOUR", 30);
 export const submissionsPerHour = () => hourlyLimit("FORM_SUBMISSIONS_PER_HOUR", 20);
+
+/** Club slugs and ids are plain ASCII tokens; anything else cannot exist (and must not reach the database, e.g. NUL). */
+export const SLUG_RE = /^[A-Za-z0-9_-]{1,100}$/;
 
 export { isUuid } from "./club-members.js";
 
 export function fieldErrorDetails(errors: Record<string, FieldErrorCode>): { fields: Record<string, FieldErrorCode> } {
-  return { fields: Object.fromEntries(Object.entries(errors)) };
+  // Keys are client input: anything that is not a well-formed field key is reported under a fixed placeholder.
+  return { fields: Object.fromEntries(Object.entries(errors).map(([key, code]) => [FIELD_KEY_RE.test(key) || key === "_" ? key : "_invalid_key", code])) };
 }
 
 export function invalidAnswers(errors: Record<string, FieldErrorCode>): ValidationError {
@@ -66,12 +87,15 @@ export const versionSummaryDto = (v: FormVersionRow) => ({
 
 export const formDto = (f: FormRow) => ({ id: f.id, purpose: f.purpose, name: f.name, archivedAt: f.archivedAt, createdAt: f.createdAt, updatedAt: f.updatedAt });
 
-/** Active categories of a club (what `optionsSource: "member_categories"` resolves to). */
-export async function activeCategories(clubId: string, executor: DbExecutor = db): Promise<Array<{ key: string; name: string }>> {
+/**
+ * Categories an applicant may choose (active AND `applicant_selectable`): what `optionsSource: "member_categories"`
+ * resolves to in the applicant form and what answers are validated against.
+ */
+export async function applicantCategories(clubId: string, executor: DbExecutor = db): Promise<Array<{ key: string; name: string }>> {
   return executor
     .select({ key: memberCategories.key, name: memberCategories.name })
     .from(memberCategories)
-    .where(and(eq(memberCategories.clubId, clubId), isNull(memberCategories.archivedAt)))
+    .where(and(eq(memberCategories.clubId, clubId), isNull(memberCategories.archivedAt), eq(memberCategories.applicantSelectable, true)))
     .orderBy(asc(memberCategories.sortOrder), asc(memberCategories.name));
 }
 
@@ -84,6 +108,26 @@ export async function findCurrentForm(clubId: string, purpose: FormPurpose, exec
     .where(and(eq(forms.clubId, clubId), eq(forms.purpose, purpose), isNull(forms.archivedAt), eq(formVersions.status, "published")))
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * Makes sure the club has its standard forms and categories, WITHOUT writing when everything is there: the applicant
+ * routes call this, so reading a form does not turn into a write on every request. Seeding happens on the first access
+ * that finds something missing (atomic and idempotent, see `ensureClubFormDefaults`).
+ */
+export async function ensureFormBasics(clubId: string): Promise<void> {
+  if ((await findCurrentForm(clubId, "aufnahme")) && (await applicantCategories(clubId)).length > 0) return;
+  await ensureClubFormDefaults(clubId);
+}
+
+/** Removes file rows and tombstones their registry entries; returns the keys to `purgeMediaFile` AFTER the commit. */
+export async function removeFiles(tx: DbExecutor, rows: ReadonlyArray<{ id: string; storageKey: string }>): Promise<string[]> {
+  const purge: string[] = [];
+  for (const row of rows) {
+    await tx.delete(formSubmissionFiles).where(eq(formSubmissionFiles.id, row.id));
+    if (await markMediaDeleted(row.storageKey, tx)) purge.push(row.storageKey);
+  }
+  return purge;
 }
 
 /**
@@ -175,6 +219,11 @@ export async function publishProblems(input: { clubId: string; purpose: string; 
     if (!fields.some((f) => f.type === "consent" && f.required === true && f.visibleIf === undefined)) problems.push({ code: "required_consent_missing" });
   }
 
+  for (const f of fields) if (f.sensitive && f.mapsTo !== undefined) problems.push({ code: "sensitive_mapping_not_allowed", fieldKey: f.key });
+  if (purpose === "aufnahme" && fields.some((f) => f.optionsSource === "member_categories") && (await applicantCategories(input.clubId, executor)).length === 0) {
+    problems.push({ code: "no_selectable_category" });
+  }
+
   const mapped = fields.filter((f) => f.mapsTo !== undefined || f.customField !== undefined);
   if (purpose !== "aufnahme") {
     for (const f of mapped) problems.push({ code: "mapping_not_allowed", fieldKey: f.key });
@@ -184,7 +233,7 @@ export async function publishProblems(input: { clubId: string; purpose: string; 
   const wanted = fields.filter((f) => f.customField !== undefined);
   if (wanted.length > 0) {
     const defs = await executor
-      .select({ key: memberFieldDefinitions.key, fieldType: memberFieldDefinitions.fieldType, archivedAt: memberFieldDefinitions.archivedAt })
+      .select({ key: memberFieldDefinitions.key, fieldType: memberFieldDefinitions.fieldType, sensitive: memberFieldDefinitions.sensitive, archivedAt: memberFieldDefinitions.archivedAt })
       .from(memberFieldDefinitions)
       .where(eq(memberFieldDefinitions.clubId, input.clubId));
     const byKey = new Map(defs.map((d) => [d.key, d]));
@@ -192,6 +241,8 @@ export async function publishProblems(input: { clubId: string; purpose: string; 
       const def = byKey.get(f.customField!);
       if (!def || def.archivedAt) problems.push({ code: "custom_field_unknown", fieldKey: f.key });
       else if (def.fieldType !== (CUSTOM_FIELD_TYPE[f.type] ?? f.type)) problems.push({ code: "custom_field_type_mismatch", fieldKey: f.key });
+      // Sensitive answers may only flow into custom fields that are protected (members:read_sensitive + audit) as well.
+      else if (f.sensitive && !def.sensitive) problems.push({ code: "custom_field_not_sensitive", fieldKey: f.key });
     }
   }
   return problems;

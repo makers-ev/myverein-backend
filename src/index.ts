@@ -2,11 +2,13 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 import { auth } from "./auth/auth.js";
 import { closeDatabase } from "./db/client.js";
 import { AppError, toAppError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
+import { startFormDraftSweeper } from "./lib/form-sweeper.js";
 import { startMediaSweeper } from "./lib/media.js";
 import { type LoggerEnv, requestId } from "./middleware/request-id.js";
 import { adminClubRegistrationRoutes } from "./routes/admin-club-registrations.js";
@@ -74,7 +76,7 @@ app.onError((err, c) => {
   if (!(err instanceof AppError)) {
     c.get("logger").error({ err }, "unhandled error");
   }
-  return c.json(appError.toJSON(), appError.status as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 503);
+  return c.json(appError.toJSON(), appError.status as ContentfulStatusCode);
 });
 
 // Better Auth owns everything under /api/auth/* -- sign-up, sign-in,
@@ -121,6 +123,8 @@ const hostname = process.env.BIND_HOST ?? "127.0.0.1";
 
 // Unused uploads (POST /media files no feature row claimed) are removed after MEDIA_UNATTACHED_TTL_HOURS.
 const stopMediaSweeper = startMediaSweeper();
+// Abandoned application drafts (and their files) are removed after FORM_DRAFT_TTL_DAYS of inactivity.
+const stopFormDraftSweeper = startFormDraftSweeper();
 
 const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
   logger.info(`Server is running on http://${hostname}:${info.port}`);
@@ -129,6 +133,7 @@ const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
 async function shutdown(signal: string) {
   logger.info(`[shutdown] received ${signal}, closing server`);
   stopMediaSweeper();
+  stopFormDraftSweeper();
   server.close(async () => {
     await closeDatabase();
     process.exit(0);

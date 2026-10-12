@@ -1,3 +1,4 @@
+import { HTTPException } from "hono/http-exception";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -66,5 +67,16 @@ describe("toAppError", () => {
 
   it("returned value is always an AppError", () => {
     expect(toAppError(null)).toBeInstanceOf(AppError);
+  });
+});
+
+describe("toAppError for framework HTTP errors", () => {
+  it("keeps 4xx statuses of HTTPException (malformed JSON is a 400, not a 500)", () => {
+    const bad = toAppError(new HTTPException(400, { message: "Malformed JSON in request body" }));
+    expect([bad.status, bad.code, bad.message]).toEqual([400, "BAD_REQUEST", "Malformed JSON in request body"]);
+    expect(toAppError(new HTTPException(404)).code).toBe("NOT_FOUND");
+    expect(toAppError(new HTTPException(413)).status).toBe(413);
+    expect(toAppError(new HTTPException(500, { message: "x" })).status).toBe(500);
+    expect(toAppError(new Error("plain")).status).toBe(500);
   });
 });

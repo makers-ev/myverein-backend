@@ -3,10 +3,8 @@ import { Hono } from "hono";
 
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { ensureDefaultCategories } from "../lib/club-members.js";
 import { NotFoundError } from "../lib/errors.js";
-import { ensureDefaultForms } from "../lib/form-defaults.js";
-import { activeCategories, applicantDefinition, findCurrentForm } from "../lib/forms.js";
+import { applicantCategories, applicantDefinition, ensureFormBasics, findCurrentForm, SLUG_RE } from "../lib/forms.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard, type SessionEnv } from "../middleware/session-guard.js";
 
@@ -21,14 +19,14 @@ clubFormRoutes.use("*", sessionGuard);
 clubFormRoutes.use("*", rateLimit({ windowMs: 60_000, max: 60, key: (c) => `club-forms:${c.get("user").id}` }));
 
 clubFormRoutes.get("/:clubSlug/aufnahme", async (c) => {
-  const org = await db.query.organization.findFirst({ where: eq(organization.slug, c.req.param("clubSlug")), columns: { id: true } });
+  const slug = c.req.param("clubSlug");
+  const org = SLUG_RE.test(slug) ? await db.query.organization.findFirst({ where: eq(organization.slug, slug), columns: { id: true } }) : undefined;
   if (!org) throw new NotFoundError("Club not found");
-  // Brand-new clubs get their standard form / categories lazily (idempotent).
-  await ensureDefaultCategories(org.id);
-  await ensureDefaultForms(org.id);
+  // Reading does not write: a club that is missing its standard form / categories is seeded once (first access).
+  await ensureFormBasics(org.id);
 
   const current = await findCurrentForm(org.id, "aufnahme");
   if (!current) throw new NotFoundError("This club has no application form");
   c.header("Cache-Control", "private, no-cache");
-  return c.json({ data: applicantDefinition(current.form, current.version, await activeCategories(org.id)) });
+  return c.json({ data: applicantDefinition(current.form, current.version, await applicantCategories(org.id)) });
 });

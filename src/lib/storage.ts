@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { isCleanText } from "./text-policy.js";
+
 // Raw local-disk object storage, adapted from mycouple-backend's src/lib/storage.ts (no Cloudflare R2 yet).
 // This is the LOWEST layer: nothing outside src/lib/media.ts (the central media security layer, Wave 7 B18) may call
 // putObject/getObject/deleteObject -- a test enforces that. It returns only a `key`, never a URL.
@@ -9,8 +11,7 @@ export const UPLOADS_DIR = process.env.UPLOADS_DIR ?? "./uploads";
 
 /** Strips path separators and control characters from a client-supplied filename before it touches the filesystem. */
 export function sanitizeFilename(filename: string): string {
-  // eslint-disable-next-line no-control-regex
-  const stripped = filename.replace(/[/\\]/g, "_").replace(/[\x00-\x1f]/g, "");
+  const stripped = Array.from(filename.replace(/[/\\]/g, "_")).filter((ch) => isCleanText(ch)).join("");
   const trimmed = stripped.trim().slice(0, 150);
   return trimmed || "file";
 }

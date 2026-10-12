@@ -227,3 +227,39 @@ describe("visibleFieldKeys", () => {
     expect([...visibleFieldKeys(fields, "not an object")]).toEqual(["kind"]);
   });
 });
+
+describe("character policy in definitions and answers", () => {
+  const ch = (...codes: number[]) => String.fromCharCode(...codes);
+
+  it("rejects control/bidi characters in name-like definition texts, allows emoji and '<' in labels", () => {
+    expect(parse([f({ label: `Name${ch(0)}` })]).success).toBe(false);
+    expect(parse([f({ label: `Name${ch(0x202e)}` })]).success).toBe(false);
+    expect(parse([f({ helpText: `Hilfe${ch(7)}` })]).success).toBe(false);
+    expect(parse([f({ label: "Größe 👕 <klein>", helpText: "Hinweis 🙂" })]).success).toBe(true);
+    expect(parse([{ key: "block", type: "info", label: "Info", text: "Zeile 1\nZeile 2\tTab" }]).success).toBe(true);
+    expect(parse([{ key: "block", type: "info", label: "Info", text: `Zeile${ch(0)}` }]).success).toBe(false);
+  });
+
+  it("rejects bad option labels and option values with '<' or controls", () => {
+    const select = (options: unknown) => parse([f({ key: "kind", type: "select", options })]);
+    expect(select([{ value: "a", label: "Ä 👍" }]).success).toBe(true);
+    expect(select([{ value: "<b>", label: "x" }]).success).toBe(false);
+    expect(select([{ value: `a${ch(0)}`, label: "x" }]).success).toBe(false);
+    expect(select([{ value: "a", label: `x${ch(0x202e)}` }]).success).toBe(false);
+  });
+
+  it("flags answers with control or bidi characters as invalid_value (single-line: no line breaks, textarea: breaks fine)", () => {
+    const fields = defs([f({ key: "name" }), f({ key: "about", type: "textarea" })]);
+    const ctx = { mode: "submit" as const };
+    expect(validateAnswers(fields, { name: `a${ch(0)}b` }, ctx)).toEqual({ ok: false, errors: { name: "invalid_value" } });
+    expect(validateAnswers(fields, { name: `abc${ch(0x202e)}` }, ctx)).toEqual({ ok: false, errors: { name: "invalid_value" } });
+    expect(validateAnswers(fields, { name: "a\nb" }, ctx)).toEqual({ ok: false, errors: { name: "invalid_value" } });
+    expect(validateAnswers(fields, { about: `x${ch(0)}` }, ctx)).toEqual({ ok: false, errors: { about: "invalid_value" } });
+    expect(validateAnswers(fields, { name: "Zoë 👋", about: "Zeile 1\nZeile 2" }, ctx)).toEqual({ ok: true, answers: { name: "Zoë 👋", about: "Zeile 1\nZeile 2" } });
+  });
+
+  it("accepts the sensitive flag on answerable fields only", () => {
+    expect(parse([f({ key: "allergy", type: "textarea", sensitive: true })]).success).toBe(true);
+    expect(parse([{ key: "block", type: "info", label: "Info", sensitive: true }]).success).toBe(false);
+  });
+});

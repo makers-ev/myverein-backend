@@ -9,35 +9,40 @@ import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { forms, formSubmissionFiles, formSubmissions, formVersions, type FormRow, type FormSubmissionFileRow, type FormSubmissionRow, type FormVersionRow } from "../db/schema/forms.js";
 import { mediaFiles } from "../db/schema/media-files.js";
-import { ensureDefaultCategories, type DbExecutor } from "../lib/club-members.js";
+import type { DbExecutor } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, NotFoundError, ValidationError } from "../lib/errors.js";
-import { ensureDefaultForms } from "../lib/form-defaults.js";
-import { validateAnswers, visibleFieldKeys, type FormField } from "../lib/form-schema.js";
+import { FIELD_KEY_RE, validateAnswers, visibleFieldKeys, type FormField, type ValidateResult } from "../lib/form-schema.js";
 import {
-  activeCategories,
   ANSWERS_BODY_LIMIT,
+  applicantCategories,
   applicantDefinition,
   assertMayApply,
   clubRoleTypesOf,
+  draftMaxBytesPerUser,
+  ensureFormBasics,
   findCurrentForm,
   invalidAnswers,
   isUuid,
+  MAX_DRAFT_FILES_PER_USER_CLUB,
   MAX_DRAFTS_PER_CLUB,
+  MAX_DRAFTS_PER_USER,
   MAX_FILES_PER_SUBMISSION,
   outdatedError,
+  removeFiles,
+  SLUG_RE,
   submissionsPerHour,
   uploadsPerHour,
 } from "../lib/forms.js";
 import {
   attachUploadedImage,
+  deleteMedia,
   discardStoredFile,
   findMediaByKey,
   IMAGE_TYPES,
   MAX_DOCUMENT_BYTES,
   MAX_IMAGE_BYTES,
   MAX_PHOTO_BYTES,
-  markMediaDeleted,
   purgeMediaFile,
   signedMediaUrls,
   storeUpload,
@@ -64,6 +69,7 @@ formSubmissionRoutes.use("*", rateLimit({ windowMs: 60_000, max: 120, key: (c) =
 
 const createLimiter = rateLimit({ windowMs: 60 * 60_000, max: submissionsPerHour(), key: (c) => `form-submission-create:${c.get("user").id}` });
 const uploadLimiter = rateLimit({ windowMs: 60 * 60_000, max: uploadsPerHour(), key: (c) => `form-submission-upload:${c.get("user").id}` });
+const deleteLimiter = rateLimit({ windowMs: 60 * 60_000, max: uploadsPerHour(), key: (c) => `form-submission-file-delete:${c.get("user").id}` });
 const submitLimiter = rateLimit({ windowMs: 60 * 60_000, max: submissionsPerHour(), key: (c) => `form-submission-submit:${c.get("user").id}` });
 
 const validationHook = (result: { success: boolean; error?: { issues: unknown } }) => {
@@ -137,7 +143,7 @@ function assertDraft(sub: FormSubmissionRow): void {
 
 async function currentDefinition(clubId: string, executor: DbExecutor) {
   const current = await findCurrentForm(clubId, PURPOSE, executor);
-  return current ? applicantDefinition(current.form, current.version, await activeCategories(clubId, executor)) : null;
+  return current ? applicantDefinition(current.form, current.version, await applicantCategories(clubId, executor)) : null;
 }
 
 /**
@@ -151,6 +157,28 @@ async function resolveTarget(tx: DbExecutor, sub: FormSubmissionRow, repinTo?: s
   if (current && current.version.id === pinned.version.id && (repinTo === undefined || repinTo === pinned.version.id)) return { target: pinned, repinned: false };
   if (current && repinTo === current.version.id) return { target: current, repinned: true };
   throw outdatedError(await currentDefinition(sub.clubId, tx), sub.id);
+}
+
+/**
+ * Draft validation for PATCH: only the keys the request CHANGES must be valid. A stored answer that became invalid
+ * without the applicant touching it (an option or category the club archived in the meantime) neither blocks the edit
+ * nor gets lost; submit validates everything strictly and names the key.
+ */
+function validateChanged(fields: readonly FormField[], stored: Answers, patch: unknown, categoryKeys: readonly string[]): Answers {
+  const changed = new Set(isPlainRecord(patch) ? Object.keys(patch) : []);
+  const candidate = toAnswers(stored, patch);
+  const kept: Answers = {};
+  for (let round = 0; round <= fields.length + 1; round++) {
+    const result: ValidateResult = validateAnswers(fields, candidate, { mode: "draft", categoryKeys });
+    if (result.ok) return { ...result.answers, ...kept };
+    const bad = Object.keys(result.errors);
+    if (bad.some((key) => changed.has(key) || !Object.hasOwn(candidate, key))) throw invalidAnswers(result.errors);
+    for (const key of bad) {
+      kept[key] = candidate[key];
+      delete candidate[key];
+    }
+  }
+  throw invalidAnswers({ _: "invalid_value" });
 }
 
 /** Answers that survive a move to another version: unknown keys and values the new field no longer accepts are dropped. */
@@ -183,16 +211,6 @@ async function loadFiles(executor: DbExecutor, submissionIds: readonly string[])
     .leftJoin(mediaFiles, eq(mediaFiles.storageKey, formSubmissionFiles.storageKey))
     .where(inArray(formSubmissionFiles.submissionId, [...submissionIds]))
     .orderBy(formSubmissionFiles.createdAt, formSubmissionFiles.id);
-}
-
-/** Removes file rows and tombstones their registry entries; returns the keys to `purgeMediaFile` AFTER the commit. */
-async function removeFiles(tx: DbExecutor, rows: ReadonlyArray<{ id: string; storageKey: string }>): Promise<string[]> {
-  const purge: string[] = [];
-  for (const row of rows) {
-    await tx.delete(formSubmissionFiles).where(eq(formSubmissionFiles.id, row.id));
-    if (await markMediaDeleted(row.storageKey, tx)) purge.push(row.storageKey);
-  }
-  return purge;
 }
 
 const purgeAll = (keys: readonly string[]) => Promise.all(keys.map((key) => purgeMediaFile(key)));
@@ -235,8 +253,8 @@ async function shapeSubmissions(subs: FormSubmissionRow[], executor: DbExecutor 
 
 const createSchema = z
   .object({
-    clubId: z.string().min(1).optional(),
-    clubSlug: z.string().min(1).optional(),
+    clubId: z.string().regex(SLUG_RE).optional(),
+    clubSlug: z.string().regex(SLUG_RE).optional(),
     // Only the Aufnahme form is reachable for applicants in Wave 8; 'guardian' (child application) comes with B8.
     purpose: z.literal(PURPOSE).optional(),
     onBehalfOf: z.literal("self").optional(),
@@ -251,14 +269,15 @@ formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", crea
 
   const org = await db.query.organization.findFirst({ where: body.clubId ? eq(organization.id, body.clubId) : eq(organization.slug, body.clubSlug!), columns: { id: true } });
   if (!org) throw new NotFoundError("Club not found");
-  await ensureDefaultCategories(org.id);
-  await ensureDefaultForms(org.id);
+  await ensureFormBasics(org.id);
 
   const created = await db.transaction(async (tx) => {
     await lockUserClub(tx, userId, org.id);
+    // The cap over all clubs needs a user-wide lock (parallel drafts in two clubs).
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`form-submission-user:${userId}`}, 0))`);
     const current = await findCurrentForm(org.id, PURPOSE, tx);
     if (!current) throw new NotFoundError("This club has no application form");
-    const categories = await activeCategories(org.id, tx);
+    const categories = await applicantCategories(org.id, tx);
     if (body.formVersionId !== undefined && body.formVersionId !== current.version.id) throw outdatedError(applicantDefinition(current.form, current.version, categories));
 
     await assertMayApply(tx, org.id, userId);
@@ -266,6 +285,8 @@ formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", crea
       .select({ drafts: count() })
       .from(formSubmissions)
       .where(and(eq(formSubmissions.submittedByUserId, userId), eq(formSubmissions.clubId, org.id), eq(formSubmissions.status, "draft")));
+    const [{ draftsAll }] = await tx.select({ draftsAll: count() }).from(formSubmissions).where(and(eq(formSubmissions.submittedByUserId, userId), eq(formSubmissions.status, "draft")));
+    if (draftsAll >= MAX_DRAFTS_PER_USER) throw new ConflictError("Too many open drafts; continue or withdraw one", { details: { code: "draft_limit_user", limit: MAX_DRAFTS_PER_USER } });
     if (drafts >= MAX_DRAFTS_PER_CLUB) throw new ConflictError("Too many open drafts for this club; continue or withdraw one", { details: { code: "draft_limit", limit: MAX_DRAFTS_PER_CLUB } });
 
     let answers: Answers = {};
@@ -311,7 +332,7 @@ formSubmissionRoutes.get("/:id", async (c) => {
   return c.json({
     data: {
       submission: shaped,
-      form: applicantDefinition(pinned.form, pinned.version, await activeCategories(sub.clubId)),
+      form: applicantDefinition(pinned.form, pinned.version, await applicantCategories(sub.clubId)),
       // A draft on an outdated version has to move on (PATCH with `formVersionId`) before it can be edited or submitted.
       outdated: sub.status === "draft" && current?.version.id !== pinned.version.id,
     },
@@ -332,7 +353,7 @@ formSubmissionRoutes.patch("/:id", jsonLimit, zValidator("json", patchSchema, va
     assertDraft(sub);
     const { target, repinned } = await resolveTarget(tx, sub, body.formVersionId);
     const fields = target.version.fields as FormField[];
-    const categoryKeys = (await activeCategories(sub.clubId, tx)).map((k) => k.key);
+    const categoryKeys = (await applicantCategories(sub.clubId, tx)).map((k) => k.key);
 
     let base: Answers = toAnswers(sub.answers);
     let droppedAnswerKeys: string[] = [];
@@ -341,12 +362,11 @@ formSubmissionRoutes.patch("/:id", jsonLimit, zValidator("json", patchSchema, va
       base = carried.answers;
       droppedAnswerKeys = carried.dropped;
     }
-    const validated = validateAnswers(fields, toAnswers(base, body.answers), { mode: "draft", categoryKeys });
-    if (!validated.ok) throw invalidAnswers(validated.errors);
+    const validatedAnswers = validateChanged(fields, base, body.answers, categoryKeys);
 
     const [updated] = await tx
       .update(formSubmissions)
-      .set({ answers: validated.answers, ...(repinned ? { formId: target.form.id, formVersionId: target.version.id } : {}), updatedAt: new Date() })
+      .set({ answers: validatedAnswers, ...(repinned ? { formId: target.form.id, formVersionId: target.version.id } : {}), updatedAt: new Date() })
       .where(eq(formSubmissions.id, sub.id))
       .returning();
 
@@ -367,7 +387,29 @@ formSubmissionRoutes.patch("/:id", jsonLimit, zValidator("json", patchSchema, va
 
 // --- files -----------------------------------------------------------------------------------------------------
 
-const claimSchema = z.object({ fieldKey: z.string().min(1).max(60), mediaKey: z.string().min(1).max(300) });
+const claimSchema = z.object({ fieldKey: z.string().regex(FIELD_KEY_RE), mediaKey: z.string().regex(/^[A-Za-z0-9_./-]{1,300}$/) });
+
+/**
+ * Upload caps over all OPEN drafts of one user in one club: files and bytes (`FORM_DRAFT_MAX_BYTES_PER_USER`), so
+ * drafts cannot be used as free storage. `ignoreFileIds` are files that are about to be replaced.
+ */
+async function assertDraftUploadCaps(executor: DbExecutor, userId: string, clubId: string, add: { files: number; bytes: number }, ignoreFileIds: readonly string[] = []): Promise<void> {
+  const rows = await executor
+    .select({ id: formSubmissionFiles.id, size: formSubmissionFiles.sizeBytes })
+    .from(formSubmissionFiles)
+    .innerJoin(formSubmissions, eq(formSubmissions.id, formSubmissionFiles.submissionId))
+    .where(and(eq(formSubmissions.submittedByUserId, userId), eq(formSubmissions.clubId, clubId), eq(formSubmissions.status, "draft")));
+  const kept = rows.filter((r) => !ignoreFileIds.includes(r.id));
+  if (kept.length + add.files > MAX_DRAFT_FILES_PER_USER_CLUB || kept.reduce((sum, r) => sum + r.size, 0) + add.bytes > draftMaxBytesPerUser()) {
+    throw new ValidationError("Too many or too large uploads in your open drafts for this club; remove files or submit first", { code: "QUOTA_EXCEEDED", details: { code: "draft_upload_cap" } });
+  }
+}
+
+const fileFieldOf = (fields: readonly FormField[], fieldKey: string): FormField => {
+  const field = fields.find((f) => f.key === fieldKey);
+  if (!field || (field.type !== "file" && field.type !== "image")) throw new ValidationError("Not a file field of this form", { details: { fields: { [FIELD_KEY_RE.test(fieldKey) ? fieldKey : "_invalid_key"]: "unknown_field" } } });
+  return field;
+};
 
 formSubmissionRoutes.post(
   "/:id/files",
@@ -380,7 +422,11 @@ formSubmissionRoutes.post(
   }),
   async (c) => {
     const userId = c.get("user").id;
-    await loadOwn(db, c.req.param("id"), userId); // early 404 before any bytes are processed
+    const id = c.req.param("id");
+    // Cheap checks first, before any bytes are parsed or processed: ownership, draft, current version.
+    const early = await loadOwn(db, id, userId);
+    assertDraft(early);
+    const { target: earlyTarget } = await resolveTarget(db, early);
 
     // Either a multipart upload (`file` + `fieldKey`) or a JSON claim of an already uploaded, unattached image.
     const isJson = (c.req.header("content-type") ?? "").toLowerCase().startsWith("application/json");
@@ -395,58 +441,69 @@ formSubmissionRoutes.post(
       const file = body["file"];
       const fieldKey = body["fieldKey"];
       if (!(file instanceof File)) throw new ValidationError("Missing file upload (field name: file)");
-      if (typeof fieldKey !== "string" || fieldKey.length === 0) throw new ValidationError("fieldKey is required");
+      if (typeof fieldKey !== "string" || !FIELD_KEY_RE.test(fieldKey)) throw new ValidationError("fieldKey is required");
       upload = { file, fieldKey };
     }
     const fieldKey = (upload ?? claim)!.fieldKey;
+    const earlyField = fileFieldOf(earlyTarget.version.fields as FormField[], fieldKey);
+    const isImage = earlyField.type === "image";
+    if (claim && !isImage) throw new ValidationError("Only image fields accept an already uploaded file; upload documents directly");
+    const maxBytes = isImage ? (earlyField.mapsTo === "photo" ? MAX_PHOTO_BYTES : MAX_IMAGE_BYTES) : MAX_DOCUMENT_BYTES;
+    // Reject an over-cap upload before the (expensive) image processing; the authoritative check follows under the lock.
+    if (upload) {
+      const replaceable = isImage ? (await loadFiles(db, [early.id])).filter((f) => f.file.fieldKey === fieldKey).map((f) => f.file.id) : [];
+      await assertDraftUploadCaps(db, userId, early.clubId, { files: 1, bytes: upload.file.size }, replaceable);
+    }
 
-    const stored: { key: string | null } = { key: null };
+    // The heavy part -- magic bytes, metadata strip, file write, quota, registry row -- runs OUTSIDE the transaction
+    // that holds the submission lock; if the short transaction below fails, the stored file is removed again.
+    const stored = upload
+      ? await storeUpload({
+          file: upload.file,
+          clubId: early.clubId,
+          storagePrefix: `forms/${early.clubId}/${early.id}`,
+          kind: isImage ? "image" : "document",
+          allowedTypes: isImage ? IMAGE_TYPES : FILE_FIELD_TYPES,
+          maxBytes,
+          visibility: "private",
+          // Documents (IDs, certificates, ...) are sensitive: never a signed URL, only the audited stream.
+          sensitive: !isImage,
+          owner: { type: "form_submission", id: early.id },
+          uploadedBy: userId,
+        })
+      : null;
+
     const purge: string[] = [];
     try {
       const created = await db.transaction(async (tx) => {
-        const sub = await loadOwn(tx, c.req.param("id"), userId, true);
+        const sub = await loadOwn(tx, id, userId, true);
         assertDraft(sub);
+        await lockUserClub(tx, userId, sub.clubId);
         const { target } = await resolveTarget(tx, sub);
-        const field = (target.version.fields as FormField[]).find((f) => f.key === fieldKey);
-        if (!field || (field.type !== "file" && field.type !== "image")) throw new ValidationError("Not a file field of this form", { details: { fields: { [fieldKey]: "unknown_field" } } });
-        const isImage = field.type === "image";
+        const field = fileFieldOf(target.version.fields as FormField[], fieldKey);
+        if ((field.type === "image") !== isImage) throw outdatedError(await currentDefinition(sub.clubId, tx), sub.id);
 
         // An image field holds exactly one photo: a new one replaces the old one.
         const existing = await loadFiles(tx, [sub.id]);
-        if (isImage) purge.push(...(await removeFiles(tx, existing.filter((f) => f.file.fieldKey === fieldKey).map((f) => f.file))));
-        const remaining = existing.filter((f) => !(isImage && f.file.fieldKey === fieldKey)).length;
+        const replaced = isImage ? existing.filter((f) => f.file.fieldKey === fieldKey) : [];
+        const remaining = existing.length - replaced.length;
         if (remaining >= MAX_FILES_PER_SUBMISSION) throw new ValidationError(`At most ${MAX_FILES_PER_SUBMISSION} files per submission`);
-        const maxBytes = isImage ? (field.mapsTo === "photo" ? MAX_PHOTO_BYTES : MAX_IMAGE_BYTES) : MAX_DOCUMENT_BYTES;
 
-        let media;
+        let media = stored;
         if (claim) {
-          if (!isImage) throw new ValidationError("Only image fields accept an already uploaded file; upload documents directly");
           media = await attachUploadedImage(tx, { clubId: sub.clubId, storageKey: claim.mediaKey, uploadedBy: userId, owner: { type: "form_submission", id: sub.id } });
           if (media.sizeBytes > maxBytes || !(IMAGE_TYPES as readonly string[]).includes(media.mimeType)) throw new ValidationError("The uploaded image is not allowed for this field");
-        } else {
-          media = await storeUpload({
-            file: upload!.file,
-            clubId: sub.clubId,
-            storagePrefix: `forms/${sub.clubId}/${sub.id}`,
-            kind: isImage ? "image" : "document",
-            allowedTypes: isImage ? IMAGE_TYPES : FILE_FIELD_TYPES,
-            maxBytes,
-            visibility: "private",
-            // Documents (IDs, certificates, ...) are sensitive: never a signed URL, only the audited stream.
-            sensitive: !isImage,
-            owner: { type: "form_submission", id: sub.id },
-            uploadedBy: userId,
-            executor: tx,
-          });
-          stored.key = media.storageKey;
         }
+        await assertDraftUploadCaps(tx, userId, sub.clubId, { files: 1, bytes: media!.sizeBytes }, replaced.map((f) => f.file.id));
+        purge.push(...(await removeFiles(tx, replaced.map((f) => f.file))));
+
         const [row] = await tx
           .insert(formSubmissionFiles)
-          .values({ submissionId: sub.id, fieldKey, storageKey: media.storageKey, filename: media.originalFilename, mimeType: media.mimeType, sizeBytes: media.sizeBytes })
+          .values({ submissionId: sub.id, fieldKey, storageKey: media!.storageKey, filename: media!.originalFilename, mimeType: media!.mimeType, sizeBytes: media!.sizeBytes })
           .returning();
         await tx.update(formSubmissions).set({ updatedAt: new Date() }).where(eq(formSubmissions.id, sub.id));
         await tx.insert(auditLog).values({ eventType: "form_submission.file_add", subjectId: sub.id, payload: { fileId: row!.id, fieldKey, userId, via: claim ? "claim" : "upload" } });
-        return { sub, row: row!, kind: media.kind, urlKey: media.sensitive ? null : media.storageKey };
+        return { sub, row: row!, kind: media!.kind, urlKey: media!.sensitive ? null : media!.storageKey };
       });
       await purgeAll(purge);
       const urls = created.urlKey ? await signedMediaUrls(created.sub.clubId, [created.urlKey], "form_submission") : new Map<string, string>();
@@ -455,14 +512,14 @@ formSubmissionRoutes.post(
         201,
       );
     } catch (err) {
-      // The transaction rolled back (registry row included): drop the file that was already written.
-      if (stored.key) await discardStoredFile(stored.key);
+      // The short transaction rolled back: the already stored file has no feature row -- tombstone and delete it.
+      if (stored) await deleteMedia(stored.storageKey).catch(() => discardStoredFile(stored.storageKey));
       throw err;
     }
   },
 );
 
-formSubmissionRoutes.delete("/:id/files/:fileId", uploadLimiter, async (c) => {
+formSubmissionRoutes.delete("/:id/files/:fileId", deleteLimiter, async (c) => {
   const userId = c.get("user").id;
   const fileId = c.req.param("fileId");
   const purge = await db.transaction(async (tx) => {
@@ -532,7 +589,7 @@ formSubmissionRoutes.post("/:id/submit", submitLimiter, jsonLimit, zValidator("j
 
     const fields = target.version.fields as FormField[];
     const files = await loadFiles(tx, [sub.id]);
-    const categoryKeys = (await activeCategories(sub.clubId, tx)).map((k) => k.key);
+    const categoryKeys = (await applicantCategories(sub.clubId, tx)).map((k) => k.key);
     const result = validateAnswers(fields, toAnswers(sub.answers, body.answers), {
       mode: "submit",
       categoryKeys,
@@ -567,7 +624,8 @@ formSubmissionRoutes.post("/:id/withdraw", async (c) => {
   const purge: string[] = [];
   const withdrawn = await db.transaction(async (tx) => {
     const sub = await loadOwn(tx, c.req.param("id"), userId, true);
-    if (sub.status !== "draft" && sub.status !== "submitted") throw new ConflictError("The submission can no longer be withdrawn", { details: { code: "submission_not_withdrawable", status: sub.status } });
+    // Once the board has decided (B6 sets decided_at together with accepted/rejected) there is nothing to withdraw.
+    if ((sub.status !== "draft" && sub.status !== "submitted") || sub.decidedAt !== null) throw new ConflictError("The submission can no longer be withdrawn", { details: { code: "submission_not_withdrawable", status: sub.status } });
     // A withdrawn application keeps its answers as a record, but its uploaded files (photo, documents) are deleted.
     purge.push(...(await removeFiles(tx, (await loadFiles(tx, [sub.id])).map((f) => f.file))));
     const [row] = await tx.update(formSubmissions).set({ status: "withdrawn", updatedAt: new Date() }).where(eq(formSubmissions.id, sub.id)).returning();

@@ -169,6 +169,13 @@
       "when": 1791812190564,
       "tag": "0023_form-versions-one-published",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791829112761,
+      "tag": "0024_form-applicant-categories",
+      "breakpoints": true
     }
   ]
 }

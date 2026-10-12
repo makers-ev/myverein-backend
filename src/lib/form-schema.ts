@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { cleanText, isCleanIdentifier, isCleanText } from "./text-policy.js";
 import { MAPPING_TARGET_KEYS, mappingAcceptsType, type MappingTarget } from "./form-mapping.js";
 
 /**
@@ -53,7 +54,7 @@ const visibleIfSchema = z
   .object({
     fieldKey: keySchema,
     op: z.enum(["eq", "neq", "in", "checked"]),
-    value: z.union([z.string().max(80), z.number().finite(), z.boolean(), z.array(z.string().max(80)).min(1).max(MAX_OPTIONS)]).optional(),
+    value: z.union([z.string().max(80).refine(isCleanIdentifier, "not allowed"), z.number().finite(), z.boolean(), z.array(z.string().max(80).refine(isCleanIdentifier, "not allowed")).min(1).max(MAX_OPTIONS)]).optional(),
   })
   .strict();
 
@@ -61,17 +62,19 @@ const fieldSchema = z
   .object({
     key: keySchema,
     type: z.enum(FIELD_TYPES),
-    label: z.string().trim().min(1).max(200),
-    helpText: z.string().trim().max(500).optional(),
+    label: cleanText(z.string().trim().min(1).max(200)),
+    helpText: cleanText(z.string().trim().max(500)).optional(),
     required: z.boolean().optional(),
-    options: z.array(z.object({ value: z.string().trim().min(1).max(80), label: z.string().trim().min(1).max(200) }).strict()).min(1).max(MAX_OPTIONS).optional(),
+    options: z.array(z.object({ value: z.string().trim().min(1).max(80).refine(isCleanIdentifier, "not allowed"), label: cleanText(z.string().trim().min(1).max(200)) }).strict()).min(1).max(MAX_OPTIONS).optional(),
     optionsSource: optionsSource.optional(),
     validation: validationSchema.optional(),
     visibleIf: visibleIfSchema.optional(),
     mapsTo: z.enum(MAPPING_TARGET_KEYS).optional(),
     customField: keySchema.optional(),
     infoKind: z.enum(["privacy_notice"]).optional(),
-    text: z.string().trim().max(2000).optional(),
+    text: cleanText(z.string().trim().max(2000), true).optional(),
+    // Marks answers that need special protection (health, ...): review visibility (members:read_sensitive) in B6/B10.
+    sensitive: z.boolean().optional(),
   })
   .strict();
 
@@ -95,7 +98,7 @@ export const formFieldsSchema = z
       if (field.options && new Set(field.options.map((o) => o.value)).size !== field.options.length) issue("duplicate option value", ["options"]);
 
       if (field.type === "info") {
-        if (field.required || field.mapsTo || field.customField || field.validation) issue("info fields carry no answer", ["type"]);
+        if (field.required || field.mapsTo || field.customField || field.validation || field.sensitive) issue("info fields carry no answer", ["type"]);
       } else if (field.infoKind !== undefined || field.text !== undefined) {
         issue("infoKind/text only for info", ["infoKind"]);
       }
@@ -221,6 +224,7 @@ function cleanValue(field: FormField, value: unknown, optionValues: readonly str
       const hardMax = field.type === "text" ? TEXT_MAX : TEXTAREA_MAX;
       if (text.length > Math.min(v?.maxLength ?? hardMax, hardMax)) return { error: "too_long" };
       if (text.length < (v?.minLength ?? 0)) return { error: "too_short" };
+      if (!isCleanText(text, field.type === "textarea")) return { error: "invalid_value" };
       if (v?.pattern && !PATTERN_PRESETS[v.pattern].test(text)) return { error: "invalid_format" };
       return { value: text };
     }

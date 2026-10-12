@@ -27,6 +27,8 @@ export const memberCategories = pgTable(
     key: text("key").notNull(),
     name: text("name").notNull(),
     votingRight: boolean("voting_right").notNull().default(true),
+    // Whether an applicant may pick this category in the application form (Wave 8). Default closed: the board opts in.
+    applicantSelectable: boolean("applicant_selectable").notNull().default(false),
     minAge: integer("min_age"),
     maxAge: integer("max_age"),
     autoTransitionToKey: text("auto_transition_to_key"),

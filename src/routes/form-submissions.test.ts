@@ -304,6 +304,8 @@ describe("form submissions (applicant side)", () => {
     for (let i = 0; i < 31; i++) statuses.push((await upload(limited, lid, "no_such_field", png(), "x.png", "image/png")).status);
     expect(statuses.slice(0, 30).every((s) => s === 422)).toBe(true);
     expect(statuses[30]).toBe(429);
+    // Removing files has its own bucket: an exhausted upload budget does not block cleaning up.
+    expect((await call(limited, `/form-submissions/${lid}/files/${"00000000-0000-4000-8000-000000000001"}`, { method: "DELETE" })).status).toBe(404);
   });
 
   it("claims an unattached image of the same user and club exactly once", async () => {

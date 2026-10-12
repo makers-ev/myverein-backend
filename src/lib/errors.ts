@@ -7,6 +7,8 @@
  * errors, so behaviour stays consistent across every route.
  */
 
+import { HTTPException } from "hono/http-exception";
+
 export type ErrorCode =
   | "BAD_REQUEST"
   | "UNAUTHORIZED"
@@ -117,9 +119,23 @@ export class InternalError extends AppError {
   }
 }
 
+const CODE_BY_CLIENT_STATUS: Record<number, ErrorCode> = {
+  400: "BAD_REQUEST",
+  401: "UNAUTHORIZED",
+  403: "FORBIDDEN",
+  404: "NOT_FOUND",
+  409: "CONFLICT",
+  422: "UNPROCESSABLE_ENTITY",
+  429: "TOO_MANY_REQUESTS",
+};
+
 /** Normalizes any thrown value into an AppError, without leaking internals. */
 export function toAppError(err: unknown): AppError {
   if (err instanceof AppError) return err;
+  // Framework errors with a client status (malformed JSON from the validator, body limits, ...) stay 4xx.
+  if (err instanceof HTTPException && err.status >= 400 && err.status < 500) {
+    return new AppError(CODE_BY_CLIENT_STATUS[err.status] ?? "BAD_REQUEST", err.status, err.message || "Bad request", { cause: err });
+  }
   if (err instanceof Error) {
     return new InternalError(err.message, { cause: err });
   }

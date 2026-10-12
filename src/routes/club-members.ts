@@ -960,6 +960,7 @@ function shapeCategory(row: CategoryRow, memberCount?: number) {
     key: row.key,
     name: row.name,
     votingRight: row.votingRight,
+    applicantSelectable: row.applicantSelectable,
     minAge: row.minAge,
     maxAge: row.maxAge,
     autoTransitionToKey: row.autoTransitionToKey,
@@ -994,6 +995,7 @@ const createCategorySchema = z.object({
   key: categoryKeySchema.optional(),
   name: z.string().trim().min(1).max(100),
   votingRight: z.boolean().optional(),
+  applicantSelectable: z.boolean().optional(),
   minAge: ageField,
   maxAge: ageField,
   autoTransitionToKey: autoTransitionKeySchema.nullable().optional(),
@@ -1005,6 +1007,7 @@ const updateCategorySchema = z.object({
   key: z.never({ error: "key cannot be changed after creation" }).optional(),
   name: z.string().trim().min(1).max(100).optional(),
   votingRight: z.boolean().optional(),
+  applicantSelectable: z.boolean().optional(),
   minAge: ageField,
   maxAge: ageField,
   autoTransitionToKey: autoTransitionKeySchema.nullable().optional(),
@@ -1075,7 +1078,7 @@ clubMemberRoutes.post("/categories", zValidator("json", createCategorySchema, va
       const [last] = await tx.select({ n: sql<number>`coalesce(max(${memberCategories.sortOrder}), -1)` }).from(memberCategories).where(eq(memberCategories.clubId, clubId));
       const [row] = await tx
         .insert(memberCategories)
-        .values({ clubId, name: body.name, votingRight: body.votingRight ?? true, ...rules, sortOrder: body.sortOrder ?? Number(last?.n ?? -1) + 1 })
+        .values({ clubId, name: body.name, votingRight: body.votingRight ?? true, applicantSelectable: body.applicantSelectable ?? false, ...rules, sortOrder: body.sortOrder ?? Number(last?.n ?? -1) + 1 })
         .returning();
       await tx.insert(auditLog).values({ eventType: "member_category.create", subjectId: row!.id, payload: { clubId, key, createdBy: actor.id } });
       return row!;

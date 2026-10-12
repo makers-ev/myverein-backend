@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -10,11 +10,12 @@ import { FORM_PURPOSES, forms, formVersions, type FormRow, type FormVersionRow }
 import { hasClubPermission } from "../lib/club-permissions.js";
 import type { DbExecutor } from "../lib/club-members.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
-import { ensureDefaultForms } from "../lib/form-defaults.js";
+import { ensureClubFormDefaults } from "../lib/form-defaults.js";
 import { formFieldsSchema, type FormField } from "../lib/form-schema.js";
-import { DEFINITION_BODY_LIMIT, formDto, isUuid, keyTypeProblems, publishProblems, versionDto, versionSummaryDto, type PublishProblem } from "../lib/forms.js";
+import { DEFINITION_BODY_LIMIT, formDto, isUuid, MAX_ACTIVE_FORMS_PER_CLUB, MAX_VERSIONS_PER_FORM, keyTypeProblems, publishProblems, versionDto, versionSummaryDto, type PublishProblem } from "../lib/forms.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
+import { cleanText } from "../lib/text-policy.js";
 import { sessionGuard } from "../middleware/session-guard.js";
 
 /**
@@ -25,8 +26,9 @@ import { sessionGuard } from "../middleware/session-guard.js";
  */
 export const formRoutes = new Hono<ClubEnv>();
 
-formRoutes.use("*", rateLimit({ windowMs: 60_000, max: 120 }));
 formRoutes.use("*", sessionGuard);
+// Per user (not per IP): office networks share one address. Failed attempts count as well.
+formRoutes.use("*", rateLimit({ windowMs: 60_000, max: 120, key: (c) => `forms:${c.get("user").id}` }));
 formRoutes.use("*", clubGuard);
 formRoutes.use("*", async (c, next) => {
   if (!hasClubPermission(c.get("clubRoleTypes"), "forms:write")) throw new ForbiddenError("Missing forms:write permission");
@@ -44,8 +46,8 @@ const jsonLimit = bodyLimit({
   },
 });
 
-const nameSchema = z.string().trim().min(1).max(120);
-const privacyNoticeSchema = z.string().trim().max(10_000).nullable();
+const nameSchema = cleanText(z.string().trim().min(1).max(120));
+const privacyNoticeSchema = cleanText(z.string().trim().max(10_000), true).nullable();
 
 function parseFields(input: unknown): FormField[] {
   const parsed = formFieldsSchema.safeParse(input);
@@ -83,7 +85,7 @@ formRoutes.get(
     const clubId = c.get("clubId");
     const { purpose, includeArchived } = c.req.valid("query");
     // A club that never touched the builder still has its standard forms: create them lazily (idempotent).
-    await ensureDefaultForms(clubId);
+    await ensureClubFormDefaults(clubId);
 
     const rows = await db
       .select()
@@ -124,10 +126,14 @@ formRoutes.post("/", jsonLimit, zValidator("json", createSchema, validationHook)
   const fields = body.fields === undefined ? [] : parseFields(body.fields);
   // aufnahme/austritt exist from the start (standard forms); creating them first makes a duplicate a clean 409 and
   // keeps the lazy default seeding from racing the new form.
-  await ensureDefaultForms(clubId);
+  await ensureClubFormDefaults(clubId);
 
   try {
     const created = await db.transaction(async (tx) => {
+      // Serialise creators of one club so the cap cannot be overshot by parallel requests.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`forms-create:${clubId}`}, 0))`);
+      const [{ active }] = await tx.select({ active: count() }).from(forms).where(and(eq(forms.clubId, clubId), isNull(forms.archivedAt)));
+      if (active >= MAX_ACTIVE_FORMS_PER_CLUB) throw new ConflictError(`At most ${MAX_ACTIVE_FORMS_PER_CLUB} active forms per club`, { details: { code: "form_limit", limit: MAX_ACTIVE_FORMS_PER_CLUB } });
       const [form] = await tx.insert(forms).values({ clubId, purpose: body.purpose, name: body.name }).returning();
       const [draft] = await tx.insert(formVersions).values({ formId: form!.id, version: 1, status: "draft", fields, privacyNotice: body.privacyNotice ?? null }).returning();
       await tx.insert(auditLog).values({ eventType: "form.create", subjectId: form!.id, payload: { clubId, purpose: form!.purpose, createdBy: c.get("membership").id } });
@@ -157,7 +163,7 @@ const draftSchema = z.object({
 });
 
 /** Saves the draft of a form (creates it when there is none). Runs under the form's row lock. */
-async function saveDraft(clubId: string, formId: string, body: z.infer<typeof draftSchema>, expectedVersion?: number) {
+async function saveDraft(clubId: string, formId: string, savedBy: string, body: z.infer<typeof draftSchema>, expectedVersion?: number) {
   if (body.fields === undefined) throw new ValidationError("fields is required");
   const fields = parseFields(body.fields);
   return db.transaction(async (tx) => {
@@ -180,6 +186,7 @@ async function saveDraft(clubId: string, formId: string, body: z.infer<typeof dr
         .where(and(eq(formVersions.id, existing.id), eq(formVersions.status, "draft")))
         .returning();
     } else {
+      if (versions.length >= MAX_VERSIONS_PER_FORM) throw new ConflictError(`At most ${MAX_VERSIONS_PER_FORM} versions per form`, { details: { code: "version_limit", limit: MAX_VERSIONS_PER_FORM } });
       const next = Math.max(0, ...versions.map((v) => v.version)) + 1;
       // A new draft starts with the privacy notice of the live version unless the editor sends one.
       [draft] = await tx
@@ -191,12 +198,14 @@ async function saveDraft(clubId: string, formId: string, body: z.infer<typeof dr
     if (body.name !== undefined && body.name !== form.name) {
       [saved] = await tx.update(forms).set({ name: body.name, updatedAt: new Date() }).where(eq(forms.id, form.id)).returning();
     }
+    // Ids and counts only -- the definition itself is not part of the audit trail.
+    await tx.insert(auditLog).values({ eventType: "form.draft_save", subjectId: form.id, payload: { clubId, version: draft!.version, fieldCount: fields.length, savedBy } });
     return { form: saved!, draft: draft! };
   });
 }
 
 formRoutes.put("/:id/draft", jsonLimit, zValidator("json", draftSchema, validationHook), async (c) => {
-  const saved = await saveDraft(c.get("clubId"), c.req.param("id"), c.req.valid("json"));
+  const saved = await saveDraft(c.get("clubId"), c.req.param("id"), c.get("membership").id, c.req.valid("json"));
   return c.json({ data: { form: formDto(saved.form), draft: versionDto(saved.draft) } });
 });
 
@@ -209,7 +218,7 @@ formRoutes.put("/:id/versions/:n", jsonLimit, zValidator("json", draftSchema, va
   const [version] = await db.select().from(formVersions).where(and(eq(formVersions.formId, form.id), eq(formVersions.version, n))).limit(1);
   if (!version) throw new NotFoundError("Version not found");
   if (version.status !== "draft") throw new ConflictError("A published version is immutable; save a new draft instead", { details: { code: "version_immutable", version: n, status: version.status } });
-  const saved = await saveDraft(c.get("clubId"), form.id, c.req.valid("json"), n);
+  const saved = await saveDraft(c.get("clubId"), form.id, c.get("membership").id, c.req.valid("json"), n);
   return c.json({ data: { form: formDto(saved.form), draft: versionDto(saved.draft) } });
 });
 

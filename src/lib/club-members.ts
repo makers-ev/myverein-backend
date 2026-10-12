@@ -14,11 +14,11 @@ type MemberAccountRow = Pick<typeof member.$inferSelect, "id" | "organizationId"
 
 /** The five categories every club gets (Wave 7 B2). Names are German UI labels; `key` is the stable identifier. */
 export const DEFAULT_CATEGORIES = [
-  { key: "aktiv", name: "Aktiv", votingRight: true, sortOrder: 0 },
-  { key: "passiv", name: "Passiv", votingRight: true, sortOrder: 1 },
-  { key: "foerdernd", name: "Fördernd", votingRight: false, sortOrder: 2 },
-  { key: "ehrenmitglied", name: "Ehrenmitglied", votingRight: true, sortOrder: 3 },
-  { key: "jugend", name: "Jugend", votingRight: false, sortOrder: 4 },
+  { key: "aktiv", name: "Aktiv", votingRight: true, applicantSelectable: true, sortOrder: 0 },
+  { key: "passiv", name: "Passiv", votingRight: true, applicantSelectable: true, sortOrder: 1 },
+  { key: "foerdernd", name: "Fördernd", votingRight: false, applicantSelectable: true, sortOrder: 2 },
+  { key: "ehrenmitglied", name: "Ehrenmitglied", votingRight: true, applicantSelectable: false, sortOrder: 3 },
+  { key: "jugend", name: "Jugend", votingRight: false, applicantSelectable: true, sortOrder: 4 },
 ] as const;
 
 export const DEFAULT_CATEGORY_KEY = "aktiv";
