@@ -19,8 +19,6 @@ import { accountLinkLockKey, ensureClubMember } from "../lib/club-members.js";
 import { inviteLinkContext } from "../lib/invite-context.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { departments } from "../db/schema/departments.js";
-import { clubExitRequests } from "../db/schema/club-exit-requests.js";
-import { clubMemberDepartments } from "../db/schema/club-members.js";
 
 const sent = vi.hoisted(() => ({ mails: [] as Array<{ to: string; subject: string; html: string }>, fail: false }));
 vi.mock("../lib/email.js", () => ({
@@ -262,74 +260,6 @@ describe("account linking by invitation (B4)", () => {
     });
   });
 
-  describe("preview via POST (token in the body) and resend", () => {
-    const previewPost = (who: Actor | null, token: string) => call(who, "/club-members/invites/preview", { method: "POST", body: { token }, clubId: null });
-
-    it("POST preview answers like the deprecated GET and needs a session", async () => {
-      const invitee = await signUp("preview-post");
-      userIds.push(invitee.userId);
-      const { token } = await invited(invitee.email, "Pia Post");
-      const viaPost = await previewPost(invitee, token);
-      expect(viaPost.status).toBe(200);
-      const viaGet = await preview(invitee, token);
-      expect(viaGet.headers.get("deprecation")).toBe("true");
-      const postData = await data(viaPost);
-      expect(postData).toEqual(await data(viaGet));
-      expect(postData).toMatchObject({ memberName: "Pia P.", emailMatches: true });
-      expect((await previewPost(null, token)).status).toBe(401);
-      expect((await previewPost(invitee, "x".repeat(43))).status).toBe(404);
-      expect((await previewPost(invitee, "short")).status).toBe(422);
-    });
-
-    it("resend revokes the open invite, issues a new token to the same address and mails it", async () => {
-      const invitee = await signUp("resend");
-      userIds.push(invitee.userId);
-      const { token, clubMemberId, inviteId } = await invited(invitee.email);
-      sent.mails.length = 0;
-      const res = await call(boards[0]!, `/club-members/${clubMemberId}/invite/resend`, { method: "POST" });
-      expect(res.status).toBe(201);
-      const out = await data(res);
-      expect(out).toMatchObject({ clubMemberId, status: "pending", email: invitee.email, emailSent: true });
-      expect(out.id).not.toBe(inviteId);
-      expect(JSON.stringify(out)).not.toContain("token");
-      expect(sent.mails).toHaveLength(1);
-      expect(sent.mails[0]!.to).toBe(invitee.email);
-      const fresh = tokenFrom(sent.mails[0]!.html);
-      expect(fresh).not.toBe(token);
-      expect((await preview(invitee, token)).status).toBe(404);
-      expect((await accept(invitee, fresh)).status).toBe(200);
-    });
-
-    it("resend also works for an expired invite; 404 without open invite; needs members:write; club scoped", async () => {
-      const c = await child();
-      expect((await call(boards[1]!, `/club-members/${c.id}/invite/resend`, { method: "POST" })).status).toBe(404);
-      expect((await invite(boards[1]!, c.id, `resend-exp-${suffix}@example.com`)).status).toBe(201);
-      await db.update(clubMemberInvites).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(clubMemberInvites.clubMemberId, c.id));
-      expect((await call(plain, `/club-members/${c.id}/invite/resend`, { method: "POST" })).status).toBe(403);
-      expect((await call(outsider, `/club-members/${c.id}/invite/resend`, { method: "POST", clubId: otherClub })).status).toBe(404);
-      const res = await call(boards[1]!, `/club-members/${c.id}/invite/resend`, { method: "POST" });
-      expect(res.status).toBe(201);
-      expect((await data(res)).status).toBe("pending");
-    });
-
-    it("resend shares the 20/hour limit with invitation creation and reports mail failures", async () => {
-      const limited = await join("resend-limit", "schriftfuehrer");
-      const c = await child();
-      expect((await invite(limited, c.id, `resend-lim-${suffix}@example.com`)).status).toBe(201);
-      sent.fail = true;
-      const first = await call(limited, `/club-members/${c.id}/invite/resend`, { method: "POST" });
-      expect(first.status).toBe(201);
-      expect((await data(first)).emailSent).toBe(false);
-      sent.fail = false;
-      let tooMany = 0;
-      for (let i = 0; i < 20; i++) {
-        const r = await call(limited, `/club-members/${c.id}/invite/resend`, { method: "POST" });
-        if (r.status === 429) tooMany += 1;
-      }
-      expect(tooMany).toBeGreaterThanOrEqual(1);
-    });
-  });
-
   describe("accepting", () => {
     it("links the existing member to the signed-in account (same row, same number), single use", async () => {
       const invitee = await signUp("accept-ok");
@@ -393,140 +323,16 @@ describe("account linking by invitation (B4)", () => {
       expect((await accept(invitee, token)).status).toBe(200);
     });
 
-    it("an account that already is a member (untouched own row) is merged into the invited row", async () => {
+    it("an account that already is a member of the club cannot be merged into the invited member (409)", async () => {
       const existing = await join("accept-merge");
-      const { token, clubMemberId } = await invited(existing.email, "Mia Merge");
-      await db.update(clubMembers).set({ phone: "0170 1", city: "Bonn", memberNumber: null }).where(eq(clubMembers.id, existing.clubMemberId));
-      await db.update(clubMembers).set({ phone: "0170 2", memberNumber: "M-777" }).where(eq(clubMembers.id, clubMemberId));
-      // a ward of the account row, a role and a guardian link must survive the merge
-      const ward = await child("Wanda Ward");
-      await db.insert(guardianLinks).values({ guardianMemberId: boards[0]!.memberId, wardClubMemberId: existing.clubMemberId });
-      await db.insert(clubRoles).values({ memberId: existing.memberId, roleType: "trainer" });
-      void ward;
-
-      const res = await accept(existing, token);
-      expect(res.status).toBe(200);
-      expect(await data(res)).toMatchObject({ clubMemberId, memberId: existing.memberId, merged: true });
-
-      const kept = await stored(clubMemberId);
-      expect(kept).toMatchObject({ memberId: existing.memberId, lastUserId: existing.userId, displayName: "Mia Merge", memberNumber: "M-777", phone: "0170 2", city: "Bonn" });
-      expect(await db.query.clubMembers.findFirst({ where: eq(clubMembers.id, existing.clubMemberId) })).toBeUndefined();
-      expect((await db.query.clubRoles.findMany({ where: eq(clubRoles.memberId, existing.memberId) })).map((r) => r.roleType)).toContain("trainer");
-      expect((await db.select().from(guardianLinks).where(eq(guardianLinks.wardClubMemberId, clubMemberId))).map((g) => g.guardianMemberId)).toEqual([boards[0]!.memberId]);
-      expect(await db.select().from(member).where(and(eq(member.organizationId, club), eq(member.userId, existing.userId)))).toHaveLength(1);
-      const history = await db.select().from(clubMemberStatusHistory).where(eq(clubMemberStatusHistory.clubMemberId, clubMemberId));
-      expect(history.some((h) => h.reason === "merged")).toBe(true);
-      const audit = await db.select().from(auditLog).where(eq(auditLog.subjectId, clubMemberId));
-      expect(audit.map((a) => a.eventType)).toEqual(expect.arrayContaining(["club_member.merge", "club_member.invite_accept"]));
-      // the account now works as the invited member
-      expect(await data(await call(existing, "/club-members/me"))).toMatchObject({ id: clubMemberId, name: "Mia Merge" });
-      // single use / idempotent
-      expect([404, 409]).toContain((await accept(existing, token)).status);
-      expect((await stored(clubMemberId)).memberId).toBe(existing.memberId);
-    });
-
-    it("copies profile fields the invited row lacks and takes the number of the account row if the invited row has none", async () => {
-      const existing = await join("accept-merge-copy");
       const { token, clubMemberId } = await invited(existing.email);
-      await db.update(clubMembers).set({ phone: "0171 5", street: "Hauptstr. 1", memberNumber: "M-555", birthDate: "1990-04-05" }).where(eq(clubMembers.id, existing.clubMemberId));
-      await db.update(clubMembers).set({ memberNumber: null }).where(eq(clubMembers.id, clubMemberId));
-      expect((await accept(existing, token)).status).toBe(200);
-      expect(await stored(clubMemberId)).toMatchObject({ phone: "0171 5", street: "Hauptstr. 1", memberNumber: "M-555", birthDate: "1990-04-05" });
-    });
-
-    it("an own row with its own data is NOT merged: 409 merge_conflict lists only the kinds, nothing is consumed", async () => {
-      const existing = await join("accept-conflict");
-      const { token, clubMemberId } = await invited(existing.email, "Carla Conflict");
-      await db.update(clubMembers).set({ memberNumber: "SECRET-111", displayName: "Geheim Person" }).where(eq(clubMembers.id, existing.clubMemberId));
-      await db.update(clubMembers).set({ memberNumber: "OTHER-222" }).where(eq(clubMembers.id, clubMemberId));
-      const dep = (await db.insert(departments).values({ clubId: club, name: `Abt ${suffix}-c` }).returning())[0]!;
-      await db.insert(clubMemberDepartments).values({ clubMemberId: existing.clubMemberId, departmentId: dep.id });
-      await db.insert(clubMemberStatusHistory).values({ clubMemberId: existing.clubMemberId, fromStatus: "aktiv", toStatus: "ruhend", effectiveOn: "2026-01-01", reason: "x" });
-
       const res = await accept(existing, token);
       expect(res.status).toBe(409);
-      const json = await body(res);
-      expect(json.error.details.code).toBe("merge_conflict");
-      expect(json.error.details.conflicts.sort()).toEqual(["departments", "member_number", "status_history"]);
-      const text = JSON.stringify(json);
-      for (const secret of ["SECRET-111", "OTHER-222", "Geheim", "Carla", "Conflict"]) expect(text).not.toContain(secret);
+      expect(((await body(res)).error.details as Json).code).toBe("merge_not_supported");
       expect((await stored(clubMemberId)).memberId).toBeNull();
       expect((await stored(existing.clubMemberId)).memberId).toBe(existing.memberId);
+      // the invitation stays usable (nothing was consumed)
       expect((await db.query.clubMemberInvites.findFirst({ where: eq(clubMemberInvites.clubMemberId, clubMemberId) }))!.acceptedAt).toBeNull();
-    });
-
-    it("an open exit request on the own row also blocks the merge", async () => {
-      const a = await join("accept-conflict-photo");
-      const t1 = await invited(a.email);
-      await db.update(clubMembers).set({ memberNumber: null }).where(eq(clubMembers.id, a.clubMemberId));
-      await db.insert(clubExitRequests).values({ clubMemberId: a.clubMemberId, kind: "cancellation", requestedBy: a.memberId, requestedOn: "2026-10-01", status: "pending" });
-      const res = await accept(a, t1.token);
-      expect(res.status).toBe(409);
-      expect((await body(res)).error.details.conflicts).toEqual(["exit_requests"]);
-    });
-
-    it("the e-mail binding is checked before any merge information is revealed", async () => {
-      const existing = await join("accept-conflict-order");
-      const other = await join("accept-conflict-order2");
-      const { token } = await invited(existing.email);
-      await db.update(clubMembers).set({ memberNumber: "ZZ-1" }).where(eq(clubMembers.id, other.clubMemberId));
-      const res = await accept(other, token);
-      expect(res.status).toBe(403);
-      expect(JSON.stringify(await body(res))).not.toContain("merge");
-    });
-
-    it("parallel accepts of a merge: exactly one wins and exactly one row stays", async () => {
-      const existing = await join("accept-merge-race");
-      const { token, clubMemberId } = await invited(existing.email);
-      await db.update(clubMembers).set({ memberNumber: null }).where(eq(clubMembers.id, existing.clubMemberId));
-      const results = await Promise.all([accept(existing, token), accept(existing, token), accept(existing, token)]);
-      expect(results.filter((r) => r.status === 200)).toHaveLength(1);
-      for (const r of results.filter((x) => x.status !== 200)) expect([404, 409]).toContain(r.status);
-      expect(await db.select().from(clubMembers).where(eq(clubMembers.memberId, existing.memberId))).toHaveLength(1);
-      expect((await stored(clubMemberId)).memberId).toBe(existing.memberId);
-    });
-
-    it("notifies the inviting board member by mail (name only), never fails the accept", async () => {
-      const invitee = await signUp("accept-notify");
-      userIds.push(invitee.userId);
-      const board = boards[0]!;
-      const c = await child("Nora Notify");
-      expect((await invite(board, c.id, invitee.email)).status).toBe(201);
-      const token = tokenFrom(sent.mails.at(-1)!.html);
-      sent.mails.length = 0;
-      expect((await accept(invitee, token)).status).toBe(200);
-      expect(sent.mails).toHaveLength(1);
-      const mail = sent.mails[0]!;
-      expect(mail.to).toBe(board.email);
-      expect(mail.subject).toContain("Nora Notify");
-      expect(mail.html).toContain("Nora Notify");
-      expect(mail.html).not.toContain(token);
-      expect(mail.html).not.toContain(invitee.email);
-
-      // mail failure does not fail the accept
-      const invitee2 = await signUp("accept-notify2");
-      userIds.push(invitee2.userId);
-      const c2 = await child("Otto Notify");
-      expect((await invite(board, c2.id, invitee2.email)).status).toBe(201);
-      const token2 = tokenFrom(sent.mails.at(-1)!.html);
-      sent.fail = true;
-      const logged = vi.spyOn(logger, "error");
-      expect((await accept(invitee2, token2)).status).toBe(200);
-      expect(JSON.stringify(logged.mock.calls)).not.toContain(board.email);
-      logged.mockRestore();
-    });
-
-    it("no notification if the inviter lost board rights or was removed", async () => {
-      const inviter = await join("accept-notify-gone", "schriftfuehrer");
-      const invitee = await signUp("accept-notify-gone2");
-      userIds.push(invitee.userId);
-      const c = await child();
-      expect((await invite(inviter, c.id, invitee.email)).status).toBe(201);
-      const token = tokenFrom(sent.mails.at(-1)!.html);
-      await db.delete(clubRoles).where(eq(clubRoles.memberId, inviter.memberId));
-      sent.mails.length = 0;
-      expect((await accept(invitee, token)).status).toBe(200);
-      expect(sent.mails).toHaveLength(0);
     });
 
     it("an expired invitation is refused (404), also directly after the TTL", async () => {
@@ -566,7 +372,6 @@ describe("account linking by invitation (B4)", () => {
       const b = await invited(invitee.email, "Kind B");
       const results = await Promise.all([accept(invitee, a.token), accept(invitee, b.token)]);
       expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
-      expect((await body(results.find((r) => r.status === 409)!)).error.details.code).toBe("merge_conflict");
       const accounts = await db.select().from(member).where(and(eq(member.organizationId, club), eq(member.userId, invitee.userId)));
       expect(accounts).toHaveLength(1);
       const linked = [await stored(a.clubMemberId), await stored(b.clubMemberId)].filter((r) => r.memberId !== null);

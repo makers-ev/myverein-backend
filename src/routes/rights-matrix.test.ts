@@ -117,7 +117,6 @@ const SELF_SERVICE: Record<string, string> = {
   "POST /media": "image upload for damage reports / location photos (central media layer: magic bytes, EXIF strip, quota; the file stays unattached until a feature route claims it)",
   "PUT /club-members/me/photo": "own profile photo (minors are refused: the board sets them)",
   "DELETE /club-members/me/photo": "removing the own profile photo",
-  "POST /club-members/invites/preview": "previewing an own invitation (session only; the secret token travels in the body, the response is masked)",
   "POST /club-members/invites/accept": "accepting an own invitation (session only; bound to the secret token and the account e-mail, no club membership needed)",
   "POST /club-exit-requests": "the member's own cancellation (recording a cancellation for others and exclusions need members:write, asserted in the B6 test)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
