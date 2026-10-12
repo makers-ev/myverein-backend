@@ -173,3 +173,13 @@ export function buildMemberInviteEmail({ name, clubName, url, expiresOn }: { nam
     ctaUrl: escapeHtml(url),
   });
 }
+
+/** Wave 7 B4: tells the inviting board member that the invited member linked an account (name only, no token or profile data). */
+export function buildMemberLinkedEmail({ name, memberName, clubName, url }: { name: string; memberName: string; clubName: string; url: string }): string {
+  return layout({
+    greeting: `Hallo ${escapeHtml(name)},`,
+    bodyHtml: `<strong>${escapeHtml(memberName)}</strong> hat die Einladung angenommen und ein Konto mit dem Mitglied in <strong>${escapeHtml(clubName)}</strong> verknüpft. Du musst nichts weiter tun.`,
+    ctaLabel: `${escapeHtml(APP_NAME)} öffnen`,
+    ctaUrl: escapeHtml(url),
+  });
+}

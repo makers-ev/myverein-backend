@@ -317,8 +317,16 @@ clubMemberRoutes.post(
 
 const inviteSessionLimit = rateLimit({ windowMs: 60_000, max: 20, key: (c) => `invite-token:${c.get("user")?.id ?? "anonymous"}` });
 
+// Preferred: the token travels in the JSON body (not in URLs, access logs or browser history).
+clubMemberRoutes.post("/invites/preview", sessionGuard, inviteSessionLimit, zValidator("json", z.object({ token: z.string().min(16).max(200) }), validationHook), async (c) => {
+  const preview = await previewInvite(c.req.valid("json").token, c.get("user").email);
+  return c.json({ data: preview });
+});
+
+/** @deprecated Token in the query string; use POST /invites/preview. Same response. */
 clubMemberRoutes.get("/invites/preview", sessionGuard, inviteSessionLimit, zValidator("query", z.object({ token: z.string().min(16).max(200) }), validationHook), async (c) => {
   const preview = await previewInvite(c.req.valid("query").token, c.get("user").email);
+  c.header("Deprecation", "true");
   return c.json({ data: preview });
 });
 
@@ -1535,19 +1543,8 @@ function shapeInvite(invite: ClubMemberInviteRow) {
   return { id: invite.id, clubMemberId: invite.clubMemberId, email: invite.email, status, expiresAt: invite.expiresAt, acceptedAt: invite.acceptedAt, createdAt: invite.createdAt };
 }
 
-clubMemberRoutes.post("/:id/invite", inviteLimitPerUser, zValidator("json", inviteSchema, validationHook), async (c) => {
-  const clubId = c.get("clubId");
-  const actor = c.get("membership");
-  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
-
-  const target = await resolveClubMember(clubId, c.req.param("id"));
-  const { email } = c.req.valid("json");
-  if (target.memberId) throw new ConflictError("Member already has an account");
-
-  const { invite, token } = await createInvite(clubId, target.id, email, actor.id);
-
-  // Mail problems never block the invite (the board sees emailSent=false and can resend); the address is not logged.
-  let emailSent = false;
+/** Mail problems never block an invite (the board sees emailSent=false and can resend); the address is not logged. */
+async function sendInviteMail(clubId: string, target: { id: string; displayName: string }, invite: ClubMemberInviteRow, token: string, email: string): Promise<boolean> {
   try {
     const club = await db.query.organization.findFirst({ where: eq(organization.id, clubId) });
     const clubName = club?.name ?? "deinem Verein";
@@ -1562,11 +1559,43 @@ clubMemberRoutes.post("/:id/invite", inviteLimitPerUser, zValidator("json", invi
       }),
       attachments: [{ filename: "logo.png", path: LOGO_PATH, cid: LOGO_CID }],
     });
-    emailSent = true;
+    return true;
   } catch (err) {
     logger.error({ errorName: err instanceof Error ? err.name : "unknown", clubMemberId: target.id, inviteId: invite.id }, "[club-members] invite e-mail could not be sent");
+    return false;
   }
+}
 
+clubMemberRoutes.post("/:id/invite", inviteLimitPerUser, zValidator("json", inviteSchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  const actor = c.get("membership");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const target = await resolveClubMember(clubId, c.req.param("id"));
+  const { email } = c.req.valid("json");
+  if (target.memberId) throw new ConflictError("Member already has an account");
+
+  const { invite, token } = await createInvite(clubId, target.id, email, actor.id);
+
+  const emailSent = await sendInviteMail(clubId, target, invite, token, email);
+
+  return c.json({ data: { ...shapeInvite(invite), emailSent } }, 201);
+});
+
+// Resend: revokes the open invite (also an expired one) and issues a new token + mail to the same address. Shares the
+// 20/hour/user limit with the creation. 404 if there is no open invite.
+clubMemberRoutes.post("/:id/invite/resend", inviteLimitPerUser, async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+  const target = await resolveClubMember(clubId, c.req.param("id"));
+  const open = await db.query.clubMemberInvites.findFirst({
+    where: and(eq(clubMemberInvites.clubMemberId, target.id), isNull(clubMemberInvites.acceptedAt)),
+    orderBy: (t, { desc: latest }) => [latest(t.createdAt)],
+  });
+  if (!open || target.memberId) throw new NotFoundError("No open invitation");
+  const { invite, token } = await createInvite(clubId, target.id, open.email, c.get("membership").id);
+  await db.insert(auditLog).values({ eventType: "club_member.invite_resend", subjectId: target.id, payload: { clubId, inviteId: invite.id, previousInviteId: open.id, resentBy: c.get("membership").id } });
+  const emailSent = await sendInviteMail(clubId, target, invite, token, open.email);
   return c.json({ data: { ...shapeInvite(invite), emailSent } }, 201);
 });
 
