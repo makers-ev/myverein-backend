@@ -147,12 +147,18 @@ async function writeView(
 // --- own values -----------------------------------------------------------------------------------------------
 // Registered before the `/:id/...` routes so `me` is not taken for an id.
 
-memberCustomFieldRoutes.get("/me/custom-fields", async (c) => {
+// External guests (guardians) are not members of the club's data: no own custom field record, read or write.
+const requireAccountMember = createMiddleware<ClubEnv>(async (c, next) => {
+  if (c.get("membership").role === "guest") throw new ForbiddenError("External guests have no member profile fields");
+  await next();
+});
+
+memberCustomFieldRoutes.get("/me/custom-fields", requireAccountMember, async (c) => {
   const row = await ensureClubMember(db, c.get("membership"));
   return c.json({ data: { clubMemberId: row.id, fields: await buildView(c, row, false) } });
 });
 
-memberCustomFieldRoutes.patch("/me/custom-fields", writeLimiter, jsonLimit, zValidator("json", writeSchema, validationHook), async (c) => {
+memberCustomFieldRoutes.patch("/me/custom-fields", requireAccountMember, writeLimiter, jsonLimit, zValidator("json", writeSchema, validationHook), async (c) => {
   const row = await ensureClubMember(db, c.get("membership"));
   await writeView(c, row, c.req.valid("json").values, "self");
   return c.json({ data: { clubMemberId: row.id, fields: await buildView(c, row, false) } });

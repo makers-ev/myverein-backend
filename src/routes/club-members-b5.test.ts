@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { withConsent } from "./forms-test-support.js";
 
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -215,7 +216,7 @@ describe("member lifecycle, categories and age transitions (B5)", () => {
       expect(await db.query.clubMembers.findFirst({ where: eq(clubMembers.id, row.id) })).toMatchObject({ memberId: null, status: "ausgeschlossen" });
 
       // Application: 409 on approve, nothing created.
-      const apply = await app.request("/club-members/apply", { method: "POST", headers: { cookie: guest.cookie, "content-type": "application/json", "x-forwarded-for": randomUUID() }, body: JSON.stringify({ clubId: club }) });
+      const apply = await app.request("/club-members/apply", { method: "POST", headers: { cookie: guest.cookie, "content-type": "application/json", "x-forwarded-for": randomUUID() }, body: JSON.stringify(withConsent({ clubId: club })) });
       expect(apply.status).toBe(201);
       const appId = ((await json(apply)).data.application as Json).id as string;
       const approve = await app.request(`/club-applications/${appId}/approve?clubId=${club}`, { method: "POST", headers: { cookie: founder.cookie, "x-forwarded-for": randomUUID() } });

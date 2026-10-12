@@ -73,3 +73,14 @@ export const aufnahmeFields = (extra: unknown[] = []) => [
   { key: "privacy_consent", type: "consent", label: "Ich willige ein.", required: true },
   ...extra,
 ];
+
+/**
+ * Turns an old-style apply body (`category`, `birthDate`) into the form-builder one against the STANDARD application form
+ * (the legacy request is refused with `form_required` while the club's form asks for a consent). Bodies without a club
+ * (validation tests) and bodies that already carry answers pass through.
+ */
+export function withConsent<T extends Record<string, unknown>>(body: T): Record<string, unknown> {
+  if (!("clubId" in body || "clubSlug" in body) || "answers" in body || "submissionId" in body) return body;
+  const { category, birthDate, ...rest } = body;
+  return { ...rest, answers: { category: category ?? "aktiv", ...(birthDate ? { birth_date: birthDate } : {}), privacy_consent: true } };
+}

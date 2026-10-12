@@ -2,12 +2,14 @@ import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { closeDatabase, db } from "../db/client.js";
+import { closeDatabase, db, pool } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubApplications } from "../db/schema/club-applications.js";
+import { accountLinkLockKey } from "../lib/club-members.js";
+import { compensateAbortedApproval } from "../lib/form-applications.js";
 import { createInvite } from "../lib/member-invites.js";
 import { auth } from "../auth/auth.js";
-import { clubMembers } from "../db/schema/club-members.js";
+import { clubMembers, clubMemberStatusHistory } from "../db/schema/club-members.js";
 import { formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, memberFieldValues } from "../db/schema/forms.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { sweepRejectedFormFiles } from "../lib/form-sweeper.js";
@@ -128,17 +130,20 @@ describe("application <-> form integration (B6)", () => {
 
   // --- old clients ------------------------------------------------------------------------------------------
 
-  it("keeps old clients working: category/birthDate application without answers, approved with the legacy logic", async () => {
+  it("tells old clients to use the form while the club's form asks for a consent (409 form_required); legacy rows still decide with the old logic", async () => {
     const who = await newApplicant("legacy");
     const res = await apply(who, { clubSlug: plainClub.slug, category: "jugend", birthDate: "2010-04-05" });
-    expect(res.status).toBe(201);
-    const { application } = (await body(res)).data;
-    expect(application).toMatchObject({ category: "jugend", birthDate: "2010-04-05", status: "pending", formSubmissionId: null });
+    expect(res.status).toBe(409);
+    expect((await body(res)).error.details).toMatchObject({ code: "form_required" });
+    expect(await db.query.clubApplications.findFirst({ where: eq(clubApplications.userId, who.userId) })).toBeUndefined();
+    // Same for every club with the standard form and for the raw club id.
+    expect((await body(await apply(who, { clubId: plainClub.clubId }))).error.details.code).toBe("form_required");
 
+    // A legacy row that exists (filed before the form builder) is still decided with the old logic.
+    const [legacy] = await db.insert(clubApplications).values({ userId: who.userId, clubId: plainClub.clubId, category: "jugend", birthDate: "2010-04-05" }).returning();
     const list = (await body(await call(plainClub.founder, "/club-applications", { clubId: plainClub.clubId }))).data;
-    expect(list.find((a: { id: string }) => a.id === application.id)).toMatchObject({ legacy: true, formSubmissionId: null });
-
-    const approved = await decide(plainClub.founder, application.id, "approve", undefined, plainClub);
+    expect(list.find((a: { id: string }) => a.id === legacy!.id)).toMatchObject({ legacy: true, formSubmissionId: null });
+    const approved = await decide(plainClub.founder, legacy!.id, "approve", undefined, plainClub);
     expect(approved.status).toBe(200);
     const data = (await body(approved)).data;
     expect(data.mapping).toBeNull();
@@ -147,10 +152,8 @@ describe("application <-> form integration (B6)", () => {
     expect(data.membership.category).toBe("jugend");
   });
 
-  it("refuses categories an applicant may not choose on the legacy path, and unknown clubs", async () => {
+  it("answers unknown clubs with 404 and counts every apply shape against the hourly limit", async () => {
     const who = await newApplicant("legacybad");
-    const res = await apply(who, { clubSlug: plainClub.slug, category: "ehrenmitglied" });
-    expect(res.status).toBe(422);
     expect((await apply(who, { clubId: "no-such-club" })).status).toBe(404);
     expect((await apply(who, { clubSlug: "no-such-club" })).status).toBe(404);
   });
@@ -170,7 +173,7 @@ describe("application <-> form integration (B6)", () => {
     expect((await body(second)).error).toMatchObject({ code: "APPLICATION_PENDING" });
     const legacy = await apply(who, { clubSlug: club.slug });
     expect(legacy.status).toBe(409);
-    expect((await body(legacy)).error.code).toBe("APPLICATION_PENDING");
+    expect((await body(legacy)).error.details.code).toBe("form_required");
   });
 
   it("validates the answers against the published form (422 with codes, no values echoed) and rejects a stale version", async () => {
@@ -277,6 +280,12 @@ describe("application <-> form integration (B6)", () => {
     expect(entry!.payload).toMatchObject({ formSubmissionId: submissionId, consent: { consentFieldKeys: ["privacy_consent"] } });
     const serialized = JSON.stringify(entry!.payload);
     for (const value of ["Anna", "Muster", "Hauptstr", "Tuba", SECRET, "0123"]) expect(serialized).not.toContain(value);
+    // Custom field writes of the mapping leave the same trail as a board write: definition ids, no values.
+    const writes = (await db.select().from(auditLog).where(and(eq(auditLog.eventType, "member_field.write"), eq(auditLog.subjectId, row.id))));
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.payload).toMatchObject({ via: "application", changedBy: expect.any(String) });
+    expect((writes[0]!.payload as { fieldIds: string[] }).fieldIds.sort()).toEqual([shirtFieldId, instrumentFieldId].sort());
+    expect(JSON.stringify(writes[0]!.payload)).not.toContain("Tuba");
   });
 
   it("applies the applicant's category when the board does not override it, and rejects a bad override before anything is created", async () => {
@@ -349,13 +358,20 @@ describe("application <-> form integration (B6)", () => {
     const { data } = await body(await apply(who, { clubSlug: club.slug, submissionId }));
 
     expect((await decide(club.founder, data.application.id, "reject", { note: "x".repeat(1001) })).status).toBe(422);
-    const rejected = await decide(club.founder, data.application.id, "reject", { note: "Leider kein Platz mehr." });
+    expect((await decide(club.founder, data.application.id, "reject", { applicantMessage: "x".repeat(1001) })).status).toBe(422);
+    const rejected = await decide(club.founder, data.application.id, "reject", { note: "INTERN: zu viele Verspaetungen.", applicantMessage: "Leider kein Platz mehr." });
     expect(rejected.status).toBe(200);
     expect((await body(rejected)).data.application).toMatchObject({ status: "rejected" });
     expect(await memberRow(who.userId)).toBeUndefined();
 
     const sub = await db.query.formSubmissions.findFirst({ where: eq(formSubmissions.id, submissionId) });
-    expect(sub).toMatchObject({ status: "rejected", decisionNote: "Leider kein Platz mehr." });
+    expect(sub).toMatchObject({ status: "rejected", decisionNote: "Leider kein Platz mehr.", decisionInternalNote: "INTERN: zu viele Verspaetungen." });
+    // The applicant sees the message, never the internal note.
+    for (const path of [`/form-submissions/${submissionId}`, "/form-submissions/mine"]) {
+      const view = await (await call(who, path)).text();
+      expect(view).toContain("Leider kein Platz mehr.");
+      expect(view).not.toContain("INTERN");
+    }
     expect(await db.query.formSubmissionFiles.findMany({ where: eq(formSubmissionFiles.submissionId, submissionId) })).toHaveLength(1);
 
     // Nothing to delete yet ...
@@ -398,7 +414,9 @@ describe("application <-> form integration (B6)", () => {
     expect(res.status).toBe(200);
     const row = (await memberRow(who.userId))!;
     expect(row).toMatchObject({ id: before.id, status: "aktiv", leftAt: null, firstName: "Zurück", lastName: "Gekehrt", memberNumber: before.memberNumber });
-    expect((await body(res)).data.application).toMatchObject({ clubMemberId: before.id });
+    const readmitted = await body(res);
+    expect(readmitted.data.application).toMatchObject({ clubMemberId: before.id });
+    expect(readmitted.data.membership.category).toBe("aktiv");
     // The member's old custom value was overwritten by the new application, not duplicated.
     expect(await db.select().from(memberFieldValues).where(and(eq(memberFieldValues.clubMemberId, before.id), eq(memberFieldValues.fieldId, shirtFieldId)))).toHaveLength(1);
   });
@@ -510,6 +528,43 @@ describe("application <-> form integration (B6)", () => {
       expect(application.status).toBe(approve.status === 200 ? "approved" : "pending");
       if (application.clubMemberId) expect(await db.query.clubMembers.findFirst({ where: eq(clubMembers.id, application.clubMemberId) })).toBeDefined();
     }
+  });
+
+  it("compensation of an aborted approval removes only the untouched creation and never under a held account lock", async () => {
+    const mk = async (label: string) => {
+      const who = await newApplicant(label);
+      const account = (await auth.api.addMember({ body: { userId: who.userId, organizationId: club.clubId, role: "member" } }))!;
+      return { who, account, ref: { id: account.id, organizationId: club.clubId, userId: who.userId } };
+    };
+    const accountExists = async (id: string) => Boolean(await db.query.member.findFirst({ where: (m, { eq: same }) => same(m.id, id) }));
+
+    // Pristine hook-created row: removed together with the membership.
+    const fresh = await mk("comp1");
+    expect(await compensateAbortedApproval(fresh.ref)).toBe(true);
+    expect(await accountExists(fresh.account.id)).toBe(false);
+    expect(await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, fresh.account.id) })).toBeUndefined();
+
+    // A link / merge entry in the history (as written by the invitation accept): nothing is deleted.
+    const linked = await mk("comp2");
+    const row = (await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, linked.account.id) }))!;
+    await db.insert(clubMemberStatusHistory).values({ clubMemberId: row.id, fromStatus: "aktiv", toStatus: "aktiv", effectiveOn: "2024-01-01", reason: "merged" });
+    expect(await compensateAbortedApproval(linked.ref)).toBe(false);
+    expect(await accountExists(linked.account.id)).toBe(true);
+    expect(await db.query.clubMembers.findFirst({ where: eq(clubMembers.id, row.id) })).toBeDefined();
+
+    // Somebody (an invitation accept) holds the (club, account) lock: skipped, not waited for, not deleted.
+    const busy = await mk("comp3");
+    const holder = await pool.connect();
+    try {
+      await holder.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [accountLinkLockKey(club.clubId, busy.who.userId)]);
+      expect(await compensateAbortedApproval(busy.ref)).toBe(false);
+    } finally {
+      await holder.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [accountLinkLockKey(club.clubId, busy.who.userId)]);
+      holder.release();
+    }
+    expect(await accountExists(busy.account.id)).toBe(true);
+    // Free again: now it is removed.
+    expect(await compensateAbortedApproval(busy.ref)).toBe(true);
   });
 
   // --- privacy ---------------------------------------------------------------------------------------------------------

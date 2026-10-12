@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 
 import { clubApplications, type ClubApplicationRow } from "../db/schema/club-applications.js";
-import { clubMembers, type ClubMemberRow } from "../db/schema/club-members.js";
+import { member } from "../auth/auth-schema.js";
+import { db } from "../db/client.js";
+import { clubMembers, clubMemberStatusHistory, type ClubMemberRow } from "../db/schema/club-members.js";
 import { forms, formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, type FormRow, type FormSubmissionRow, type FormVersionRow } from "../db/schema/forms.js";
-import type { DbExecutor } from "./club-members.js";
+import { auditLog } from "../db/schema/audit-log.js";
+import { accountLinkLockKey, type DbExecutor } from "./club-members.js";
 import { validateCustomValue, writeValues } from "./custom-fields.js";
 import { ConflictError, isUniqueViolation, NotFoundError } from "./errors.js";
 import { MASTER_TARGETS, planAcceptance } from "./form-acceptance.js";
@@ -175,6 +178,10 @@ export async function applyAcceptance(
     }
     await writeValues(tx, clubMemberId, decidedBy, changes);
     mapping.customFields = changes.length;
+    if (changes.length > 0) {
+      // Same trail as a board write: definition ids only, never values.
+      await tx.insert(auditLog).values({ eventType: "member_field.write", subjectId: clubMemberId, payload: { clubId, clubMemberId, fieldIds: changes.map((x) => x.fieldId), changedBy: decidedBy, via: "application" } });
+    }
   }
 
   const now = new Date();
@@ -187,9 +194,10 @@ export async function applyAcceptance(
 }
 
 /** The board rejected the application: the submission keeps its answers (record), its files stay for the retention window. */
-export async function rejectSubmission(tx: DbExecutor, context: DecisionContext, decidedBy: string, note: string | null): Promise<void> {
+export async function rejectSubmission(tx: DbExecutor, context: DecisionContext, decidedBy: string, notes: { applicantMessage: string | null; internalNote: string | null }): Promise<void> {
   const now = new Date();
-  await tx.update(formSubmissions).set({ status: "rejected", decidedAt: now, decidedBy, decisionNote: note, updatedAt: now }).where(eq(formSubmissions.id, context.sub.id));
+  // `decision_note` is what the applicant sees; the internal note stays with the board.
+  await tx.update(formSubmissions).set({ status: "rejected", decidedAt: now, decidedBy, decisionNote: notes.applicantMessage, decisionInternalNote: notes.internalNote, updatedAt: now }).where(eq(formSubmissions.id, context.sub.id));
 }
 
 /**
@@ -210,4 +218,33 @@ export function asDecisionBusy(err: unknown): unknown {
   const code = (err as { code?: string })?.code ?? (err as { cause?: { code?: string } })?.cause?.code;
   if (code === "55P03" || code === "40P01") return new ConflictError("The member record is being changed by someone else; try again in a moment", { details: { code: "decision_busy" } });
   return err;
+}
+
+/**
+ * Undoes the account membership that an aborted approval created OUTSIDE its transaction -- but only when that is
+ * provably still our own, untouched creation: under the (club, account) advisory lock (try-lock: if somebody holds it, e.g.
+ * an invitation merge, nothing is deleted), the `club_members` row must still be linked to exactly this membership and have
+ * no history beyond its creation (a link or merge entry has a `from_status`). In any other case the rows stay and the
+ * caller logs it -- a half-finished approval is recoverable, a deleted merged member is not. Returns whether it removed them.
+ */
+export async function compensateAbortedApproval(created: { id: string; organizationId: string; userId: string }): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const [lock] = (await tx.execute<{ ok: boolean }>(sql`SELECT pg_try_advisory_xact_lock(hashtextextended(${accountLinkLockKey(created.organizationId, created.userId)}, 0)) AS ok`)).rows;
+    if (!lock?.ok) return false;
+    const rows = await tx.select().from(clubMembers).where(eq(clubMembers.memberId, created.id)).for("update");
+    if (rows.length > 1) return false;
+    const row = rows[0];
+    if (row) {
+      const [touched] = await tx
+        .select({ id: clubMemberStatusHistory.id })
+        .from(clubMemberStatusHistory)
+        .where(and(eq(clubMemberStatusHistory.clubMemberId, row.id), isNotNull(clubMemberStatusHistory.fromStatus)))
+        .limit(1);
+      if (touched || row.lastUserId !== created.userId) return false;
+      // The club_members row goes first: its member_id FK is ON DELETE SET NULL and would leave an account-less ghost behind.
+      await tx.delete(clubMembers).where(eq(clubMembers.id, row.id));
+    }
+    await tx.delete(member).where(eq(member.id, created.id));
+    return true;
+  });
 }

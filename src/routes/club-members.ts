@@ -42,7 +42,8 @@ import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADER
 import { nextMemberNumber } from "../lib/member-number.js";
 import { memberCustomFieldRoutes } from "./club-member-custom-fields.js";
 import { applicationPendingError } from "../lib/form-applications.js";
-import { ANSWERS_BODY_LIMIT, applicantCategories, assertMayApply, ensureFormBasics, submissionsPerHour } from "../lib/forms.js";
+import type { FormField } from "../lib/form-schema.js";
+import { ANSWERS_BODY_LIMIT, applicantCategories, assertMayApply, ensureFormBasics, findCurrentForm, submissionsPerHour } from "../lib/forms.js";
 import { applyWithForm } from "./form-submissions.js";
 import { canReadValue } from "../lib/custom-field-access.js";
 import { listDefinitions, MAX_CUSTOM_FIELDS_PER_CLUB } from "../lib/custom-fields.js";
@@ -283,9 +284,11 @@ clubMemberRoutes.post(
     const clubId = (await db.query.organization.findFirst({ where: body.clubId ? eq(organization.id, body.clubId) : eq(organization.slug, body.clubSlug!), columns: { id: true } }))?.id;
     if (!clubId) throw new NotFoundError("Club not found");
 
+    // Hourly per-user limit for every shape (an application creates rows and, with answers, a submission).
+    await formApplyLimiter(c, async () => undefined);
+
     if (body.submissionId !== undefined || body.answers !== undefined || body.formVersionId !== undefined) {
       if (body.submissionId === undefined && body.answers === undefined) throw new ValidationError("answers or submissionId is required together with formVersionId");
-      await formApplyLimiter(c, async () => undefined);
       const filed = await applyWithForm({ userId: currentUser.id, clubId, formVersionId: body.formVersionId, answers: body.answers, submissionId: body.submissionId });
       if (filed.created) {
         await db.insert(auditLog).values({
@@ -300,6 +303,13 @@ clubMemberRoutes.post(
     // Legacy application (old clients). Same preconditions as the form path, under the same per-(user, club) lock so
     // parallel applies, submits and withdrawals of one user serialize.
     await ensureFormBasics(clubId);
+    // The club's published form asks for a consent (the standard form does, and a published application form must): the old
+    // category/birthDate request cannot carry it, so the client has to render the form. Legacy only for a club whose form
+    // explicitly has no mandatory consent.
+    const current = await findCurrentForm(clubId, "aufnahme");
+    if (current && (current.version.fields as FormField[]).some((f) => f.type === "consent" && f.required === true)) {
+      throw new ConflictError("This club's application needs the application form (with the privacy consent); update the app or website", { details: { code: "form_required", formVersionId: current.version.id } });
+    }
     let application;
     try {
       application = await db.transaction(async (tx) => {
@@ -851,7 +861,7 @@ const MAX_EXPORT_ROWS = 50_000;
 
 const exportQuerySchema = z.object({
   // Standard columns plus `cf:<key>` for custom fields (opt-in, never part of the default selection).
-  columns: z.string().transform(csv).pipe(z.array(z.string().max(50)).max(EXPORT_COLUMN_KEYS.length + MAX_CUSTOM_FIELDS_PER_CLUB).optional()).optional(),
+  columns: z.string().transform(csv).pipe(z.array(z.string().max(64)).max(EXPORT_COLUMN_KEYS.length + MAX_CUSTOM_FIELDS_PER_CLUB).optional()).optional(),
   status: z.string().transform(csv).pipe(z.array(z.enum(MEMBER_STATUSES)).max(MEMBER_STATUSES.length).optional()).optional(),
   category: z.string().transform(csv).pipe(z.array(z.string().max(50)).max(20).optional()).optional(),
   departmentId: z.string().uuid().optional(),
@@ -893,11 +903,10 @@ async function exportMembers(c: Context<ClubEnv>) {
     if (denied.length > 0) throw new ForbiddenError("Missing members:read_sensitive permission for the requested columns", { details: { columns: denied } });
   }
   // Custom field columns: only live definitions the exporter may read values of (same rules as the member profile).
-  const customDefs = customKeys.length === 0 ? [] : (await listDefinitions(clubId)).filter((d) => d.archivedAt === null && customKeys.includes(`${CUSTOM_PREFIX}${d.key}`));
+  // Unknown, archived and unreadable fields give the same answer, so the export does not reveal which keys exist.
+  const customDefs = customKeys.length === 0 ? [] : (await listDefinitions(clubId)).filter((d) => d.archivedAt === null && customKeys.includes(`${CUSTOM_PREFIX}${d.key}`) && canReadValue(d, { roleTypes: c.get("clubRoleTypes"), isSelf: false }));
   const unknownCustom = customKeys.filter((k) => !customDefs.some((d) => `${CUSTOM_PREFIX}${d.key}` === k));
   if (unknownCustom.length > 0) throw new ValidationError("Unknown export column", { details: { code: "unknown_column", columns: unknownCustom, allowed: EXPORT_COLUMN_KEYS } });
-  const unreadable = customDefs.filter((d) => !canReadValue(d, { roleTypes: c.get("clubRoleTypes"), isSelf: false })).map((d) => `${CUSTOM_PREFIX}${d.key}`);
-  if (unreadable.length > 0) throw new ForbiddenError("Missing permission for the requested custom field columns", { details: { columns: unreadable } });
 
   const today = todayBerlin();
   const conditions: Array<SQL | undefined> = [eq(clubMembers.clubId, clubId)];

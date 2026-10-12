@@ -13,7 +13,7 @@ import { assertRejoinAllowed, type DbExecutor, ensureClubMember, isUuid, lockCat
 import type { MemberCategoryRow } from "../db/schema/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
-import { applyAcceptance, asDecisionBusy, assertSubmissionDecidable, consentEvidence, lockDecisionSubmission, rejectSubmission, type DecisionContext, type MappingReport } from "../lib/form-applications.js";
+import { applyAcceptance, compensateAbortedApproval, asDecisionBusy, assertSubmissionDecidable, consentEvidence, lockDecisionSubmission, rejectSubmission, type DecisionContext, type MappingReport } from "../lib/form-applications.js";
 import { purgeMediaFile } from "../lib/media.js";
 import { cleanText } from "../lib/text-policy.js";
 import { logger } from "../lib/logger.js";
@@ -80,7 +80,11 @@ const approveBodySchema = z.object({
   categoryId: z.uuid().optional(),
   categoryKey: z.string().trim().min(1).max(50).optional(),
 });
-const rejectBodySchema = z.object({ note: cleanText(z.string().trim().max(1000), true).nullish() });
+const rejectBodySchema = z.object({
+  // Internal note: stays with the board. `applicantMessage` is the only text the applicant gets to see.
+  note: cleanText(z.string().trim().max(1000), true).nullish(),
+  applicantMessage: cleanText(z.string().trim().max(1000), true).nullish(),
+});
 
 type CategoryOverride = { id: string } | { key: string } | null;
 const overrideOf = (body: z.infer<typeof approveBodySchema>): CategoryOverride => (body.categoryId ? { id: body.categoryId } : body.categoryKey ? { key: body.categoryKey } : null);
@@ -246,18 +250,14 @@ clubApplicationRoutes.post("/:id/approve", decisionBodyLimit, async (c) => {
     };
     return c.json({ data: { application: result.application, member: createdMember, membership, clubMember, mapping: result.mapping } });
   } catch (err) {
-    // The member row (and the club_members row the hook created for it) was created outside the transaction --
-    // best-effort removal so a failed approval doesn't leave a half-joined member while the application is still
-    // pending. The club_members row goes first: its member_id FK is ON DELETE SET NULL and would otherwise leave
-    // an account-less ghost member behind.
-    await db
-      .delete(clubMembers)
-      .where(eq(clubMembers.memberId, createdMember.id))
-      .catch((cleanupErr) => logger.error({ err: cleanupErr, memberId: createdMember.id }, "[club-applications] failed to remove club member after aborted approval"));
-    await db
-      .delete(member)
-      .where(eq(member.id, createdMember.id))
-      .catch((cleanupErr) => logger.error({ err: cleanupErr, memberId: createdMember.id }, "[club-applications] failed to remove member after aborted approval"));
+    // The account membership (and the hook's club_members row) was created outside the transaction. Remove it again only
+    // if it is provably still our untouched creation and nobody (e.g. an invitation merge) holds the account lock; after
+    // a lock timeout / deadlock we never delete blindly.
+    const removed = await compensateAbortedApproval({ id: createdMember.id, organizationId: clubId, userId: application.userId }).catch((cleanupErr) => {
+      logger.error({ err: cleanupErr, memberId: createdMember.id }, "[club-applications] failed to remove member after aborted approval");
+      return false;
+    });
+    if (!removed) logger.warn({ memberId: createdMember.id, applicationId: application.id }, "[club-applications] aborted approval left the new membership in place (changed or locked meanwhile)");
     throw asDecisionBusy(err);
   }
 });
@@ -326,6 +326,8 @@ async function readmit(
     });
     await Promise.all(result.purge.map((key) => purgeMediaFile(key)));
     const { clubMember } = result;
+    // The category the member actually has now (board override / mapped answer / unchanged), not the applicant's request.
+    const actual = clubMember.categoryId ? await db.query.memberCategories.findFirst({ where: (t, { eq: same }) => same(t.id, clubMember.categoryId!), columns: { key: true } }) : undefined;
     return {
       data: {
         application: result.application,
@@ -334,7 +336,7 @@ async function readmit(
           id: clubMember.id,
           memberId: account.id,
           memberNumber: clubMember.memberNumber,
-          category: application.category,
+          category: actual?.key ?? application.category,
           joinedAt: clubMember.joinedAt,
           leftAt: clubMember.leftAt,
           birthDate: clubMember.birthDate,
@@ -360,7 +362,7 @@ clubApplicationRoutes.post("/:id/reject", decisionBodyLimit, async (c) => {
   const clubId = c.get("clubId");
   const decider = c.get("membership");
 
-  const { note } = await readOptionalBody(c, rejectBodySchema);
+  const { note, applicantMessage } = await readOptionalBody(c, rejectBodySchema);
   const application = await loadPendingApplication(c.req.param("id"), clubId);
   await assertSubmissionDecidable(db, application);
 
@@ -374,12 +376,12 @@ clubApplicationRoutes.post("/:id/reject", decisionBodyLimit, async (c) => {
         .where(and(eq(clubApplications.id, application.id), eq(clubApplications.status, "pending")))
         .returning();
       if (!row) throw new ConflictError("Application has already been decided");
-      if (context) await rejectSubmission(tx, context, decider.id, note?.trim() ? note.trim() : null);
+      if (context) await rejectSubmission(tx, context, decider.id, { applicantMessage: applicantMessage?.trim() || null, internalNote: note?.trim() || null });
 
       await tx.insert(auditLog).values({
         eventType: "club_application.reject",
         subjectId: application.id,
-        payload: { clubId, userId: application.userId, decidedBy: decider.id, ...(context ? { formSubmissionId: context.sub.id, hasNote: Boolean(note?.trim()) } : {}) },
+        payload: { clubId, userId: application.userId, decidedBy: decider.id, ...(context ? { formSubmissionId: context.sub.id, hasNote: Boolean(note?.trim()), hasApplicantMessage: Boolean(applicantMessage?.trim()) } : {}) },
       });
       return row;
     });

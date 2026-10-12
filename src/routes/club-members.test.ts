@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { withConsent } from "./forms-test-support.js";
 
 import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
@@ -109,7 +110,7 @@ describe("club-members scoping and permissions", () => {
     const applyRes = await app.request("/club-members/apply", {
       method: "POST",
       headers: { cookie: applicant.cookie, "content-type": "application/json" },
-      body: JSON.stringify({ clubId: clubAId, category: "passiv", birthDate: "2000-02-03" }),
+      body: JSON.stringify(withConsent({ clubId: clubAId, category: "passiv", birthDate: "2000-02-03" })),
     });
     expect(applyRes.status).toBe(201);
     const { data } = (await applyRes.json()) as { data: { application: { id: string; status: string; category: string; clubId: string; userId: string; birthDate: string } } };
@@ -131,7 +132,7 @@ describe("club-members scoping and permissions", () => {
     const again = await app.request("/club-members/apply", {
       method: "POST",
       headers: { cookie: applicant.cookie, "content-type": "application/json" },
-      body: JSON.stringify({ clubId: clubAId }),
+      body: JSON.stringify(withConsent({ clubId: clubAId })),
     });
     expect(again.status).toBe(409);
 
@@ -144,7 +145,7 @@ describe("club-members scoping and permissions", () => {
     const applyRes = await app.request("/club-members/apply", {
       method: "POST",
       headers: { cookie: applicant.cookie, "content-type": "application/json" },
-      body: JSON.stringify({ clubSlug: `club-a-${suffix}` }),
+      body: JSON.stringify(withConsent({ clubSlug: `club-a-${suffix}` })),
     });
     expect(applyRes.status).toBe(201);
     const { data } = (await applyRes.json()) as { data: { application: { clubId: string; category: string } } };
@@ -163,7 +164,7 @@ describe("club-members scoping and permissions", () => {
     const res = await app.request("/club-members/apply", {
       method: "POST",
       headers: { cookie: applicant.cookie, "content-type": "application/json" },
-      body: JSON.stringify({ clubSlug: "does-not-exist" }),
+      body: JSON.stringify(withConsent({ clubSlug: "does-not-exist" })),
     });
     expect(res.status).toBe(404);
 
@@ -176,7 +177,7 @@ describe("club-members scoping and permissions", () => {
     const res = await app.request("/club-members/apply", {
       method: "POST",
       headers: { cookie: applicant.cookie, "content-type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify(withConsent({})),
     });
     expect(res.status).toBe(422);
 
@@ -187,7 +188,7 @@ describe("club-members scoping and permissions", () => {
     const res = await app.request("/club-members/apply", {
       method: "POST",
       headers: { cookie: cookieA, "content-type": "application/json" },
-      body: JSON.stringify({ clubId: clubAId }),
+      body: JSON.stringify(withConsent({ clubId: clubAId })),
     });
     expect(res.status).toBe(409);
   });

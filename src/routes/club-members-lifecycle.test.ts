@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { withConsent } from "./forms-test-support.js";
 
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -245,7 +246,7 @@ describe("club members: review fixes (Wave 7)", () => {
       const apply = await app.request("/club-members/apply", {
         method: "POST",
         headers: { cookie: applicant.cookie, "content-type": "application/json", "x-forwarded-for": randomUUID() },
-        body: JSON.stringify({ clubId: club }),
+        body: JSON.stringify(withConsent({ clubId: club })),
       });
       const applicationId = ((await apply.json()) as { data: { application: { id: string } } }).data.application.id;
 

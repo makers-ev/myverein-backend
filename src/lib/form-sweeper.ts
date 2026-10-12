@@ -91,16 +91,21 @@ export async function sweepRejectedFormFiles(now = Date.now()): Promise<number> 
   let files = 0;
   for (const { id } of due) {
     const purge: string[] = [];
-    await db.transaction(async (tx) => {
-      const [locked] = await tx.select().from(formSubmissions).where(and(eq(formSubmissions.id, id), eq(formSubmissions.status, "rejected"))).for("update", { skipLocked: true });
-      if (!locked) return;
-      const rows = await tx.select().from(formSubmissionFiles).where(eq(formSubmissionFiles.submissionId, id));
-      if (rows.length === 0) return;
-      purge.push(...(await removeFiles(tx, rows)));
-      files += rows.length;
-      await tx.insert(auditLog).values({ eventType: "form_submission.files_expired", subjectId: id, payload: { clubId: locked.clubId, fileCount: rows.length, reason: "rejected_retention" } });
-    });
-    await Promise.all(purge.map((key) => purgeMediaFile(key)));
+    // One broken entry must not stop the others (nor the sweeper's other jobs).
+    try {
+      await db.transaction(async (tx) => {
+        const [locked] = await tx.select().from(formSubmissions).where(and(eq(formSubmissions.id, id), eq(formSubmissions.status, "rejected"))).for("update", { skipLocked: true });
+        if (!locked) return;
+        const rows = await tx.select().from(formSubmissionFiles).where(eq(formSubmissionFiles.submissionId, id));
+        if (rows.length === 0) return;
+        purge.push(...(await removeFiles(tx, rows)));
+        files += rows.length;
+        await tx.insert(auditLog).values({ eventType: "form_submission.files_expired", subjectId: id, payload: { clubId: locked.clubId, fileCount: rows.length, reason: "rejected_retention" } });
+      });
+      await Promise.all(purge.map((key) => purgeMediaFile(key)));
+    } catch (err) {
+      logger.error({ err, submissionId: id }, "[forms] could not expire the files of a rejected application");
+    }
   }
   return files;
 }

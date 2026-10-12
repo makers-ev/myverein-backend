@@ -276,8 +276,9 @@ describe("member custom fields (B7)", () => {
     expect((await call(m("plain2"), `/club-members/${formerRowId}/custom-fields`, { clubId: cid() })).status).toBe(404);
     expect((await call(board(), `/club-members/${formerRowId}/custom-fields`, { clubId: cid() })).status).toBe(200);
     expect((await call(board(), "/club-members/not-an-id/custom-fields", { clubId: cid() })).status).toBe(404);
-    // An external guest reads its own (empty) record only.
-    expect((await call(guest, "/club-members/me/custom-fields", { clubId: cid() })).status).toBe(200);
+    // An external guest has no profile fields of its own (read and write refused).
+    expect((await call(guest, "/club-members/me/custom-fields", { clubId: cid() })).status).toBe(403);
+    expect((await patchMe(guest, { f_mitglied: "x" })).status).toBe(403);
   });
 
   // --- archive / delete / type ------------------------------------------------------------------------------------
@@ -300,6 +301,40 @@ describe("member custom fields (B7)", () => {
     expect(removeUsed.status).toBe(409);
     expect((await body(removeUsed)).error.details.code).toBe("option_in_use");
     expect((await call(board(), `/member-fields/${ids.f_multi}`, { method: "PATCH", clubId: cid(), body: { options: [{ value: "a", label: "A" }, { value: "b", label: "B" }, { value: "c", label: "C" }, { value: "d", label: "D" }] } })).status).toBe(200);
+  });
+
+  it("protects recorded data: lowering sensitive or widening visibility needs members:read_sensitive, and sensitive stays once there are values", async () => {
+    const patch = (who: Account, id: string, payload: Record<string, unknown>) => call(who, `/member-fields/${id}`, { method: "PATCH", clubId: cid(), body: payload });
+    const sensEmpty = (await body(await define({ key: "h_sens_empty", label: "Leer", type: "text", sensitive: true, visibleTo: "vorstand" }))).data.id as string;
+    // schriftfuehrer has forms:write but not members:read_sensitive: neither lowering nor widening a sensitive field.
+    expect((await patch(m("sf"), sensEmpty, { sensitive: false })).status).toBe(403);
+    expect((await patch(m("sf"), sensEmpty, { visibleTo: "mitglied" })).status).toBe(403);
+    expect((await patch(m("sf"), sensEmpty, { label: "Neu", sortOrder: 3 })).status).toBe(200);
+    expect((await db.query.memberFieldDefinitions.findFirst({ where: eq(memberFieldDefinitions.id, sensEmpty) }))).toMatchObject({ sensitive: true, visibleTo: "vorstand", label: "Neu" });
+    // The holder of members:read_sensitive may lower it while nothing is recorded; the audit shows old/new flags, no values.
+    expect((await patch(board(), sensEmpty, { sensitive: false })).status).toBe(200);
+    const [entry] = (await db.select().from(auditLog).where(and(eq(auditLog.eventType, "member_field.update"), eq(auditLog.subjectId, sensEmpty)))).slice(-1);
+    expect(entry!.payload).toMatchObject({ changed: ["sensitive"], flags: { sensitive: { from: true, to: false } } });
+
+    // With values it is one-way, whoever asks.
+    const sensUsed = (await body(await define({ key: "h_sens_used", label: "Belegt", type: "text", sensitive: true }))).data.id as string;
+    expect((await put(board(), { h_sens_used: SECRET })).status).toBe(200);
+    const locked = await patch(board(), sensUsed, { sensitive: false });
+    expect(locked.status).toBe(409);
+    expect((await body(locked)).error.details.code).toBe("sensitive_locked");
+    expect((await patch(m("sf"), sensUsed, { sensitive: false })).status).toBe(403);
+    expect((await db.query.memberFieldDefinitions.findFirst({ where: eq(memberFieldDefinitions.id, sensUsed) }))!.sensitive).toBe(true);
+
+    // A non-sensitive field that already holds values: widening needs the right, narrowing and other edits do not.
+    const plainUsed = (await body(await define({ key: "h_plain_used", label: "Plain", type: "text", visibleTo: "vorstand" }))).data.id as string;
+    expect((await put(board(), { h_plain_used: "wert" })).status).toBe(200);
+    expect((await patch(m("sf"), plainUsed, { visibleTo: "mitglied" })).status).toBe(403);
+    expect((await patch(board(), plainUsed, { visibleTo: "funktionstraeger" })).status).toBe(200);
+    expect((await patch(m("sf"), plainUsed, { visibleTo: "vorstand" })).status).toBe(200);
+    // Without values anybody with forms:write may widen a non-sensitive field.
+    const plainEmpty = (await body(await define({ key: "h_plain_empty", label: "Leer2", type: "text", visibleTo: "vorstand" }))).data.id as string;
+    expect((await patch(m("sf"), plainEmpty, { visibleTo: "mitglied" })).status).toBe(200);
+    expect(JSON.stringify(entry!.payload)).not.toContain(SECRET);
   });
 
   it("deletes a definition without values and archives one with values (values stay, nobody reads or writes them)", async () => {
@@ -341,12 +376,15 @@ describe("member custom fields (B7)", () => {
     expect(text).toContain("Allergien");
     expect(text).toContain("'=1+1");
     // schriftfuehrer (members:write only): not the sensitive column.
+    // Unreadable and unknown give the same answer (no existence leak).
     const denied = await csvOf(m("sf"), "displayName,cf:f_sens");
-    expect(denied.status).toBe(403);
+    expect(denied.status).toBe(422);
+    expect((await body(await csvOf(m("sf"), "displayName,cf:nope_nope"))).error.details.code).toBe("unknown_column");
+    expect((await body(await csvOf(m("sf"), "displayName,cf:f_sens"))).error.details.code).toBe("unknown_column");
     expect(await denied.text()).not.toContain(SECRET);
     expect((await csvOf(m("sf"), "displayName,cf:f_funk")).status).toBe(200);
     expect((await csvOf(board(), "cf:nope")).status).toBe(422);
-    expect((await csvOf(m("plain2"), "displayName,cf:f_mitglied")).status).toBe(403);
+    expect((await csvOf(m("plain2"), "displayName,cf:f_mitglied")).status).toBe(403); // plain members cannot export at all
     // Not part of the default selection.
     expect(await (await call(board(), "/club-members/export", { clubId: cid() })).text()).not.toContain("Lizenz");
   });

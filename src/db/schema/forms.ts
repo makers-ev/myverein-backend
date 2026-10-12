@@ -115,7 +115,10 @@ export const formSubmissions = pgTable(
     submittedAt: timestamp("submitted_at", { withTimezone: true }),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     decidedBy: text("decided_by").references(() => member.id, { onDelete: "set null" }),
+    // Message of the board TO the applicant (shown in the applicant's own submission view).
     decisionNote: text("decision_note"),
+    // Internal note of the board; never part of an applicant-facing response.
+    decisionInternalNote: text("decision_internal_note"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

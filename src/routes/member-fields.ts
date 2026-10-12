@@ -99,6 +99,9 @@ memberFieldRoutes.get("/", async (c) => {
   return c.json({ data: visible.map((d) => dto(d)) });
 });
 
+/** Who may read a field, narrow to wide (an unknown value counts as the narrowest). */
+const VISIBILITY_RANK: Record<string, number> = { vorstand: 0, funktionstraeger: 1, mitglied: 2 };
+
 const optionsSchema = z.array(z.object({ value: z.string(), label: z.string() }).strict()).max(100);
 
 const createSchema = z
@@ -169,6 +172,18 @@ memberFieldRoutes.patch("/:id", jsonLimit, zValidator("json", updateSchema, vali
     const checked = checkDefinition({ key: current.key, type, label: body.label ?? current.label, options });
 
     const values = await countValues(tx, current.id);
+
+    // Protection of recorded data (Art. 9 candidates): lowering `sensitive` or widening who may read a field that is sensitive
+    // or already holds values is a decision about data that was entered under the old rules -- members:read_sensitive only.
+    const readSensitive = hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive");
+    const lowersSensitive = body.sensitive === false && current.sensitive;
+    const widens = body.visibleTo !== undefined && VISIBILITY_RANK[body.visibleTo]! > (VISIBILITY_RANK[current.visibleTo] ?? 0);
+    if ((lowersSensitive || (widens && (current.sensitive || values > 0))) && !readSensitive) {
+      throw new ForbiddenError("Missing members:read_sensitive permission to lower the protection of a field that holds or may hold sensitive data");
+    }
+    // One-way: once a field with values is sensitive it stays sensitive (create a new field instead).
+    if (lowersSensitive && values > 0) throw new ConflictError("A sensitive custom field with values stays sensitive", { details: { code: "sensitive_locked" } });
+
     if (type !== current.fieldType && values > 0) throw new ConflictError("The type of a custom field cannot change once it has values", { details: { code: "custom_field_has_values" } });
     if (isChoice && body.options !== undefined && values > 0) {
       const allowed = new Set(optionValues(checked.options));
@@ -189,7 +204,18 @@ memberFieldRoutes.patch("/:id", jsonLimit, zValidator("json", updateSchema, vali
       })
       .where(eq(memberFieldDefinitions.id, current.id))
       .returning();
-    await tx.insert(auditLog).values({ eventType: "member_field.update", subjectId: current.id, payload: { clubId, key: current.key, changed: Object.keys(body), updatedBy: c.get("membership").id } });
+    await tx.insert(auditLog).values({
+      eventType: "member_field.update",
+      subjectId: current.id,
+      // Property names and the old / new protection flags -- never values.
+      payload: {
+        clubId,
+        key: current.key,
+        changed: Object.keys(body),
+        updatedBy: c.get("membership").id,
+        flags: { sensitive: { from: current.sensitive, to: row!.sensitive }, visibleTo: { from: current.visibleTo, to: row!.visibleTo }, editableBy: { from: current.editableBy, to: row!.editableBy } },
+      },
+    });
     return { row: row!, values };
   });
   return c.json({ data: dto(updated.row, updated.values) });
