@@ -141,9 +141,10 @@ src/
 │                       #   club_roles, guardian_links, club_info_pages, club_applications, audit_log, calendars,
 │                       #   calendar_visibility, events, event_attendees, availability_slots,
 │                       #   availability_exceptions, meetings, meeting_invitees, meeting_attendance,
-│                       #   meeting_resolutions, club_registrations, club_registration_documents, media_files)
+│                       #   meeting_resolutions, club_registrations, club_registration_documents, media_files,
+│                       #   forms, form_versions, form_submissions, form_submission_files, member_field_definitions, member_field_values)
 ├── lib/               # errors, email, logger, activity-stats, club-permissions, calendar-visibility,
-│                       #   availability-match, ics, member-number, club-members, member-lifecycle, member-invites, exit-notice, club-settings, club-stats, club-slug, club-registrations, club-registration-mail, media, media-url, image-sanitize, member-photos, storage — cross-cutting, no HTTP awareness
+│                       #   availability-match, ics, member-number, club-members, member-lifecycle, member-invites, exit-notice, club-settings, club-stats, club-slug, club-registrations, club-registration-mail, media, media-url, image-sanitize, member-photos, form-defaults, storage — cross-cutting, no HTTP awareness
 ├── middleware/         # session-guard, club-guard, rate-limit, request-id
 ├── routes/            # health, club-members, club-exit-requests, club-settings, club-stats, club-applications, club-registrations, admin-club-registrations, departments, club-info, calendars, events, availability,
 │                       #   meetings, internal-stats, admin-stats, admin-clubs
@@ -152,7 +153,7 @@ src/
 
 ## Data model
 
-Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns thirty-seven more: the Wave 1 set — `club_memberships` (deprecated since Wave 7, no longer written), `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_key_history` (Wave 7 B14), `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents` — and the Wave 7 member-foundation set — `club_members`, `member_categories`, `club_member_departments`, `club_member_status_history`, `club_settings`, `club_exit_requests`, `club_member_invites`. See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
+Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns forty-three more: the Wave 1 set — `club_memberships` (deprecated since Wave 7, no longer written), `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_key_history` (Wave 7 B14), `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents` — and the Wave 7 member-foundation set — `club_members`, `member_categories`, `club_member_departments`, `club_member_status_history`, `club_settings`, `club_exit_requests`, `club_member_invites` — and the Wave 8 form-builder set — `forms`, `form_versions`, `form_submissions`, `form_submission_files`, `member_field_definitions`, `member_field_values` ([Form builder data model](#form-builder-data-model-wave-8)). See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
 
 ```mermaid
 erDiagram
@@ -335,6 +336,8 @@ erDiagram
         timestamptz created_at
         timestamptz decided_at
         text decided_by FK "member.id"
+        uuid form_submission_id FK "Wave 8, nullable"
+        uuid club_member_id FK "Wave 8, set on acceptance"
     }
     club_registrations {
         uuid id PK
@@ -608,7 +611,22 @@ Orientation: the EXIF orientation flag is removed with the rest of EXIF and imag
 
 **"ueberfaellig" (overdue) and maintenance-due status are computed at read time, never written by a job.** `src/lib/inventory-status.ts` derives both from a plain date comparison against `now()` — `isLoanOverdue`/`effectiveLoanStatus` for `inventory_loans.dueAt`, `isMaintenanceDue`/`maintenanceDueDate` for `inventory_items.maintenanceIntervalDays` counted from `lastMaintenanceAt` (falling back to `acquiredAt` if the item has never been serviced). The DB column itself only ever holds `"ausgeliehen"`/`"zurueckgegeben"`; a cron job that flips it to `"ueberfaellig"` would drift from `now()` between runs in a way a read-time derivation never can.
 
-### Migrations 0014-0021 (Wave 7)
+### Form builder data model (Wave 8)
+
+Generic, versioned form builder ([ADR-005](../../lpj-its-vault/20_Products/MyVerein/Architecture%20%26%20ADRs/ADR-005%20-%20Formular-Builder.md)); schema in `src/db/schema/forms.ts`, enums are free text validated in code (no DB enums). Routes follow in later packages; this section grows with them.
+
+| Table | Purpose |
+|---|---|
+| `forms` | A form of a club: `purpose` (`aufnahme` \| `austritt` \| `veranstaltungsanmeldung` \| `einwilligung` \| `umfrage`), `name`, `archived_at`. Partial unique `(club_id, purpose)` for `aufnahme`/`austritt` while not archived = at most one active form each |
+| `form_versions` | Immutable versions: `version` (unique per form), `status` (`draft` \| `published` \| `archived`), `fields` (JSONB field definition), `privacy_notice`, `published_at/by`. Partial unique: at most one `draft` per form |
+| `form_submissions` | One filled-in form: `form_version_id` (the version it was filled in, `RESTRICT`), `submitted_by_user_id`, `subject_club_member_id`, `on_behalf_of` (`self` \| `guardian`), `answers` (JSONB keyed by field key), `status` (`draft` \| `submitted` \| `accepted` \| `rejected` \| `withdrawn`), decision data |
+| `form_submission_files` | File/photo answers: `field_key`, `storage_key` (FK `media_files.storage_key`, never a URL), filename, MIME, size |
+| `member_field_definitions` | Custom fields per club: unique `(club_id, key)`, `field_type`, `options`, `visible_to` (`vorstand` \| `funktionstraeger` \| `mitglied`), `editable_by` (`vorstand` \| `self`), `sensitive`, `archived_at` |
+| `member_field_values` | Value per (`club_member_id`, `field_id`) (unique pair), JSONB, `updated_by` |
+
+`club_applications` gets the nullable columns `form_submission_id` and `club_member_id` (legacy `category`/`birth_date` stay readable); `club_exit_requests` gets `form_submission_id`. **Standard forms:** every club has a published v1 `aufnahme` form (category select, optional birth date, optional photo, privacy notice + mandatory consent) and `austritt` form (optional reason, confirmation) — migration `0022` seeds them for existing clubs, `ensureDefaultForms(clubId)` (`src/lib/form-defaults.ts`, idempotent) for new ones; `src/db/migration-configurable-forms.test.ts` keeps the SQL seed and the code definitions in sync.
+
+### Migrations 0014-0022 (Wave 7, Wave 8)
 
 Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runtime` (Docker boot) or `npm run db:migrate`.
 
@@ -622,6 +640,7 @@ Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runti
 | `0019_media-security-layer` | `media_files` upload registry; renames `locations.photo_url` / `inventory_damage_reports.photo_url` to `photo_key`; adds `club_members.photo_key` (FK to `media_files.storage_key`) |
 | `0020_media-legacy-photo-keys` | Idempotent clean-up: clears pre-registry `photo_key` values that are not of the form `<clubId>/<file>` (external URLs, `/media/...` paths, other clubs' keys, traversal) |
 | `0021_key-history-wifi-security` | `location_key_history` (key handover log), `location_key_holders.key_label`, `location_wifi_networks.security` (default `wpa`) |
+| `0022_configurable-forms` | Wave 8 B2: form-builder tables (see [Form builder data model](#form-builder-data-model-wave-8)), additive columns on `club_applications` / `club_exit_requests`, seeds the standard `aufnahme`/`austritt` forms v1 for every existing club (idempotent) |
 
 ## API reference
 

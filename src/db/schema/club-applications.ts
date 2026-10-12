@@ -2,6 +2,8 @@ import { relations, sql } from "drizzle-orm";
 import { pgTable, text, timestamp, date, uuid, uniqueIndex, index } from "drizzle-orm/pg-core";
 
 import { member, organization, user } from "../../auth/auth-schema.js";
+import { clubMembers } from "./club-members.js";
+import { formSubmissions } from "./forms.js";
 
 /**
  * Pending-approval queue for "digitaler Aufnahmeantrag". POST
@@ -30,6 +32,10 @@ export const clubApplications = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     decidedBy: text("decided_by").references(() => member.id, { onDelete: "set null" }),
+    // Wave 8: the filled-in application form (NULL for legacy applications, which keep `category`/`birth_date`).
+    formSubmissionId: uuid("form_submission_id").references(() => formSubmissions.id, { onDelete: "set null" }),
+    // Set when the application is accepted: the club_members row that was created or reused.
+    clubMemberId: uuid("club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
   },
   (table) => [
     uniqueIndex("club_applications_pending_user_club_uidx")
