@@ -63,4 +63,10 @@ describe("hasClubPermission", () => {
   it("schriftfuehrer lacks roles:write (why it is not a claimable founding role)", () => {
     expect(hasClubPermission(["schriftfuehrer"], "roles:write")).toBe(false);
   });
+
+  it("grants forms:write to vorsitz/stellv_vorsitz/schriftfuehrer only (deny-by-default for everything else)", () => {
+    for (const role of ["vorsitz", "stellv_vorsitz", "schriftfuehrer"] as const) expect(hasClubPermission([role], "forms:write")).toBe(true);
+    for (const role of CLUB_ROLE_TYPES.filter((r) => !["vorsitz", "stellv_vorsitz", "schriftfuehrer"].includes(r))) expect(hasClubPermission([role], "forms:write")).toBe(false);
+    expect(hasClubPermission([], "forms:write")).toBe(false);
+  });
 });

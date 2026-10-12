@@ -20,7 +20,8 @@ export type ErrorCode =
   // Domain-specific codes (same HTTP status as the base class they are thrown with, see AppErrorOptions.code).
   | "ALREADY_MEMBER"
   | "APPLICATION_PENDING"
-  | "QUOTA_EXCEEDED";
+  | "QUOTA_EXCEEDED"
+  | "FORM_VERSION_OUTDATED";
 
 export interface AppErrorOptions {
   cause?: unknown;

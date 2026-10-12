@@ -20,6 +20,7 @@ import * as clubRolesSchema from "./schema/club-roles.js";
 import * as departmentsSchema from "./schema/departments.js";
 import * as eventAttendeesSchema from "./schema/event-attendees.js";
 import * as eventsSchema from "./schema/events.js";
+import * as formsSchema from "./schema/forms.js";
 import * as guardianLinksSchema from "./schema/guardian-links.js";
 import * as inventorySchema from "./schema/inventory.js";
 import * as locationLinksSchema from "./schema/location-links.js";
@@ -82,6 +83,7 @@ export const schema = {
   ...locationWifiSchema,
   ...locationLinksSchema,
   ...inventorySchema,
+  ...formsSchema,
 };
 
 export const db = drizzle(pool, { schema });

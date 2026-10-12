@@ -199,6 +199,17 @@ function conditionHolds(field: FormField, values: Answers, visibleKeys: Readonly
   }
 }
 
+/** Keys of the answerable fields whose `visibleIf` holds for `answers` (a field behind a hidden field is hidden too). */
+export function visibleFieldKeys(fields: readonly FormField[], answers: unknown): Set<string> {
+  const values: Answers = isPlainObject(answers) ? answers : {};
+  const visible = new Set<string>();
+  for (const field of fields) {
+    if (field.type === "info") continue;
+    if (conditionHolds(field, values, visible)) visible.add(field.key);
+  }
+  return visible;
+}
+
 /** Validates one non-empty answer against its field. Returns the cleaned value or an error code. */
 function cleanValue(field: FormField, value: unknown, optionValues: readonly string[]): { value: unknown } | { error: FieldErrorCode } {
   const v = field.validation;

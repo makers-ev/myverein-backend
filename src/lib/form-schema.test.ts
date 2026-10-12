@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_APPLICATION_FIELDS, DEFAULT_EXIT_FIELDS } from "./form-defaults.js";
-import { FIELD_KEY_RE, formFieldsSchema, MAX_FIELDS, MAX_OPTIONS, resolveFieldOptions, validateAnswers, type FormField } from "./form-schema.js";
+import { FIELD_KEY_RE, formFieldsSchema, MAX_FIELDS, MAX_OPTIONS, resolveFieldOptions, validateAnswers, visibleFieldKeys, type FormField } from "./form-schema.js";
 
 const parse = (fields: unknown) => formFieldsSchema.safeParse(fields);
 const f = (over: Record<string, unknown>) => ({ key: "name", type: "text", label: "Name", ...over });
@@ -208,5 +208,22 @@ describe("validateAnswers", () => {
     expect(validateAnswers(fields, { category: "passiv", privacy_consent: true }, ctx)).toEqual({ ok: false, errors: { category: "not_an_option" } });
     expect(validateAnswers(fields, { category: "aktiv" }, ctx)).toEqual({ ok: false, errors: { privacy_consent: "required" } });
     expect(resolveFieldOptions(fields[0]!, [{ key: "aktiv", name: "Aktiv" }])).toEqual([{ value: "aktiv", label: "Aktiv" }]);
+  });
+});
+
+describe("visibleFieldKeys", () => {
+  const fields = defs([
+    f({ key: "kind", type: "select", options: [{ value: "a", label: "A" }, { value: "b", label: "B" }] }),
+    f({ key: "note_a", visibleIf: { fieldKey: "kind", op: "eq", value: "a" } }),
+    f({ key: "behind_a", visibleIf: { fieldKey: "note_a", op: "eq", value: "x" } }),
+    { key: "info_block", type: "info", label: "Info" },
+  ]);
+
+  it("lists the answerable fields whose condition holds; a field behind a hidden one is hidden too; info is never listed", () => {
+    expect([...visibleFieldKeys(fields, {})]).toEqual(["kind"]);
+    expect([...visibleFieldKeys(fields, { kind: "a" })]).toEqual(["kind", "note_a"]);
+    expect([...visibleFieldKeys(fields, { kind: "a", note_a: "x" })]).toEqual(["kind", "note_a", "behind_a"]);
+    expect([...visibleFieldKeys(fields, { kind: "b", note_a: "x" })]).toEqual(["kind"]);
+    expect([...visibleFieldKeys(fields, "not an object")]).toEqual(["kind"]);
   });
 });

@@ -26,7 +26,10 @@ import { adminStatsRoutes } from "./admin-stats.js";
 import { availabilityRoutes } from "./availability.js";
 import { calendarRoutes } from "./calendars.js";
 import { clubApplicationRoutes } from "./club-applications.js";
+import { clubFormRoutes } from "./club-forms.js";
 import { clubInfoRoutes } from "./club-info.js";
+import { formRoutes } from "./forms.js";
+import { formSubmissionRoutes } from "./form-submissions.js";
 import { clubMemberRoutes } from "./club-members.js";
 import { clubRegistrationRoutes } from "./club-registrations.js";
 import { departmentRoutes } from "./departments.js";
@@ -69,6 +72,9 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/my-clubs", "myClubRoutes", myClubRoutes],
   ["/club-members", "clubMemberRoutes", clubMemberRoutes],
   ["/club-applications", "clubApplicationRoutes", clubApplicationRoutes],
+  ["/forms", "formRoutes", formRoutes],
+  ["/club-forms", "clubFormRoutes", clubFormRoutes],
+  ["/form-submissions", "formSubmissionRoutes", formSubmissionRoutes],
   ["/departments", "departmentRoutes", departmentRoutes],
   ["/club-info", "clubInfoRoutes", clubInfoRoutes],
   ["/calendars", "calendarRoutes", calendarRoutes],
@@ -120,6 +126,12 @@ const SELF_SERVICE: Record<string, string> = {
   "POST /club-members/invites/preview": "previewing an own invitation (session only; the secret token travels in the body, the response is masked)",
   "POST /club-members/invites/accept": "accepting an own invitation (session only; bound to the secret token and the account e-mail, no club membership needed)",
   "POST /club-exit-requests": "the member's own cancellation (recording a cancellation for others and exclusions need members:write, asserted in the B6 test)",
+  "POST /form-submissions": "own application draft (session only; the applicant is not a member yet; refused for members)",
+  "PATCH /form-submissions/:id": "own draft (ownership checked, foreign ids are 404)",
+  "POST /form-submissions/:id/files": "file upload into the own draft (central media layer; ownership checked)",
+  "DELETE /form-submissions/:id/files/:fileId": "removing a file of the own draft (ownership checked)",
+  "POST /form-submissions/:id/submit": "submitting the own draft (ownership checked)",
+  "POST /form-submissions/:id/withdraw": "withdrawing the own application (ownership checked)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
 };
 
@@ -306,6 +318,16 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     expect(exclusion.status).toBe(403);
     expect((await req("/club-exit-requests", cookiePlain)).status).toBe(403);
     expect((await req("/club-settings", cookiePlain, { method: "PATCH", body: { allowSelfLoans: false } })).status).toBe(403);
+  });
+
+  it("keeps the form builder behind forms:write (board allowed, mitglied and guest denied, reads included)", async () => {
+    expect((await req("/forms", cookieFounder)).status).toBe(200);
+    for (const cookie of [cookiePlain, cookieGuest]) {
+      expect((await req("/forms", cookie)).status).toBe(403);
+      expect((await req("/forms", cookie, { method: "POST", body: { purpose: "umfrage", name: "Nope" } })).status).toBe(403);
+    }
+    const created = await req("/forms", cookieFounder, { method: "POST", body: { purpose: "umfrage", name: "Matrix control" } });
+    expect(created.status).toBe(201);
   });
 
   it("is not vacuous: the same kind of request succeeds for a board role", async () => {

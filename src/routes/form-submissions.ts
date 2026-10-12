@@ -1,0 +1,579 @@
+import { zValidator } from "@hono/zod-validator";
+import { and, count, desc, eq, inArray, sql } from "drizzle-orm";
+import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { z } from "zod";
+
+import { organization } from "../auth/auth-schema.js";
+import { db } from "../db/client.js";
+import { auditLog } from "../db/schema/audit-log.js";
+import { forms, formSubmissionFiles, formSubmissions, formVersions, type FormRow, type FormSubmissionFileRow, type FormSubmissionRow, type FormVersionRow } from "../db/schema/forms.js";
+import { mediaFiles } from "../db/schema/media-files.js";
+import { ensureDefaultCategories, type DbExecutor } from "../lib/club-members.js";
+import { hasClubPermission } from "../lib/club-permissions.js";
+import { ConflictError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { ensureDefaultForms } from "../lib/form-defaults.js";
+import { validateAnswers, visibleFieldKeys, type FormField } from "../lib/form-schema.js";
+import {
+  activeCategories,
+  ANSWERS_BODY_LIMIT,
+  applicantDefinition,
+  assertMayApply,
+  clubRoleTypesOf,
+  findCurrentForm,
+  invalidAnswers,
+  isUuid,
+  MAX_DRAFTS_PER_CLUB,
+  MAX_FILES_PER_SUBMISSION,
+  outdatedError,
+  submissionsPerHour,
+  uploadsPerHour,
+} from "../lib/forms.js";
+import {
+  attachUploadedImage,
+  discardStoredFile,
+  findMediaByKey,
+  IMAGE_TYPES,
+  MAX_DOCUMENT_BYTES,
+  MAX_IMAGE_BYTES,
+  MAX_PHOTO_BYTES,
+  markMediaDeleted,
+  purgeMediaFile,
+  signedMediaUrls,
+  storeUpload,
+  streamMedia,
+  streamSensitiveMedia,
+} from "../lib/media.js";
+import { rateLimit } from "../middleware/rate-limit.js";
+import { sessionGuard, type SessionEnv } from "../middleware/session-guard.js";
+
+/**
+ * Applicant side, write part (Wave 8 B5): draft -> fill in -> upload files -> submit / withdraw. Session only (the
+ * applicant has no club yet). Every route is scoped to the CALLER's own submissions -- someone else's id, file or a
+ * malformed id is always 404 (IDOR); the one exception is the file download, which the club board
+ * (`members:write`, submitted applications only) may also use. Answers are validated server-side against the version the
+ * submission is pinned to; they are never written to logs or audit entries (ids and counts only).
+ *
+ * Files: only through the central media layer (`src/lib/media.ts`): `image` fields store a non-sensitive image
+ * (signed URL after the permission check), `file` fields a SENSITIVE document (authenticated stream + audit entry).
+ */
+export const formSubmissionRoutes = new Hono<SessionEnv>();
+
+formSubmissionRoutes.use("*", sessionGuard);
+formSubmissionRoutes.use("*", rateLimit({ windowMs: 60_000, max: 120, key: (c) => `form-submissions:${c.get("user").id}` }));
+
+const createLimiter = rateLimit({ windowMs: 60 * 60_000, max: submissionsPerHour(), key: (c) => `form-submission-create:${c.get("user").id}` });
+const uploadLimiter = rateLimit({ windowMs: 60 * 60_000, max: uploadsPerHour(), key: (c) => `form-submission-upload:${c.get("user").id}` });
+const submitLimiter = rateLimit({ windowMs: 60 * 60_000, max: submissionsPerHour(), key: (c) => `form-submission-submit:${c.get("user").id}` });
+
+const validationHook = (result: { success: boolean; error?: { issues: unknown } }) => {
+  if (!result.success) throw new ValidationError("Invalid request body");
+};
+
+const jsonLimit = bodyLimit({
+  maxSize: ANSWERS_BODY_LIMIT,
+  onError: () => {
+    throw new ValidationError("Request body too large");
+  },
+});
+
+const notFound = () => new NotFoundError("Submission not found");
+const PURPOSE = "aufnahme" as const;
+const FILE_FIELD_TYPES = ["application/pdf", "image/jpeg", "image/png"] as const;
+
+type Answers = Record<string, unknown>;
+type Pinned = { form: FormRow; version: FormVersionRow };
+
+// --- helpers -------------------------------------------------------------------------------------------------
+
+function isPlainRecord(value: unknown): value is Answers {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/** Copy with a null prototype: a key such as `__proto__` stays an ordinary own entry. */
+function toAnswers(...sources: unknown[]): Answers {
+  const out: Answers = Object.create(null);
+  for (const source of sources) {
+    if (source === undefined) continue;
+    if (!isPlainRecord(source)) throw invalidAnswers({ _: "invalid_type" });
+    for (const key of Object.keys(source)) out[key] = source[key];
+  }
+  return out;
+}
+
+async function lockUserClub(tx: DbExecutor, userId: string, clubId: string): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`form-submission:${userId}:${clubId}`}, 0))`);
+}
+
+/** The caller's own submission; with `lock` the row is locked for the transaction. Foreign / unknown / malformed ids: 404. */
+async function loadOwn(executor: DbExecutor, id: string, userId: string, lock = false): Promise<FormSubmissionRow> {
+  if (!isUuid(id)) throw notFound();
+  const query = executor
+    .select()
+    .from(formSubmissions)
+    .where(and(eq(formSubmissions.id, id), eq(formSubmissions.submittedByUserId, userId)))
+    .limit(1);
+  const [row] = await (lock ? query.for("update") : query);
+  if (!row) throw notFound();
+  return row;
+}
+
+async function loadPinned(executor: DbExecutor, formVersionId: string): Promise<Pinned> {
+  const [row] = await executor
+    .select({ form: forms, version: formVersions })
+    .from(formVersions)
+    .innerJoin(forms, eq(forms.id, formVersions.formId))
+    .where(eq(formVersions.id, formVersionId))
+    .limit(1);
+  if (!row) throw new NotFoundError("Form version not found");
+  return row;
+}
+
+function assertDraft(sub: FormSubmissionRow): void {
+  if (sub.status !== "draft") throw new ConflictError("The submission can no longer be changed", { details: { code: "submission_not_editable", status: sub.status } });
+}
+
+async function currentDefinition(clubId: string, executor: DbExecutor) {
+  const current = await findCurrentForm(clubId, PURPOSE, executor);
+  return current ? applicantDefinition(current.form, current.version, await activeCategories(clubId, executor)) : null;
+}
+
+/**
+ * The version an operation runs against: the pinned one while it is still the published version of the club's
+ * form. With `repinTo` naming the current published version a stale submission moves there. Anything else is
+ * `409 FORM_VERSION_OUTDATED` carrying the current definition (null when the club has no such form right now).
+ */
+async function resolveTarget(tx: DbExecutor, sub: FormSubmissionRow, repinTo?: string): Promise<{ target: Pinned; repinned: boolean }> {
+  const pinned = await loadPinned(tx, sub.formVersionId);
+  const current = await findCurrentForm(sub.clubId, PURPOSE, tx);
+  if (current && current.version.id === pinned.version.id && (repinTo === undefined || repinTo === pinned.version.id)) return { target: pinned, repinned: false };
+  if (current && repinTo === current.version.id) return { target: current, repinned: true };
+  throw outdatedError(await currentDefinition(sub.clubId, tx), sub.id);
+}
+
+/** Answers that survive a move to another version: unknown keys and values the new field no longer accepts are dropped. */
+function carryOver(fields: readonly FormField[], stored: unknown, categoryKeys: readonly string[]): { answers: Answers; dropped: string[] } {
+  const answerable = new Set(fields.filter((f) => f.type !== "info" && f.type !== "file" && f.type !== "image").map((f) => f.key));
+  const current: Answers = Object.create(null);
+  const dropped: string[] = [];
+  for (const [key, value] of Object.entries(isPlainRecord(stored) ? stored : {})) {
+    if (answerable.has(key)) current[key] = value;
+    else dropped.push(key);
+  }
+  for (let round = 0; round <= fields.length; round++) {
+    const result = validateAnswers(fields, current, { mode: "draft", categoryKeys });
+    if (result.ok) return { answers: current, dropped };
+    for (const key of Object.keys(result.errors)) {
+      delete current[key];
+      dropped.push(key);
+    }
+  }
+  return { answers: Object.create(null), dropped: [...dropped, ...Object.keys(current)] };
+}
+
+type FileWithMedia = { file: FormSubmissionFileRow; kind: string | null; sensitive: boolean | null };
+
+async function loadFiles(executor: DbExecutor, submissionIds: readonly string[]): Promise<FileWithMedia[]> {
+  if (submissionIds.length === 0) return [];
+  return executor
+    .select({ file: formSubmissionFiles, kind: mediaFiles.kind, sensitive: mediaFiles.sensitive })
+    .from(formSubmissionFiles)
+    .leftJoin(mediaFiles, eq(mediaFiles.storageKey, formSubmissionFiles.storageKey))
+    .where(inArray(formSubmissionFiles.submissionId, [...submissionIds]))
+    .orderBy(formSubmissionFiles.createdAt, formSubmissionFiles.id);
+}
+
+/** Removes file rows and tombstones their registry entries; returns the keys to `purgeMediaFile` AFTER the commit. */
+async function removeFiles(tx: DbExecutor, rows: ReadonlyArray<{ id: string; storageKey: string }>): Promise<string[]> {
+  const purge: string[] = [];
+  for (const row of rows) {
+    await tx.delete(formSubmissionFiles).where(eq(formSubmissionFiles.id, row.id));
+    if (await markMediaDeleted(row.storageKey, tx)) purge.push(row.storageKey);
+  }
+  return purge;
+}
+
+const purgeAll = (keys: readonly string[]) => Promise.all(keys.map((key) => purgeMediaFile(key)));
+
+/**
+ * Response shape of a submission. The storage key never leaves the server: a file is addressed by its id (download
+ * route) and carries a short-lived signed `url` for non-sensitive images only (null for documents).
+ */
+function submissionDto(sub: FormSubmissionRow, files: FileWithMedia[], urls: Map<string, string>) {
+  return {
+    id: sub.id,
+    formId: sub.formId,
+    formVersionId: sub.formVersionId,
+    clubId: sub.clubId,
+    onBehalfOf: sub.onBehalfOf,
+    status: sub.status,
+    answers: sub.answers,
+    submittedAt: sub.submittedAt,
+    decidedAt: sub.decidedAt,
+    decisionNote: sub.decisionNote,
+    createdAt: sub.createdAt,
+    updatedAt: sub.updatedAt,
+    files: files
+      .filter((f) => f.file.submissionId === sub.id)
+      .map(({ file, kind }) => ({ id: file.id, fieldKey: file.fieldKey, filename: file.filename, mimeType: file.mimeType, sizeBytes: file.sizeBytes, kind: kind ?? "document", url: urls.get(file.storageKey) ?? null, createdAt: file.createdAt })),
+  };
+}
+
+async function shapeSubmissions(subs: FormSubmissionRow[], executor: DbExecutor = db) {
+  const files = await loadFiles(executor, subs.map((s) => s.id));
+  const urls = new Map<string, string>();
+  for (const clubId of new Set(subs.map((s) => s.clubId))) {
+    const keys = files.filter((f) => subs.find((s) => s.id === f.file.submissionId)?.clubId === clubId).map((f) => f.file.storageKey);
+    for (const [key, url] of await signedMediaUrls(clubId, keys, "form_submission")) urls.set(key, url);
+  }
+  return subs.map((s) => submissionDto(s, files, urls));
+}
+
+// --- create ----------------------------------------------------------------------------------------------------
+
+const createSchema = z
+  .object({
+    clubId: z.string().min(1).optional(),
+    clubSlug: z.string().min(1).optional(),
+    // Only the Aufnahme form is reachable for applicants in Wave 8; 'guardian' (child application) comes with B8.
+    purpose: z.literal(PURPOSE).optional(),
+    onBehalfOf: z.literal("self").optional(),
+    formVersionId: z.uuid().optional(),
+    answers: z.unknown().optional(),
+  })
+  .refine((body) => body.clubId ?? body.clubSlug, { message: "clubId or clubSlug is required" });
+
+formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", createSchema, validationHook), async (c) => {
+  const userId = c.get("user").id;
+  const body = c.req.valid("json");
+
+  const org = await db.query.organization.findFirst({ where: body.clubId ? eq(organization.id, body.clubId) : eq(organization.slug, body.clubSlug!), columns: { id: true } });
+  if (!org) throw new NotFoundError("Club not found");
+  await ensureDefaultCategories(org.id);
+  await ensureDefaultForms(org.id);
+
+  const created = await db.transaction(async (tx) => {
+    await lockUserClub(tx, userId, org.id);
+    const current = await findCurrentForm(org.id, PURPOSE, tx);
+    if (!current) throw new NotFoundError("This club has no application form");
+    const categories = await activeCategories(org.id, tx);
+    if (body.formVersionId !== undefined && body.formVersionId !== current.version.id) throw outdatedError(applicantDefinition(current.form, current.version, categories));
+
+    await assertMayApply(tx, org.id, userId);
+    const [{ drafts }] = await tx
+      .select({ drafts: count() })
+      .from(formSubmissions)
+      .where(and(eq(formSubmissions.submittedByUserId, userId), eq(formSubmissions.clubId, org.id), eq(formSubmissions.status, "draft")));
+    if (drafts >= MAX_DRAFTS_PER_CLUB) throw new ConflictError("Too many open drafts for this club; continue or withdraw one", { details: { code: "draft_limit", limit: MAX_DRAFTS_PER_CLUB } });
+
+    let answers: Answers = {};
+    if (body.answers !== undefined) {
+      const result = validateAnswers(current.version.fields as FormField[], toAnswers(body.answers), { mode: "draft", categoryKeys: categories.map((k) => k.key) });
+      if (!result.ok) throw invalidAnswers(result.errors);
+      answers = result.answers;
+    }
+    const [row] = await tx
+      .insert(formSubmissions)
+      .values({ formId: current.form.id, formVersionId: current.version.id, clubId: org.id, submittedByUserId: userId, onBehalfOf: "self", answers, status: "draft" })
+      .returning();
+    await tx.insert(auditLog).values({ eventType: "form_submission.create", subjectId: row!.id, payload: { clubId: org.id, formId: current.form.id, formVersionId: current.version.id, userId } });
+    return row!;
+  });
+  return c.json({ data: { submission: (await shapeSubmissions([created]))[0] } }, 201);
+});
+
+// --- read ------------------------------------------------------------------------------------------------------
+
+// Registered before "/:id" so "mine" is not read as an id.
+formSubmissionRoutes.get("/mine", async (c) => {
+  const rows = await db
+    .select({ sub: formSubmissions, purpose: forms.purpose, version: formVersions.version, clubName: organization.name, clubSlug: organization.slug })
+    .from(formSubmissions)
+    .innerJoin(forms, eq(forms.id, formSubmissions.formId))
+    .innerJoin(formVersions, eq(formVersions.id, formSubmissions.formVersionId))
+    .innerJoin(organization, eq(organization.id, formSubmissions.clubId))
+    .where(eq(formSubmissions.submittedByUserId, c.get("user").id))
+    .orderBy(desc(formSubmissions.createdAt), desc(formSubmissions.id))
+    .limit(100);
+  const shaped = await shapeSubmissions(rows.map((r) => r.sub));
+  return c.json({
+    data: rows.map((r, i) => ({ ...shaped[i]!, purpose: r.purpose, version: r.version, club: { id: r.sub.clubId, name: r.clubName, slug: r.clubSlug } })),
+  });
+});
+
+formSubmissionRoutes.get("/:id", async (c) => {
+  const sub = await loadOwn(db, c.req.param("id"), c.get("user").id);
+  const pinned = await loadPinned(db, sub.formVersionId);
+  const current = await findCurrentForm(sub.clubId, PURPOSE);
+  const [shaped] = await shapeSubmissions([sub]);
+  return c.json({
+    data: {
+      submission: shaped,
+      form: applicantDefinition(pinned.form, pinned.version, await activeCategories(sub.clubId)),
+      // A draft on an outdated version has to move on (PATCH with `formVersionId`) before it can be edited or submitted.
+      outdated: sub.status === "draft" && current?.version.id !== pinned.version.id,
+    },
+  });
+});
+
+// --- edit ------------------------------------------------------------------------------------------------------
+
+const patchSchema = z.object({ answers: z.unknown().optional(), formVersionId: z.uuid().optional() });
+
+formSubmissionRoutes.patch("/:id", jsonLimit, zValidator("json", patchSchema, validationHook), async (c) => {
+  const userId = c.get("user").id;
+  const body = c.req.valid("json");
+  const purge: string[] = [];
+
+  const result = await db.transaction(async (tx) => {
+    const sub = await loadOwn(tx, c.req.param("id"), userId, true);
+    assertDraft(sub);
+    const { target, repinned } = await resolveTarget(tx, sub, body.formVersionId);
+    const fields = target.version.fields as FormField[];
+    const categoryKeys = (await activeCategories(sub.clubId, tx)).map((k) => k.key);
+
+    let base: Answers = toAnswers(sub.answers);
+    let droppedAnswerKeys: string[] = [];
+    if (repinned) {
+      const carried = carryOver(fields, sub.answers, categoryKeys);
+      base = carried.answers;
+      droppedAnswerKeys = carried.dropped;
+    }
+    const validated = validateAnswers(fields, toAnswers(base, body.answers), { mode: "draft", categoryKeys });
+    if (!validated.ok) throw invalidAnswers(validated.errors);
+
+    const [updated] = await tx
+      .update(formSubmissions)
+      .set({ answers: validated.answers, ...(repinned ? { formId: target.form.id, formVersionId: target.version.id } : {}), updatedAt: new Date() })
+      .where(eq(formSubmissions.id, sub.id))
+      .returning();
+
+    if (repinned) {
+      // Files that no longer fit a field of the new version (removed, or the field changed its kind) go away.
+      const byKey = new Map(fields.map((f) => [f.key, f]));
+      const stale = (await loadFiles(tx, [sub.id])).filter(({ file, kind }) => {
+        const field = byKey.get(file.fieldKey);
+        return !(field && ((field.type === "image" && kind === "image") || (field.type === "file" && kind === "document")));
+      });
+      purge.push(...(await removeFiles(tx, stale.map((s) => s.file))));
+    }
+    return { updated: updated!, repinned, droppedAnswerKeys };
+  });
+  await purgeAll(purge);
+  return c.json({ data: { submission: (await shapeSubmissions([result.updated]))[0], repinned: result.repinned, droppedAnswerKeys: result.droppedAnswerKeys } });
+});
+
+// --- files -----------------------------------------------------------------------------------------------------
+
+const claimSchema = z.object({ fieldKey: z.string().min(1).max(60), mediaKey: z.string().min(1).max(300) });
+
+formSubmissionRoutes.post(
+  "/:id/files",
+  uploadLimiter,
+  bodyLimit({
+    maxSize: MAX_DOCUMENT_BYTES + 64 * 1024, // multipart framing overhead on top of the file itself
+    onError: () => {
+      throw new ValidationError(`File exceeds maximum size of ${MAX_DOCUMENT_BYTES} bytes`);
+    },
+  }),
+  async (c) => {
+    const userId = c.get("user").id;
+    await loadOwn(db, c.req.param("id"), userId); // early 404 before any bytes are processed
+
+    // Either a multipart upload (`file` + `fieldKey`) or a JSON claim of an already uploaded, unattached image.
+    const isJson = (c.req.header("content-type") ?? "").toLowerCase().startsWith("application/json");
+    let upload: { file: File; fieldKey: string } | null = null;
+    let claim: z.infer<typeof claimSchema> | null = null;
+    if (isJson) {
+      const parsed = claimSchema.safeParse(await c.req.json().catch(() => null));
+      if (!parsed.success) throw new ValidationError("fieldKey and mediaKey are required");
+      claim = parsed.data;
+    } else {
+      const body = await c.req.parseBody();
+      const file = body["file"];
+      const fieldKey = body["fieldKey"];
+      if (!(file instanceof File)) throw new ValidationError("Missing file upload (field name: file)");
+      if (typeof fieldKey !== "string" || fieldKey.length === 0) throw new ValidationError("fieldKey is required");
+      upload = { file, fieldKey };
+    }
+    const fieldKey = (upload ?? claim)!.fieldKey;
+
+    const stored: { key: string | null } = { key: null };
+    const purge: string[] = [];
+    try {
+      const created = await db.transaction(async (tx) => {
+        const sub = await loadOwn(tx, c.req.param("id"), userId, true);
+        assertDraft(sub);
+        const { target } = await resolveTarget(tx, sub);
+        const field = (target.version.fields as FormField[]).find((f) => f.key === fieldKey);
+        if (!field || (field.type !== "file" && field.type !== "image")) throw new ValidationError("Not a file field of this form", { details: { fields: { [fieldKey]: "unknown_field" } } });
+        const isImage = field.type === "image";
+
+        // An image field holds exactly one photo: a new one replaces the old one.
+        const existing = await loadFiles(tx, [sub.id]);
+        if (isImage) purge.push(...(await removeFiles(tx, existing.filter((f) => f.file.fieldKey === fieldKey).map((f) => f.file))));
+        const remaining = existing.filter((f) => !(isImage && f.file.fieldKey === fieldKey)).length;
+        if (remaining >= MAX_FILES_PER_SUBMISSION) throw new ValidationError(`At most ${MAX_FILES_PER_SUBMISSION} files per submission`);
+        const maxBytes = isImage ? (field.mapsTo === "photo" ? MAX_PHOTO_BYTES : MAX_IMAGE_BYTES) : MAX_DOCUMENT_BYTES;
+
+        let media;
+        if (claim) {
+          if (!isImage) throw new ValidationError("Only image fields accept an already uploaded file; upload documents directly");
+          media = await attachUploadedImage(tx, { clubId: sub.clubId, storageKey: claim.mediaKey, uploadedBy: userId, owner: { type: "form_submission", id: sub.id } });
+          if (media.sizeBytes > maxBytes || !(IMAGE_TYPES as readonly string[]).includes(media.mimeType)) throw new ValidationError("The uploaded image is not allowed for this field");
+        } else {
+          media = await storeUpload({
+            file: upload!.file,
+            clubId: sub.clubId,
+            storagePrefix: `forms/${sub.clubId}/${sub.id}`,
+            kind: isImage ? "image" : "document",
+            allowedTypes: isImage ? IMAGE_TYPES : FILE_FIELD_TYPES,
+            maxBytes,
+            visibility: "private",
+            // Documents (IDs, certificates, ...) are sensitive: never a signed URL, only the audited stream.
+            sensitive: !isImage,
+            owner: { type: "form_submission", id: sub.id },
+            uploadedBy: userId,
+            executor: tx,
+          });
+          stored.key = media.storageKey;
+        }
+        const [row] = await tx
+          .insert(formSubmissionFiles)
+          .values({ submissionId: sub.id, fieldKey, storageKey: media.storageKey, filename: media.originalFilename, mimeType: media.mimeType, sizeBytes: media.sizeBytes })
+          .returning();
+        await tx.update(formSubmissions).set({ updatedAt: new Date() }).where(eq(formSubmissions.id, sub.id));
+        await tx.insert(auditLog).values({ eventType: "form_submission.file_add", subjectId: sub.id, payload: { fileId: row!.id, fieldKey, userId, via: claim ? "claim" : "upload" } });
+        return { sub, row: row!, kind: media.kind, urlKey: media.sensitive ? null : media.storageKey };
+      });
+      await purgeAll(purge);
+      const urls = created.urlKey ? await signedMediaUrls(created.sub.clubId, [created.urlKey], "form_submission") : new Map<string, string>();
+      return c.json(
+        { data: { file: { id: created.row.id, fieldKey: created.row.fieldKey, filename: created.row.filename, mimeType: created.row.mimeType, sizeBytes: created.row.sizeBytes, kind: created.kind, url: created.urlKey ? (urls.get(created.urlKey) ?? null) : null, createdAt: created.row.createdAt } } },
+        201,
+      );
+    } catch (err) {
+      // The transaction rolled back (registry row included): drop the file that was already written.
+      if (stored.key) await discardStoredFile(stored.key);
+      throw err;
+    }
+  },
+);
+
+formSubmissionRoutes.delete("/:id/files/:fileId", uploadLimiter, async (c) => {
+  const userId = c.get("user").id;
+  const fileId = c.req.param("fileId");
+  const purge = await db.transaction(async (tx) => {
+    const sub = await loadOwn(tx, c.req.param("id"), userId, true);
+    assertDraft(sub);
+    if (!isUuid(fileId)) throw new NotFoundError("File not found");
+    const [file] = await tx
+      .select()
+      .from(formSubmissionFiles)
+      .where(and(eq(formSubmissionFiles.id, fileId), eq(formSubmissionFiles.submissionId, sub.id)))
+      .limit(1);
+    if (!file) throw new NotFoundError("File not found");
+    const keys = await removeFiles(tx, [file]);
+    await tx.update(formSubmissions).set({ updatedAt: new Date() }).where(eq(formSubmissions.id, sub.id));
+    await tx.insert(auditLog).values({ eventType: "form_submission.file_remove", subjectId: sub.id, payload: { fileId, fieldKey: file.fieldKey, userId } });
+    return keys;
+  });
+  await purgeAll(purge);
+  return c.body(null, 204);
+});
+
+/**
+ * Authenticated download of one file: the submitter, or the club board (`members:write`) once the form is submitted.
+ * Every retrieval is audited; documents are always attachments, never served via a signed URL (media layer).
+ */
+formSubmissionRoutes.get("/:id/files/:fileId", async (c) => {
+  const userId = c.get("user").id;
+  const id = c.req.param("id");
+  const fileId = c.req.param("fileId");
+  if (!isUuid(id) || !isUuid(fileId)) throw notFound();
+
+  const [sub] = await db.select().from(formSubmissions).where(eq(formSubmissions.id, id)).limit(1);
+  if (!sub) throw notFound();
+  let viaBoard = false;
+  if (sub.submittedByUserId !== userId) {
+    // Not the submitter: only the board of THIS club, never drafts. Everyone else cannot tell the id exists.
+    const roles = await clubRoleTypesOf(userId, sub.clubId);
+    const [form] = await db.select({ purpose: forms.purpose }).from(forms).where(eq(forms.id, sub.formId)).limit(1);
+    if (!roles || !hasClubPermission(roles, "members:write") || sub.status === "draft" || form?.purpose !== PURPOSE) throw notFound();
+    viaBoard = true;
+  }
+  const [file] = await db.select().from(formSubmissionFiles).where(and(eq(formSubmissionFiles.id, fileId), eq(formSubmissionFiles.submissionId, sub.id))).limit(1);
+  if (!file) throw new NotFoundError("File not found");
+  const media = await findMediaByKey(file.storageKey);
+  if (!media) throw new NotFoundError("File not found");
+
+  const reason = viaBoard ? "form_submission:board" : "form_submission:submitter";
+  if (media.sensitive) return streamSensitiveMedia(c, media, { accessedBy: userId, subjectId: sub.id, reason });
+  await db.insert(auditLog).values({ eventType: "form_submission.file_access", subjectId: sub.id, payload: { fileId: file.id, accessedBy: userId, reason } });
+  return streamMedia(c, media);
+});
+
+// --- submit / withdraw -----------------------------------------------------------------------------------------
+
+formSubmissionRoutes.post("/:id/submit", submitLimiter, jsonLimit, zValidator("json", z.object({ answers: z.unknown().optional() }).default({}), validationHook), async (c) => {
+  const userId = c.get("user").id;
+  const body = c.req.valid("json");
+  const purge: string[] = [];
+
+  const submitted = await db.transaction(async (tx) => {
+    const sub = await loadOwn(tx, c.req.param("id"), userId, true);
+    // The advisory lock orders parallel submits of the same user and club behind each other.
+    await lockUserClub(tx, userId, sub.clubId);
+    assertDraft(sub);
+    const { target } = await resolveTarget(tx, sub);
+    await assertMayApply(tx, sub.clubId, userId);
+
+    const fields = target.version.fields as FormField[];
+    const files = await loadFiles(tx, [sub.id]);
+    const categoryKeys = (await activeCategories(sub.clubId, tx)).map((k) => k.key);
+    const result = validateAnswers(fields, toAnswers(sub.answers, body.answers), {
+      mode: "submit",
+      categoryKeys,
+      uploadedFieldKeys: new Set(files.map((f) => f.file.fieldKey)),
+    });
+    if (!result.ok) throw invalidAnswers(result.errors);
+
+    // Files of fields the answers made invisible are not part of the application.
+    const visible = visibleFieldKeys(fields, result.answers);
+    const hidden = files.filter((f) => !visible.has(f.file.fieldKey));
+    purge.push(...(await removeFiles(tx, hidden.map((f) => f.file))));
+
+    const [row] = await tx
+      .update(formSubmissions)
+      .set({ answers: result.answers, status: "submitted", submittedAt: new Date(), updatedAt: new Date() })
+      .where(and(eq(formSubmissions.id, sub.id), eq(formSubmissions.status, "draft")))
+      .returning();
+    if (!row) throw new ConflictError("The submission can no longer be changed", { details: { code: "submission_not_editable" } });
+    await tx.insert(auditLog).values({
+      eventType: "form_submission.submit",
+      subjectId: sub.id,
+      payload: { clubId: sub.clubId, formId: sub.formId, formVersionId: sub.formVersionId, userId, onBehalfOf: sub.onBehalfOf, fileCount: files.length - hidden.length },
+    });
+    return row;
+  });
+  await purgeAll(purge);
+  return c.json({ data: { submission: (await shapeSubmissions([submitted]))[0] } });
+});
+
+formSubmissionRoutes.post("/:id/withdraw", async (c) => {
+  const userId = c.get("user").id;
+  const purge: string[] = [];
+  const withdrawn = await db.transaction(async (tx) => {
+    const sub = await loadOwn(tx, c.req.param("id"), userId, true);
+    if (sub.status !== "draft" && sub.status !== "submitted") throw new ConflictError("The submission can no longer be withdrawn", { details: { code: "submission_not_withdrawable", status: sub.status } });
+    // A withdrawn application keeps its answers as a record, but its uploaded files (photo, documents) are deleted.
+    purge.push(...(await removeFiles(tx, (await loadFiles(tx, [sub.id])).map((f) => f.file))));
+    const [row] = await tx.update(formSubmissions).set({ status: "withdrawn", updatedAt: new Date() }).where(eq(formSubmissions.id, sub.id)).returning();
+    await tx.insert(auditLog).values({ eventType: "form_submission.withdraw", subjectId: sub.id, payload: { clubId: sub.clubId, userId, previousStatus: sub.status } });
+    return row!;
+  });
+  await purgeAll(purge);
+  return c.json({ data: { submission: (await shapeSubmissions([withdrawn]))[0] } });
+});
