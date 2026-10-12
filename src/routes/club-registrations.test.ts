@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { and, eq, inArray } from "drizzle-orm";
@@ -10,15 +10,19 @@ import { auth } from "../auth/auth.js";
 import { member, organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
-import { clubMemberships } from "../db/schema/club-memberships.js";
+import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrationDocuments, clubRegistrations } from "../db/schema/club-registrations.js";
+import { mediaFiles } from "../db/schema/media-files.js";
 import { encodeRfc5987 } from "../lib/club-registrations.js";
 import { toAppError } from "../lib/errors.js";
 import { sendEmail } from "../lib/email.js";
 import { nextMemberNumber } from "../lib/member-number.js";
-import { UPLOADS_DIR } from "../lib/storage.js";
+import { putObject, UPLOADS_DIR } from "../lib/storage.js";
 import { adminClubRegistrationRoutes } from "./admin-club-registrations.js";
+import { makePng } from "../lib/media-fixtures.js";
+import { signMediaKey } from "../lib/media-url.js";
+import { mediaRoutes } from "./media.js";
 import { clubApplicationRoutes } from "./club-applications.js";
 import { clubMemberRoutes } from "./club-members.js";
 import { clubRegistrationRoutes, MAX_DOCUMENTS_PER_REGISTRATION } from "./club-registrations.js";
@@ -43,6 +47,7 @@ app.route("/club-registrations", clubRegistrationRoutes);
 app.route("/admin/club-registrations", adminClubRegistrationRoutes);
 app.route("/club-members", clubMemberRoutes);
 app.route("/club-applications", clubApplicationRoutes);
+app.route("/media", mediaRoutes);
 app.onError((err, c) => {
   const appError = toAppError(err);
   return c.json(appError.toJSON(), appError.status as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 503);
@@ -51,7 +56,8 @@ app.onError((err, c) => {
 const suffix = Date.now();
 const json = { "content-type": "application/json" };
 const PDF = Buffer.concat([Buffer.from("%PDF-1.4\n"), Buffer.alloc(64, 0x20)]);
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]);
+// A structurally valid PNG: the media layer parses images to strip metadata and rejects corrupt files.
+const PNG = makePng(false);
 
 type Actor = { userId: string; cookie: string };
 
@@ -271,11 +277,11 @@ describe("club registrations (Wave 6)", () => {
       const reg = await create(who, "Patch Verein", { legalForm: "e_v", registerCourt: "AG Hanau", registerNumber: "VR 9" });
       const patch = (body: object) => req(who, `/club-registrations/${reg.id}`, { method: "PATCH", headers: json, body: JSON.stringify(body) });
 
-      const ok = await patch({ city: "Gelnhausen", claimedRole: "schriftfuehrer" });
+      const ok = await patch({ city: "Gelnhausen", claimedRole: "stellv_vorsitz" });
       expect(ok.status).toBe(200);
       expect(((await ok.json()) as { data: { registration: Reg & { city: string; claimedRole: string; clubName: string } } }).data.registration).toMatchObject({
         city: "Gelnhausen",
-        claimedRole: "schriftfuehrer",
+        claimedRole: "stellv_vorsitz",
         clubName: "Patch Verein",
       });
       expect((await patch({ registerNumber: null })).status).toBe(422); // e_v still needs it
@@ -398,6 +404,49 @@ describe("club registrations (Wave 6)", () => {
 
       for (let i = 1; i < MAX_DOCUMENTS_PER_REGISTRATION; i++) await addDoc(who, reg.id);
       expect((await upload(who, reg.id, uploadForm(PDF, "six.pdf", "application/pdf"))).status).toBe(422);
+    });
+
+    it("registers proofs as SENSITIVE media: no signed URL, authenticated stream with an audit entry per retrieval, delete = tombstone + file", async () => {
+      const who = await applicant("sensitive");
+      const reg = await create(who, "Sensitive Media Verein");
+      const docId = await addDoc(who, reg.id);
+      const doc = (await db.query.clubRegistrationDocuments.findFirst({ where: eq(clubRegistrationDocuments.id, docId) }))!;
+
+      const [media] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, doc.storageKey));
+      expect(media).toMatchObject({ clubId: null, sensitive: true, visibility: "private", kind: "document", mimeType: "application/pdf", ownerType: "club_registration", ownerId: reg.id, uploadedBy: who.userId });
+
+      // Not reachable through GET /media/* even with a correct signature.
+      const exp = Date.now() + 60_000;
+      const signed = `/media/${doc.storageKey}?exp=${exp}&sig=${signMediaKey(doc.storageKey, exp)}`;
+      expect((await app.request(signed)).status).toBe(404);
+
+      const dl = await req(who, `/club-registrations/${reg.id}/documents/${docId}`);
+      expect(dl.status).toBe(200);
+      expect(dl.headers.get("cache-control")).toBe("private, no-store");
+      expect(dl.headers.get("content-disposition")).toContain("attachment");
+      await req(who, `/club-registrations/${reg.id}/documents/${docId}`);
+      const audits = await db.select().from(auditLog).where(and(eq(auditLog.subjectId, reg.id), eq(auditLog.eventType, "media.sensitive_access")));
+      expect(audits).toHaveLength(2);
+      expect(audits[0].payload).toMatchObject({ mediaId: media.id, accessedBy: who.userId });
+
+      expect((await req(who, `/club-registrations/${reg.id}/documents/${docId}`, { method: "DELETE" })).status).toBe(204);
+      const [after] = await db.select().from(mediaFiles).where(eq(mediaFiles.id, media.id));
+      expect(after.deletedAt).not.toBeNull();
+      await expect(stat(path.join(UPLOADS_DIR, doc.storageKey))).rejects.toThrow();
+    });
+
+    it("streams a proof uploaded before the media registry existed and registers it as sensitive on first access", async () => {
+      const who = await applicant("legacydoc");
+      const reg = await create(who, "Legacy Doc Verein");
+      const { key } = await putObject({ prefix: `registrations/${reg.id}`, extension: "pdf", buffer: PDF });
+      const [doc] = await db.insert(clubRegistrationDocuments).values({ registrationId: reg.id, kind: "satzung", storageKey: key, filename: "alt.pdf", mimeType: "application/pdf", sizeBytes: PDF.length }).returning();
+      expect((await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, key))).length).toBe(0);
+
+      const dl = await req(who, `/club-registrations/${reg.id}/documents/${doc.id}`);
+      expect(dl.status).toBe(200);
+      expect(Buffer.from(await dl.arrayBuffer()).equals(PDF)).toBe(true);
+      const [media] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, key));
+      expect(media).toMatchObject({ sensitive: true, clubId: null, mimeType: "application/pdf", ownerType: "club_registration" });
     });
 
     it("deletes documents (204) while editable and refuses changes once pending", async () => {
@@ -590,9 +639,15 @@ describe("club registrations (Wave 6)", () => {
       expect(JSON.parse(orgRow!.metadata!)).toEqual({ registrationId: reg.id });
       const roles = await db.select().from(clubRoles).where(eq(clubRoles.memberId, owner!.id));
       expect(roles.map((r) => r.roleType)).toEqual(["stellv_vorsitz"]);
-      const membership = await db.query.clubMemberships.findFirst({ where: eq(clubMemberships.memberId, owner!.id) });
-      expect(membership?.memberNumber).toBe("TURN-0001");
-      expect(membership?.joinedAt).toBe(new Date().toISOString().slice(0, 10));
+      const clubMember = await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, owner!.id) });
+      expect(clubMember?.memberNumber).toBe("TURN-0001");
+      expect(clubMember?.joinedAt).toBe(new Date().toISOString().slice(0, 10));
+      expect(clubMember?.status).toBe("aktiv");
+      expect(clubMember?.displayName).toBe("Applicant approve");
+      // The founder is a club member with category "aktiv" and the five default categories exist.
+      const categories = await db.select().from(memberCategories).where(eq(memberCategories.clubId, data.club.id));
+      expect(categories.map((c) => c.key).sort()).toEqual(["aktiv", "ehrenmitglied", "foerdernd", "jugend", "passiv"]);
+      expect(categories.find((c) => c.id === clubMember?.categoryId)?.key).toBe("aktiv");
 
       const row = await db.query.clubRegistrations.findFirst({ where: eq(clubRegistrations.id, reg.id) });
       expect(row?.reviewedBy).toBe(admin.userId);
@@ -690,7 +745,9 @@ describe("club registrations (Wave 6)", () => {
     it("removes the created organization again when the approval fails afterwards, and can be retried", async () => {
       const who = await applicant("compensate");
       const reg = await submitted(who, `Kompensation Verein ${suffix}`);
-      vi.mocked(nextMemberNumber).mockRejectedValueOnce(new Error("boom"));
+      // First call: the Better Auth afterAddMember hook (failure is logged and swallowed there); second call: the
+      // approval transaction's own ensureClubMember, which aborts the approval.
+      vi.mocked(nextMemberNumber).mockRejectedValueOnce(new Error("boom")).mockRejectedValueOnce(new Error("boom"));
 
       expect((await decide(reg.id, "approve")).status).toBe(500);
       expect(await db.query.organization.findFirst({ where: eq(organization.slug, reg.slugSuggestion!) })).toBeUndefined();

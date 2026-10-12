@@ -7,6 +7,7 @@ import { auth } from "./auth/auth.js";
 import { closeDatabase } from "./db/client.js";
 import { AppError, toAppError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
+import { startMediaSweeper } from "./lib/media.js";
 import { type LoggerEnv, requestId } from "./middleware/request-id.js";
 import { adminClubRegistrationRoutes } from "./routes/admin-club-registrations.js";
 import { adminNotificationRoutes } from "./routes/admin-notifications.js";
@@ -19,7 +20,10 @@ import { calendarRoutes } from "./routes/calendars.js";
 import { clubApplicationRoutes } from "./routes/club-applications.js";
 import { clubRegistrationRoutes } from "./routes/club-registrations.js";
 import { clubInfoRoutes } from "./routes/club-info.js";
+import { clubExitRequestRoutes } from "./routes/club-exit-requests.js";
 import { clubMemberRoutes } from "./routes/club-members.js";
+import { clubSettingsRoutes } from "./routes/club-settings.js";
+import { clubStatsRoutes } from "./routes/club-stats.js";
 import { departmentRoutes } from "./routes/departments.js";
 import { eventRoutes, icsRoutes } from "./routes/events.js";
 import { healthRoutes } from "./routes/health.js";
@@ -38,14 +42,16 @@ app.use("*", requestId);
 
 // JSON API with no HTML to protect -- CSP is deliberately skipped, the
 // nonce-CSP proxy pattern in the website template is overkill/wrong here.
-app.use(
-  "*",
-  secureHeaders({
-    xContentTypeOptions: true,
-    xFrameOptions: "DENY",
-    referrerPolicy: "strict-origin-when-cross-origin",
-  }),
-);
+const baseSecureHeaders = {
+  xContentTypeOptions: true,
+  xFrameOptions: "DENY",
+  referrerPolicy: "strict-origin-when-cross-origin",
+} as const;
+const defaultSecureHeaders = secureHeaders(baseSecureHeaders);
+// Only GET /media/* (signed, or explicitly public_opt_in) is embedded cross-origin by the website (<img>, api. vs app.
+// subdomain); there the default Cross-Origin-Resource-Policy "same-origin" would block it. Everything else keeps it.
+const mediaSecureHeaders = secureHeaders({ ...baseSecureHeaders, crossOriginResourcePolicy: "cross-origin" });
+app.use("*", (c, next) => (c.req.path.startsWith("/media/") ? mediaSecureHeaders(c, next) : defaultSecureHeaders(c, next)));
 
 app.use(
   "*",
@@ -86,6 +92,9 @@ app.route("/admin/club-registrations", adminClubRegistrationRoutes);
 app.route("/club-registrations", clubRegistrationRoutes);
 app.route("/my-clubs", myClubRoutes);
 app.route("/club-members", clubMemberRoutes);
+app.route("/club-stats", clubStatsRoutes);
+app.route("/club-settings", clubSettingsRoutes);
+app.route("/club-exit-requests", clubExitRequestRoutes);
 app.route("/club-applications", clubApplicationRoutes);
 app.route("/departments", departmentRoutes);
 app.route("/club-info", clubInfoRoutes);
@@ -104,12 +113,16 @@ const port = Number(process.env.PORT ?? 3000);
 // needs an explicit opt-in, same reasoning as mycouple-backend's BIND_HOST.
 const hostname = process.env.BIND_HOST ?? "127.0.0.1";
 
+// Unused uploads (POST /media files no feature row claimed) are removed after MEDIA_UNATTACHED_TTL_HOURS.
+const stopMediaSweeper = startMediaSweeper();
+
 const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
   logger.info(`Server is running on http://${hostname}:${info.port}`);
 });
 
 async function shutdown(signal: string) {
   logger.info(`[shutdown] received ${signal}, closing server`);
+  stopMediaSweeper();
   server.close(async () => {
     await closeDatabase();
     process.exit(0);

@@ -29,8 +29,7 @@ import {
   toDocumentDto,
 } from "../lib/club-registrations.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
-import { deleteObject, putObject, sanitizeFilename } from "../lib/storage.js";
-import { logger } from "../lib/logger.js";
+import { discardStoredFile, markMediaDeleted, MAX_DOCUMENT_BYTES, purgeMediaFile, storeUpload } from "../lib/media.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard, type SessionEnv } from "../middleware/session-guard.js";
 
@@ -43,14 +42,9 @@ import { sessionGuard, type SessionEnv } from "../middleware/session-guard.js";
  */
 export const clubRegistrationRoutes = new Hono<SessionEnv>();
 
-export const MAX_DOCUMENT_BYTES = 10 * 1024 * 1024; // 10 MB
 export const MAX_DOCUMENTS_PER_REGISTRATION = 5;
-/** Allowlist: content type -> first bytes every genuine file of that type starts with. */
-const DOCUMENT_SIGNATURES: Record<string, number[]> = {
-  "application/pdf": [0x25, 0x50, 0x44, 0x46, 0x2d], // %PDF-
-  "image/jpeg": [0xff, 0xd8, 0xff],
-  "image/png": [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
-};
+/** Proof documents: PDF, JPEG, PNG (magic bytes, size, metadata strip and registry: central media layer, `src/lib/media.ts`). */
+const PROOF_TYPES = ["application/pdf", "image/jpeg", "image/png"] as const;
 
 /** Proofs that count towards E2 per legal form. `sonstiges` alone never suffices. */
 const QUALIFYING_KINDS: Record<string, RegistrationDocumentKind[]> = {
@@ -141,13 +135,6 @@ function assertEditable(row: ClubRegistrationRow) {
   if (row.status !== "draft" && row.status !== "needs_info") {
     throw new ConflictError("Registration can only be changed while it is a draft or needs more information");
   }
-}
-
-function detectContentType(buffer: Buffer): string | null {
-  for (const [type, signature] of Object.entries(DOCUMENT_SIGNATURES)) {
-    if (buffer.length >= signature.length && signature.every((byte, i) => buffer[i] === byte)) return type;
-  }
-  return null;
 }
 
 // --- routes ------------------------------------------------------------
@@ -264,18 +251,8 @@ clubRegistrationRoutes.post(
     const kind = z.enum(REGISTRATION_DOCUMENT_KINDS).safeParse(body["kind"]);
     if (!kind.success) throw new ValidationError(`kind must be one of: ${REGISTRATION_DOCUMENT_KINDS.join(", ")}`);
 
-    if (!Object.hasOwn(DOCUMENT_SIGNATURES, file.type)) throw new ValidationError(`Unsupported content type: ${file.type || "unknown"} (allowed: PDF, JPEG, PNG)`);
-    if (file.size > MAX_DOCUMENT_BYTES) throw new ValidationError(`File exceeds maximum size of ${MAX_DOCUMENT_BYTES} bytes`);
-    if (file.size === 0) throw new ValidationError("File is empty");
-
-    const buffer = Buffer.from(await file.arrayBuffer());
-    // The declared type is client-controlled -- the content must actually look like that type.
-    if (detectContentType(buffer) !== file.type) throw new ValidationError("File content does not match its declared content type");
-
-    const filename = sanitizeFilename(file.name);
-
     // Lock the registration row so parallel uploads can't exceed the per-registration cap.
-    let stored: { key: string } | null = null;
+    const stored: { key: string | null } = { key: null };
     try {
       const doc = await db.transaction(async (tx) => {
         const [locked] = await tx.execute<{ status: string }>(sql`SELECT status FROM club_registrations WHERE id = ${registration.id} FOR UPDATE`).then((r) => r.rows);
@@ -290,11 +267,24 @@ clubRegistrationRoutes.post(
           throw new ValidationError(`At most ${MAX_DOCUMENTS_PER_REGISTRATION} documents per registration`);
         }
 
-        // Private path, deliberately not the club-scoped media namespace (see routes/media.ts).
-        stored = await putObject({ clubId: `registrations/${registration.id}`, filename, buffer });
+        // Private path outside the club-scoped namespace; registered as a SENSITIVE file, so it is never reachable
+        // through a signed URL, only through the audited download routes below.
+        const media = await storeUpload({
+          file,
+          clubId: null,
+          storagePrefix: `registrations/${registration.id}`,
+          kind: "document",
+          allowedTypes: PROOF_TYPES,
+          maxBytes: MAX_DOCUMENT_BYTES,
+          sensitive: true,
+          owner: { type: "club_registration", id: registration.id },
+          uploadedBy: registration.userId,
+          executor: tx,
+        });
+        stored.key = media.storageKey;
         const [created] = await tx
           .insert(clubRegistrationDocuments)
-          .values({ registrationId: registration.id, kind: kind.data, storageKey: stored.key, filename, mimeType: file.type, sizeBytes: file.size })
+          .values({ registrationId: registration.id, kind: kind.data, storageKey: media.storageKey, filename: media.originalFilename, mimeType: media.mimeType, sizeBytes: media.sizeBytes })
           .returning();
         await tx.insert(auditLog).values({
           eventType: "club_registration.document_add",
@@ -305,8 +295,8 @@ clubRegistrationRoutes.post(
       });
       return c.json({ data: { document: toDocumentDto(doc) } }, 201);
     } catch (err) {
-      const orphan = stored as { key: string } | null;
-      if (orphan) await deleteObject(orphan.key).catch((e) => logger.error({ err: e, key: orphan.key }, "[club-registrations] failed to remove orphaned upload"));
+      // The transaction rolled back (registry row included): drop the file that was already written.
+      if (stored.key) await discardStoredFile(stored.key);
       throw err;
     }
   },
@@ -327,7 +317,7 @@ clubRegistrationRoutes.get("/:id/documents/:docId", async (c) => {
   if (!registration) throw new NotFoundError("Registration not found");
   const doc = await findDocument(registration.id, c.req.param("docId"));
   if (viaAdmin) await recordAdminDocumentAccess(currentUser.id, registration.id, doc);
-  return documentResponse(c, doc);
+  return documentResponse(c, doc, currentUser.id);
 });
 
 clubRegistrationRoutes.delete("/:id/documents/:docId", documentLimiter, async (c) => {
@@ -349,7 +339,10 @@ clubRegistrationRoutes.delete("/:id/documents/:docId", documentLimiter, async (c
       payload: { documentId: doc.id, kind: doc.kind, userId: registration.userId },
     });
   });
-  await deleteObject(doc.storageKey).catch((err) => logger.error({ err, key: doc.storageKey }, "[club-registrations] failed to remove deleted document file"));
+  // The key comes from our own document row (never from the client), so the file can be purged unconditionally -- also
+  // for pre-registry documents that have no media_files row.
+  await markMediaDeleted(doc.storageKey);
+  await purgeMediaFile(doc.storageKey);
 
   return c.body(null, 204);
 });

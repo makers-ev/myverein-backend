@@ -6,9 +6,14 @@ import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { mediaFiles } from "../db/schema/media-files.js";
 import { locations } from "../db/schema/locations.js";
 import { toAppError } from "../lib/errors.js";
+import { inventoryDamageReports } from "../db/schema/inventory.js";
+import { makeJpeg, makePng } from "../lib/media-fixtures.js";
+import { putObject } from "../lib/storage.js";
 import { inventoryItemRoutes } from "./inventory-items.js";
+import { mediaRoutes } from "./media.js";
 
 /**
  * Integration test against a real Postgres (DATABASE_URL), following
@@ -23,6 +28,7 @@ import { inventoryItemRoutes } from "./inventory-items.js";
 
 const app = new Hono();
 app.route("/inventory-items", inventoryItemRoutes);
+app.route("/media", mediaRoutes);
 app.onError((err, c) => {
   const appError = toAppError(err);
   return c.json(appError.toJSON(), appError.status as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 503);
@@ -311,21 +317,67 @@ describe("inventory-items routes", () => {
   describe("damage reports", () => {
     let reportId: string;
 
-    it("lets any club member self-report damage, deriving a photoUrl from photoKey", async () => {
-      const res = await app.request(`/inventory-items/${itemId}/damage-reports?clubId=${clubAId}`, {
-        method: "POST",
-        headers: { cookie: cookieMember2, "content-type": "application/json" },
-        body: JSON.stringify({ description: "Linse zerkratzt", photoKey: `${clubAId}/some-uuid-photo.jpg` }),
-      });
+    const uploadPhoto = async (clubId: string, cookie: string, bytes = makePng(true), type = "image/png") => {
+      const form = new FormData();
+      form.set("file", new File([new Uint8Array(bytes)], "schaden.png", { type }));
+      const res = await app.request(`/media?clubId=${clubId}`, { method: "POST", headers: { cookie }, body: form });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { data: { key: string } }).data.key;
+    };
+    const report = (cookie: string, body: unknown) =>
+      app.request(`/inventory-items/${itemId}/damage-reports?clubId=${clubAId}`, { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    it("lets any club member self-report damage; the photo comes back as a signed URL, never as the key", async () => {
+      const photoKey = await uploadPhoto(clubAId, cookieMember2);
+      const res = await report(cookieMember2, { description: "Linse zerkratzt", photoKey });
       expect(res.status).toBe(201);
       const body = (await res.json()) as {
-        data: { id: string; reportedBy: string; description: string; status: string; photoUrl: string | null };
+        data: { id: string; reportedBy: string; description: string; status: string; photoUrl: string | null; photoKey?: string };
       };
       expect(body.data.reportedBy).toBe(member2Id);
       expect(body.data.description).toBe("Linse zerkratzt");
       expect(body.data.status).toBe("gemeldet");
-      expect(body.data.photoUrl).toBe(`/media/${clubAId}/some-uuid-photo.jpg`);
+      expect(body.data.photoKey).toBeUndefined();
+      expect(body.data.photoUrl).toMatch(new RegExp(`/media/${clubAId}/[0-9a-f-]{36}\\.png\\?exp=\\d+&sig=[0-9a-f]{64}$`));
       reportId = body.data.id;
+
+      // The signed URL loads without any cookie; the bare key does not.
+      const url = new URL(body.data.photoUrl!);
+      expect((await app.request(`${url.pathname}${url.search}`)).status).toBe(200);
+      expect((await app.request(url.pathname)).status).toBe(403);
+      // The file is now claimed by the report.
+      const [media] = await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, photoKey));
+      expect(media).toMatchObject({ ownerType: "damage_report", ownerId: body.data.id });
+      const [stored] = await db.select().from(inventoryDamageReports).where(eq(inventoryDamageReports.id, body.data.id));
+      expect(stored.photoKey).toBe(photoKey);
+    });
+
+    it("rejects invented, foreign-club, other-user, already-used and non-image photo keys with 422 and leaves no report behind", async () => {
+      const countBefore = (await db.select().from(inventoryDamageReports).where(eq(inventoryDamageReports.itemId, itemId))).length;
+      expect((await report(cookieMember2, { description: "x", photoKey: `${clubAId}/some-uuid-photo.jpg` })).status).toBe(422); // never uploaded
+      expect((await report(cookieMember2, { description: "x", photoKey: `${clubBId}/whatever.png` })).status).toBe(422);
+      const foreign = await uploadPhoto(clubBId, cookieB);
+      expect((await report(cookieMember2, { description: "x", photoKey: foreign })).status).toBe(422); // other club's upload
+      const someoneElses = await uploadPhoto(clubAId, cookieMember1);
+      expect((await report(cookieMember2, { description: "x", photoKey: someoneElses })).status).toBe(422); // uploaded by another user
+      const own = await uploadPhoto(clubAId, cookieMember2);
+      expect((await report(cookieMember2, { description: "once", photoKey: own })).status).toBe(201);
+      expect((await report(cookieMember2, { description: "twice", photoKey: own })).status).toBe(422); // can be claimed only once
+      const countAfter = (await db.select().from(inventoryDamageReports).where(eq(inventoryDamageReports.itemId, itemId))).length;
+      expect(countAfter - countBefore).toBe(1);
+    });
+
+    it("serves a pre-registry photo key (written before the media layer) as a signed URL, registering it on read", async () => {
+      const { key } = await putObject({ prefix: clubAId, extension: "jpg", buffer: makeJpeg(false) });
+      const [legacy] = await db.insert(inventoryDamageReports).values({ itemId, reportedBy: member2Id, description: "alt", photoKey: key }).returning();
+      const res = await app.request(`/inventory-items/${itemId}/damage-reports?clubId=${clubAId}`, { headers: { cookie: cookieBoard } });
+      const rows = ((await res.json()) as { data: Array<{ id: string; photoUrl: string | null }> }).data;
+      const row = rows.find((r) => r.id === legacy.id)!;
+      expect(row.photoUrl).toContain(`/media/${key}?exp=`);
+      const url = new URL(row.photoUrl!);
+      const served = await app.request(`${url.pathname}${url.search}`);
+      expect(served.status).toBe(200);
+      expect(served.headers.get("content-type")).toBe("image/jpeg");
     });
 
     it("lists damage reports for the item, newest first", async () => {

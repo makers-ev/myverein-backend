@@ -7,7 +7,6 @@ import { auth } from "../auth/auth.js";
 import { member, organization, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
-import { clubMemberships } from "../db/schema/club-memberships.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrations, REGISTRATION_STATUSES, type ClubRegistrationRow } from "../db/schema/club-registrations.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
@@ -21,7 +20,8 @@ import { documentResponse, findDocument, isUuid, recordAdminDocumentAccess, regi
 import { assertValidClubSlug, slugifyClubName, uniqueClubSlug } from "../lib/club-slug.js";
 import { ConflictError, InternalError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
-import { nextMemberNumber } from "../lib/member-number.js";
+import { todayBerlin } from "../lib/member-lifecycle.js";
+import { ensureClubMember } from "../lib/club-members.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { adminGuard, type SessionEnv } from "../middleware/session-guard.js";
 
@@ -176,7 +176,7 @@ adminClubRegistrationRoutes.get("/:id/documents/:docId", async (c) => {
   if (row.status === "draft") throw new NotFoundError("Registration not found");
   const doc = await findDocument(row.id, c.req.param("docId"));
   await recordAdminDocumentAccess(c.get("user").id, row.id, doc);
-  return documentResponse(c, doc);
+  return documentResponse(c, doc, c.get("user").id);
 });
 
 // --- decisions ---------------------------------------------------------
@@ -296,19 +296,17 @@ adminClubRegistrationRoutes.post("/:id/approve", async (c) => {
         .returning();
       if (!decided) throw new ConflictError("Registration has already been decided or is not pending");
 
-      const memberNumber = await nextMemberNumber(tx, org.id);
-      await tx.insert(clubMemberships).values({
-        memberId: owner.id,
-        memberNumber,
-        category: "aktiv",
-        joinedAt: new Date().toISOString().slice(0, 10),
-      });
+      // Founder = first club member: category "aktiv", automatic member number (<ABBR>-0001). The Better Auth
+      // afterAddMember hook has normally created the row already; this makes it certain (idempotent) and also seeds
+      // the default categories.
+      const founder = await ensureClubMember(tx, owner, { categoryKey: "aktiv", joinedAt: todayBerlin() });
+      const memberNumber = founder.memberNumber;
       await tx.insert(clubRoles).values({ memberId: owner.id, roleType: reg.claimedRole });
 
       await tx.insert(auditLog).values({
         eventType: "club_registration.approve",
         subjectId: reg.id,
-        payload: { clubId: org.id, slug: org.slug, userId: reg.userId, memberId: owner.id, decidedBy: reviewer.id, claimedRole: reg.claimedRole, memberNumber },
+        payload: { clubId: org.id, slug: org.slug, userId: reg.userId, memberId: owner.id, clubMemberId: founder.id, decidedBy: reviewer.id, claimedRole: reg.claimedRole, memberNumber },
       });
 
       return { registration: decided, club: { id: org.id, name: org.name, slug: org.slug } };

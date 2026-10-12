@@ -4,6 +4,10 @@ import { pgTable, text, timestamp, uuid, integer, boolean, index, uniqueIndex } 
 import { member, user, organization } from "../../auth/auth-schema.js";
 import { locations } from "./locations.js";
 
+/** Controlled meeting types (validated via Zod, text in the DB). Only `vorstandssitzung` is read-scoped. */
+export const MEETING_TYPES = ["vorstandssitzung", "mitgliederversammlung", "sonstige"] as const;
+export type MeetingType = (typeof MEETING_TYPES)[number];
+
 /**
  * A club meeting (board meeting, general assembly, committee session). See
  * Data Model - MyVerein Backend §7 "meetings".
@@ -15,8 +19,7 @@ export const meetings = pgTable(
     clubId: text("club_id")
       .notNull()
       .references(() => organization.id, { onDelete: "cascade" }),
-    // Freitext-Beispiele: "vorstandssitzung" | "mitgliederversammlung" |
-    // "ausschusssitzung".
+    // One of MEETING_TYPES (Zod-validated; migration 0016 mapped the old free text).
     type: text("type").notNull(),
     title: text("title").notNull(),
     // Null while still scheduling (Terminfindung).
@@ -85,6 +88,10 @@ export const meetingResolutions = pgTable(
     votesAbstain: integer("votes_abstain").notNull().default(0),
     // Freitext-Beispiele: "angenommen" | "abgelehnt".
     result: text("result").notNull(),
+    // Berichtigungsvermerk: set when a resolution is corrected (PATCH) instead of silently overwritten.
+    correctionNote: text("correction_note"),
+    correctedAt: timestamp("corrected_at", { withTimezone: true }),
+    correctedBy: text("corrected_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("meeting_resolutions_meeting_id_idx").on(table.meetingId)],

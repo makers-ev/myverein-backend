@@ -11,7 +11,7 @@ import {
 } from "../db/schema/club-registrations.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { NotFoundError } from "./errors.js";
-import { getObject } from "./storage.js";
+import { findMediaByKey, registerLegacyFile, streamSensitiveMedia } from "./media.js";
 
 /** Shared by the applicant API (routes/club-registrations.ts) and the reviewer API (routes/admin-club-registrations.ts). */
 
@@ -127,20 +127,24 @@ export function encodeRfc5987(value: string): string {
   return encodeURIComponent(value).replace(/['()*]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-/** Streams a stored proof document as an attachment. The content type comes from our own allowlist, never from the filename. */
-export async function documentResponse(c: Context, doc: ClubRegistrationDocumentRow): Promise<Response> {
-  let buffer: Buffer;
-  try {
-    buffer = await getObject(doc.storageKey);
-  } catch {
-    throw new NotFoundError("Document not found");
-  }
-  const asciiName = doc.filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
-  c.header("Content-Type", doc.mimeType);
-  c.header("Content-Disposition", `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeRfc5987(doc.filename)}`);
-  c.header("Cache-Control", "private, no-store");
-  c.header("X-Content-Type-Options", "nosniff");
-  return c.body(new Uint8Array(buffer));
+/**
+ * Streams a stored proof document through the central media layer: authenticated, sensitive (never a signed URL),
+ * `attachment`, `Cache-Control: private, no-store`, content type from the registry, one audit entry per retrieval.
+ * Documents uploaded before the registry existed are registered on first access.
+ */
+export async function documentResponse(c: Context, doc: ClubRegistrationDocumentRow, accessedBy: string): Promise<Response> {
+  const media =
+    (await findMediaByKey(doc.storageKey)) ??
+    (await registerLegacyFile({
+      storageKey: doc.storageKey,
+      clubId: null,
+      kind: "document",
+      owner: { type: "club_registration", id: doc.registrationId },
+      sensitive: true,
+      filename: doc.filename,
+    }));
+  if (!media) throw new NotFoundError("Document not found");
+  return streamSensitiveMedia(c, media, { accessedBy, subjectId: doc.registrationId });
 }
 
 /** Platform admins reading an applicant's proof documents is sensitive (GDPR): every such access is audit-logged. */

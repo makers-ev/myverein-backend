@@ -4,6 +4,9 @@ import { pgTable, text, timestamp, date, uuid, uniqueIndex } from "drizzle-orm/p
 import { member } from "../../auth/auth-schema.js";
 
 /**
+ * @deprecated Wave 7 (ADR-003): master data moved to `club_members`. This table is kept read-only as a
+ * transition view and is no longer written by the API. Do not add new writers.
+ *
  * 1:1 extension of Better Auth's `member` row (organization membership) with
  * club-specific attributes Better Auth itself has no concept of. Mirrors
  * MyHome's `household_profiles` sidecar pattern, just hung off `member`

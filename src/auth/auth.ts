@@ -9,6 +9,11 @@ import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plu
 import { organization as organizationTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { assertRejoinAllowed, ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
+import { recordKeyReturnsForRemovedAccount } from "../lib/key-returns.js";
+import { ConflictError } from "../lib/errors.js";
+import { inviteLinkContext } from "../lib/invite-context.js";
+import { logger } from "../lib/logger.js";
 import { notification, notificationTemplate } from "../db/schema/notifications.js";
 import { sendEmail } from "../lib/email.js";
 import { APP_NAME, buildResetPasswordEmail, buildVerifyEmailEmail, LOGO_CID, LOGO_PATH } from "../lib/emailTemplate.js";
@@ -32,6 +37,12 @@ if (!authSecret) {
  * and token validation end to end via `trustedOrigins` + its own
  * server-side session table lookups.
  */
+/** Maps the domain 409 of `assertRejoinAllowed` to a Better Auth error so the join attempt is rejected. */
+function rejoinBlocked(err: unknown): never {
+  if (err instanceof ConflictError) throw new APIError("CONFLICT", { message: err.message });
+  throw err;
+}
+
 export const auth = betterAuth({
   secret: authSecret,
   // Explicit instead of inferred from the request host -- matters once this
@@ -143,6 +154,51 @@ export const auth = betterAuth({
       // registration would be left with club_id NULL. (Deleting is a platform/DB operation.)
       disableOrganizationDeletion: true,
       organizationHooks: {
+        // ADR-003: every account member (founder via createOrganization, addMember, accepted invitation) gets its
+        // club_members row, so no join path can slip past. A failure is logged, not thrown: the account membership
+        // already exists at this point and the explicit join flows (application approval, club approval, seed) as well
+        // as GET /club-members and /me call ensureClubMember again and repair it.
+        // Excluded / deceased persons can't re-join through addMember or an invitation (409); the board reopens first.
+        beforeAddMember: async ({ member: adding }) => {
+          await assertRejoinAllowed(db, adding.organizationId, adding.userId).catch(rejoinBlocked);
+        },
+        beforeAcceptInvitation: async ({ invitation, user: accepting }) => {
+          await assertRejoinAllowed(db, invitation.organizationId, accepting.id).catch(rejoinBlocked);
+        },
+        afterAddMember: async ({ member: addedMember }) => {
+          // Accepting a member invitation links the EXISTING club_members row afterwards (lib/member-invites.ts).
+          if (inviteLinkContext.getStore()) return;
+          try {
+            await ensureClubMember(db, addedMember);
+          } catch (err) {
+            logger.error({ err, memberId: addedMember.id }, "[auth] could not create club_members row for new member");
+          }
+        },
+        // Removing the account membership keeps the person as club member (FK ON DELETE SET NULL) but closes it
+        // (status ausgetreten + history) so no ghost "aktiv" member without account remains. /leave and user deletion
+        // fire no hook; there the same closing happens lazily (resolveClubMember, GET /club-members).
+        // Keys the removed account still holds leave a `returned` history entry (the holder rows cascade away).
+        beforeRemoveMember: async ({ member: removing }) => {
+          try {
+            await recordKeyReturnsForRemovedAccount(db, removing.id, null);
+          } catch (err) {
+            logger.error({ err, memberId: removing.id }, "[auth] could not record key returns of removed member");
+          }
+        },
+        afterRemoveMember: async ({ organization: org }) => {
+          try {
+            await markDetachedMembersLeft(db, org.id);
+          } catch (err) {
+            logger.error({ err, clubId: org.id }, "[auth] could not close club_members row of removed member");
+          }
+        },
+        afterAcceptInvitation: async ({ member: acceptedMember }) => {
+          try {
+            await ensureClubMember(db, acceptedMember);
+          } catch (err) {
+            logger.error({ err, memberId: acceptedMember.id }, "[auth] could not create club_members row for accepted invitation");
+          }
+        },
         // The slug is the public join key (Aufnahmeantrag) and the name is what the platform admin verified
         // during the registration review -- both must stay stable once assigned, so reject any attempt to
         // change them through /api/auth/organization/update. Re-sending the current value is a no-op;

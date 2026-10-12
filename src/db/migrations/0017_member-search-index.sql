@@ -1,0 +1,1 @@
+CREATE INDEX "club_members_club_name_idx" ON "club_members" USING btree ("club_id",lower("display_name"));

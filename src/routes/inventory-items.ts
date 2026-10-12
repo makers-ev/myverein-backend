@@ -5,10 +5,12 @@ import { z } from "zod";
 
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { clubSettings } from "../db/schema/club-settings.js";
 import { inventoryDamageReports, inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { locations } from "../db/schema/locations.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { attachUploadedImage, signedMediaUrls } from "../lib/media.js";
 import { effectiveLoanStatus, isMaintenanceDue, maintenanceDueDate } from "../lib/inventory-status.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -207,6 +209,12 @@ inventoryItemRoutes.post(
 
     await loadClubInventoryItem(id, clubId);
 
+    // Self-service borrowing can be switched off per club (club_settings.allow_self_loans, default true); inventory:write holders are exempt.
+    const settings = await db.query.clubSettings.findFirst({ where: eq(clubSettings.clubId, clubId) });
+    if (settings && !settings.allowSelfLoans && !hasClubPermission(c.get("clubRoleTypes"), "inventory:write")) {
+      throw new ForbiddenError("Self-service borrowing is disabled for this club");
+    }
+
     const [row] = await db
       .insert(inventoryLoans)
       .values({
@@ -263,8 +271,13 @@ inventoryItemRoutes.patch("/:id/loans/:loanId", async (c) => {
 
 // --- Damage reports -----------------------------------------------------------
 
-function withPhotoUrl<T extends { photoUrl: string | null }>(row: T): T & { photoUrl: string | null } {
-  return { ...row, photoUrl: row.photoUrl ? `/media/${row.photoUrl}` : null };
+/**
+ * Response shape of damage reports: the stored `photoKey` is internal, clients get `photoUrl` -- a short-lived signed
+ * media URL (null if there is no photo or it is gone). Called after the route's own permission check.
+ */
+async function shapeDamageReports<T extends { photoKey: string | null }>(clubId: string, rows: T[]) {
+  const urls = await signedMediaUrls(clubId, rows.map((r) => r.photoKey), "damage_report");
+  return rows.map(({ photoKey, ...rest }) => ({ ...rest, photoUrl: photoKey ? (urls.get(photoKey) ?? null) : null }));
 }
 
 inventoryItemRoutes.get("/:id/damage-reports", async (c) => {
@@ -277,7 +290,7 @@ inventoryItemRoutes.get("/:id/damage-reports", async (c) => {
     where: eq(inventoryDamageReports.itemId, id),
     orderBy: (r, { desc }) => [desc(r.createdAt)],
   });
-  return c.json({ data: rows.map(withPhotoUrl) });
+  return c.json({ data: await shapeDamageReports(clubId, rows) });
 });
 
 const createDamageReportSchema = z.object({
@@ -298,31 +311,25 @@ inventoryItemRoutes.post(
 
     await loadClubInventoryItem(id, clubId);
 
-    // Same club-prefix shape as a real /media key ("<clubId>/..."), mirroring
-    // the locationId check above -- GET /media/:key independently re-checks
-    // this at read time too, but rejecting an obviously-foreign key up front
-    // keeps a garbage/wrong-club value out of the row in the first place.
-    if (body.photoKey && !body.photoKey.startsWith(`${clubId}/`)) {
-      throw new ValidationError("photoKey is not a media key of this club");
-    }
-
-    const [row] = await db
-      .insert(inventoryDamageReports)
-      .values({
-        itemId: id,
-        reportedBy: membership.id,
-        description: body.description,
-        photoUrl: body.photoKey,
-      })
-      .returning();
-
-    await db.insert(auditLog).values({
-      eventType: "inventory_damage_report.create",
-      subjectId: row.id,
-      payload: { clubId, itemId: id, memberId: membership.id },
+    // A photoKey must be a registered, still unattached image of THIS club that the caller uploaded via POST /media
+    // (claimed exactly once, in the same transaction as the report) -- a foreign or invented key is a 422.
+    const row = await db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(inventoryDamageReports)
+        .values({ itemId: id, reportedBy: membership.id, description: body.description, photoKey: body.photoKey })
+        .returning();
+      if (body.photoKey) {
+        await attachUploadedImage(tx, { clubId, storageKey: body.photoKey, uploadedBy: c.get("user").id, owner: { type: "damage_report", id: created!.id } });
+      }
+      await tx.insert(auditLog).values({
+        eventType: "inventory_damage_report.create",
+        subjectId: created!.id,
+        payload: { clubId, itemId: id, memberId: membership.id },
+      });
+      return created!;
     });
 
-    return c.json({ data: withPhotoUrl(row) }, 201);
+    return c.json({ data: (await shapeDamageReports(clubId, [row]))[0] }, 201);
   },
 );
 
@@ -362,6 +369,6 @@ inventoryItemRoutes.patch(
       payload: { clubId, itemId: id, status: body.status },
     });
 
-    return c.json({ data: withPhotoUrl(row) });
+    return c.json({ data: (await shapeDamageReports(clubId, [row]))[0] });
   },
 );

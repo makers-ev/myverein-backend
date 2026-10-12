@@ -15,6 +15,9 @@
  */
 
 export const CLUB_ROLE_TYPES = [
+  // Implicit base role of every account member (see clubGuard). Never stored in
+  // club_roles, cannot be assigned or revoked -- see ASSIGNABLE_ROLE_TYPES.
+  "mitglied",
   "vorsitz",
   "stellv_vorsitz",
   "kassenwart",
@@ -27,6 +30,15 @@ export const CLUB_ROLE_TYPES = [
 
 export type ClubRoleType = (typeof CLUB_ROLE_TYPES)[number];
 
+/** The implicit base role every (non-guest) account member holds; has no write permissions. */
+export const IMPLICIT_ROLE_TYPE = "mitglied" as const;
+
+/** Role types the roles API may assign/revoke -- everything except the implicit `mitglied`. */
+export const ASSIGNABLE_ROLE_TYPES = CLUB_ROLE_TYPES.filter((r) => r !== IMPLICIT_ROLE_TYPE) as [
+  Exclude<ClubRoleType, "mitglied">,
+  ...Exclude<ClubRoleType, "mitglied">[],
+];
+
 export type ClubPermission =
   | "members:write" // edit other members' data, change category/status
   | "members:read_sensitive" // read fields beyond name/department (birth date, emergency contact, membership status) for OTHER members
@@ -36,7 +48,10 @@ export type ClubPermission =
   | "calendars:write" // manage calendars/events + calendar_visibility grants
   | "meetings:write" // manage meetings/agenda/invitees/attendance/resolutions
   | "locations:write" // manage locations/key holders/wifi networks/links
-  | "inventory:write"; // manage inventory items/loans/damage reports
+  | "meetings:read_board" // read Vorstandssitzungen (incl. minutes, resolutions, attendance) without being invited
+  | "locations:read_access" // read key holders, access notes and 'vorstand'-level wifi/links
+  | "inventory:write" // manage inventory items/loans/damage reports
+  | "club_stats:read"; // association KPIs (GET /club-stats): counts only, board roles
 
 /**
  * Which permissions each role_type grants. A membership can hold several
@@ -49,6 +64,9 @@ export type ClubPermission =
  * beisitzer/abteilungsleitung/trainer do not get `members:read_sensitive`.
  */
 const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
+  // Deny-by-default: the base role grants NO write permission at all (explicitly empty).
+  // Reads that are not club-wide open are scoped in the routes (meetings, locations).
+  mitglied: [],
   vorsitz: [
     "members:write",
     "members:read_sensitive",
@@ -59,6 +77,9 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "meetings:write",
     "locations:write",
     "inventory:write",
+    "meetings:read_board",
+    "locations:read_access",
+    "club_stats:read",
   ],
   stellv_vorsitz: [
     "members:write",
@@ -70,19 +91,23 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "meetings:write",
     "locations:write",
     "inventory:write",
+    "meetings:read_board",
+    "locations:read_access",
+    "club_stats:read",
   ],
-  kassenwart: ["members:read_sensitive"],
+  kassenwart: ["members:read_sensitive", "club_stats:read"],
   // A schriftfuehrer's real-world job in a German Verein is literally running
   // meeting agendas/Protokolle, so meetings:write is a natural fit here.
-  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write"],
-  beisitzer: [],
+  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read"],
+  // Beisitzer sit on the board, so they may read Vorstandssitzungen and the club KPIs (but write nothing).
+  beisitzer: ["meetings:read_board", "club_stats:read"],
   // Also calendars:write/locations:write/inventory:write, on top of
   // departments:write -- an Abteilungsleitung needs to manage calendars,
   // venues, and equipment day to day, not just the board (same
   // operational-need reasoning as members:read_sensitive above). Note this
   // is club-wide, not scoped to just their own department -- same shape as
   // their existing departments:write (Wave 1 precedent), not a new gap.
-  abteilungsleitung: ["departments:write", "calendars:write", "locations:write", "inventory:write"],
+  abteilungsleitung: ["departments:write", "calendars:write", "locations:write", "inventory:write", "locations:read_access"],
   trainer: [],
   erziehungsberechtigt: [],
 };

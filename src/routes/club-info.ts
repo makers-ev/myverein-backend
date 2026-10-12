@@ -10,6 +10,7 @@ import { clubInfoPages } from "../db/schema/club-info-pages.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { departments } from "../db/schema/departments.js";
 import { BOARD_ROLE_TYPES, hasClubPermission } from "../lib/club-permissions.js";
+import { boardPhotoUrls } from "../lib/member-photos.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -48,6 +49,14 @@ clubInfoRoutes.get("/", async (c) => {
   const users = userIds.length ? await db.query.user.findMany({ where: inArray(user.id, userIds) }) : [];
   const usersById = new Map(users.map((u) => [u.id, u]));
 
+  // Board photos: only for members:write / members:read_sensitive and the person themselves (consent follows in Wave 10).
+  const roleTypes = c.get("clubRoleTypes");
+  const boardPhotos = await boardPhotoUrls(clubId, [...new Set(boardRoleRows.map((r) => r.memberId))], {
+    memberId: c.get("membership").id,
+    canReadSensitive: hasClubPermission(roleTypes, "members:read_sensitive"),
+    canWrite: hasClubPermission(roleTypes, "members:write"),
+  });
+
   const board = boardRoleRows.map((roleRow) => {
     const memberRow = membersById.get(roleRow.memberId);
     const userRow = memberRow ? usersById.get(memberRow.userId) : undefined;
@@ -56,6 +65,7 @@ clubInfoRoutes.get("/", async (c) => {
       name: userRow?.name ?? null,
       roleType: roleRow.roleType,
       termEndsAt: roleRow.termEndsAt,
+      photoUrl: boardPhotos.get(roleRow.memberId) ?? null,
     };
   });
 
