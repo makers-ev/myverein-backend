@@ -22,6 +22,7 @@ import {
   type MemberCategoryRow,
 } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { memberFieldValues } from "../db/schema/forms.js";
 import { departments } from "../db/schema/departments.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { ASSIGNABLE_ROLE_TYPES, IMPLICIT_ROLE_TYPE, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
@@ -32,12 +33,19 @@ import { createInvite, previewInvite, acceptInvite, unlinkAccount } from "../lib
 import { sendEmail } from "../lib/email.js";
 import { APP_NAME, buildMemberInviteEmail, LOGO_CID, LOGO_PATH, SITE_URL } from "../lib/emailTemplate.js";
 import { clubMemberInvites, type ClubMemberInviteRow } from "../db/schema/club-member-invites.js";
-import { COUNTED_STATUSES, effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
+import { effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
+import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "../lib/member-read-scope.js";
 import { findMemberPhotoMedia, canSeeMemberPhoto, isMinor, memberPhotoUrls, removeMemberPhoto, replaceMemberPhoto, type PhotoCaller } from "../lib/member-photos.js";
 import { MAX_PHOTO_BYTES, streamMedia } from "../lib/media.js";
 import { buildCsv, importMaxBytes } from "../lib/member-csv.js";
 import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADERS, importFingerprint, importTokenDuplicates, importTokenId, verifyImportToken } from "../lib/member-import.js";
 import { nextMemberNumber } from "../lib/member-number.js";
+import { memberCustomFieldRoutes } from "./club-member-custom-fields.js";
+import { applicationPendingError } from "../lib/form-applications.js";
+import { ANSWERS_BODY_LIMIT, applicantCategories, assertMayApply, ensureFormBasics, submissionsPerHour } from "../lib/forms.js";
+import { applyWithForm } from "./form-submissions.js";
+import { canReadValue } from "../lib/custom-field-access.js";
+import { listDefinitions, MAX_CUSTOM_FIELDS_PER_CLUB } from "../lib/custom-fields.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -228,13 +236,16 @@ async function lockClubCategories(tx: DbExecutor, clubId: string, mode: "update"
 // --- Aufnahmeantrag ---------------------------------------------------
 // Session-only (no clubGuard -- the applicant isn't a member yet).
 //
-// Writes ONLY to club_applications (status "pending"); no member /
-// club_memberships row is created here. A board member with `members:write`
-// decides via /club-applications (approve creates the member + membership,
-// reject leaves no trace besides the decided application row). This replaces
-// the Wave 1 simplification of granting membership immediately. A user may
-// re-apply after a rejection, but never hold two pending applications for the
-// same club (partial unique index).
+// Writes ONLY to club_applications (status "pending") and, with the form builder (Wave 8 B6), to form_submissions; no
+// member / club_memberships row is created here. A board member with `members:write` decides via /club-applications
+// (approve creates the member + membership and applies the form mapping, reject leaves no trace besides the decided
+// application row). A user may re-apply after a rejection, but never hold two pending applications for the same club
+// (partial unique index).
+//
+// Three shapes of the body:
+//  - `submissionId` (+ optional `answers`): file an application form the client built up via /form-submissions;
+//  - `answers` (+ optional `formVersionId`): fill in and file the club's published application form in one request;
+//  - neither (old clients): the legacy `category` / `birthDate` application -- no answers, no consent record.
 const applySchema = z
   .object({
     // clubId (raw organization id) or clubSlug (human-shareable, e.g. a
@@ -244,12 +255,24 @@ const applySchema = z
     clubSlug: z.string().min(1).optional(),
     category: z.enum(["aktiv", "passiv", "foerdernd", "ehrenmitglied", "jugend"]).default("aktiv"),
     birthDate: z.string().date().optional(),
+    answers: z.unknown().optional(),
+    formVersionId: z.uuid().optional(),
+    submissionId: z.uuid().optional(),
   })
   .refine((body) => body.clubId ?? body.clubSlug, { message: "clubId or clubSlug is required" });
+
+const applyBodyLimit = bodyLimit({
+  maxSize: ANSWERS_BODY_LIMIT,
+  onError: () => {
+    throw new ValidationError("Request body too large");
+  },
+});
+const formApplyLimiter = rateLimit({ windowMs: 60 * 60_000, max: submissionsPerHour(), key: (c) => `club-apply-form:${c.get("user")?.id ?? "anonymous"}` });
 
 clubMemberRoutes.post(
   "/apply",
   sessionGuard,
+  applyBodyLimit,
   zValidator("json", applySchema, (result) => {
     if (!result.success) throw new ValidationError("Invalid request body", { details: result.error.issues });
   }),
@@ -257,46 +280,41 @@ clubMemberRoutes.post(
     const currentUser = c.get("user");
     const body = c.req.valid("json");
 
-    const clubId = body.clubId ?? (await db.query.organization.findFirst({ where: eq(organization.slug, body.clubSlug!) }))?.id;
+    const clubId = (await db.query.organization.findFirst({ where: body.clubId ? eq(organization.id, body.clubId) : eq(organization.slug, body.clubSlug!), columns: { id: true } }))?.id;
     if (!clubId) throw new NotFoundError("Club not found");
 
-    const existing = await db.query.member.findFirst({
-      where: and(eq(member.organizationId, clubId), eq(member.userId, currentUser.id)),
-    });
-    if (existing) {
-      // A former member (cancelled: ausgetreten) keeps the account membership row but lost access (clubGuard); they may
-      // re-apply and the board decides. Excluded / deceased persons need a reopen by the board first.
-      const own = await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, existing.id) });
-      const state = own ? effectiveStatus(own, todayBerlin()) : null;
-      if (state === "ausgeschlossen" || state === "verstorben") {
-        throw new ConflictError("This person was excluded from the club or is marked deceased; the member must be reopened by the board before re-joining", {
-          details: { code: "member_rejoin_blocked", clubMemberId: own!.id, status: state },
+    if (body.submissionId !== undefined || body.answers !== undefined || body.formVersionId !== undefined) {
+      if (body.submissionId === undefined && body.answers === undefined) throw new ValidationError("answers or submissionId is required together with formVersionId");
+      await formApplyLimiter(c, async () => undefined);
+      const filed = await applyWithForm({ userId: currentUser.id, clubId, formVersionId: body.formVersionId, answers: body.answers, submissionId: body.submissionId });
+      if (filed.created) {
+        await db.insert(auditLog).values({
+          eventType: "club_member.apply",
+          subjectId: filed.application.id,
+          payload: { clubId, userId: currentUser.id, formSubmissionId: filed.submission.id, formVersionId: filed.submission.formVersionId },
         });
       }
-      if (state !== "ausgetreten") {
-        throw new ConflictError("Already a member of this club", { code: "ALREADY_MEMBER", details: { clubId, ...(own ? { clubMemberId: own.id } : {}) } });
-      }
+      return c.json({ data: { application: filed.application, submission: { id: filed.submission.id, status: filed.submission.status, formVersionId: filed.submission.formVersionId } } }, filed.created ? 201 : 200);
     }
 
-    // Distinguishable from ALREADY_MEMBER so clients can say "your application is being reviewed". Details only carry
-    // the caller's OWN application.
-    const pendingFor = () => db.query.clubApplications.findFirst({ where: and(eq(clubApplications.userId, currentUser.id), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending")) });
-    const pendingError = (pending: { id: string; createdAt: Date }) =>
-      new ConflictError("An application for this club is already pending", { code: "APPLICATION_PENDING", details: { clubId, applicationId: pending.id, submittedAt: pending.createdAt } });
-    const alreadyPending = await pendingFor();
-    if (alreadyPending) throw pendingError(alreadyPending);
-
+    // Legacy application (old clients). Same preconditions as the form path, under the same per-(user, club) lock so
+    // parallel applies, submits and withdrawals of one user serialize.
+    await ensureFormBasics(clubId);
     let application;
     try {
-      [application] = await db
-        .insert(clubApplications)
-        .values({ userId: currentUser.id, clubId, category: body.category, birthDate: body.birthDate })
-        .returning();
+      application = await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`form-submission:${currentUser.id}:${clubId}`}, 0))`);
+        await assertMayApply(tx, clubId, currentUser.id);
+        // Only categories an applicant may choose (like in the form), so "ehrenmitglied" cannot be self-assigned.
+        if (!(await applicantCategories(clubId, tx)).some((k) => k.key === body.category)) throw new ValidationError("This category cannot be chosen when applying", { details: { fields: { category: "not_an_option" } } });
+        const [row] = await tx.insert(clubApplications).values({ userId: currentUser.id, clubId, category: body.category, birthDate: body.birthDate }).returning();
+        return row!;
+      });
     } catch (err) {
       if (isUniqueViolation(err)) {
         // Lost a race against a parallel apply of the same user.
-        const raced = await pendingFor();
-        throw raced ? pendingError(raced) : new ConflictError("An application for this club is already pending", { code: "APPLICATION_PENDING", details: { clubId } });
+        const raced = await db.query.clubApplications.findFirst({ where: and(eq(clubApplications.userId, currentUser.id), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending")) });
+        throw applicationPendingError({ clubId, ...(raced ? { applicationId: raced.id, submittedAt: raced.createdAt } : {}) });
       }
       throw err;
     }
@@ -304,7 +322,7 @@ clubMemberRoutes.post(
     await db.insert(auditLog).values({
       eventType: "club_member.apply",
       subjectId: application.id,
-      payload: { clubId, userId: currentUser.id, category: body.category },
+      payload: { clubId, userId: currentUser.id, category: body.category, legacy: true },
     });
 
     return c.json({ data: { application } }, 201);
@@ -447,6 +465,10 @@ clubMemberRoutes.get("/:id/photo", async (c) => {
   return streamMedia(c, media);
 });
 
+// --- Custom field values (Wave 8 B7): /me/custom-fields and /:id/custom-fields --------------------
+// Mounted before the generic `/:id` routes; sessionGuard + clubGuard (above) already ran.
+clubMemberRoutes.route("/", memberCustomFieldRoutes);
+
 // --- Member list / detail / create / update --------------------------------
 
 const csv = (v: string) => {
@@ -467,30 +489,6 @@ const listQuerySchema = z.object({
   page: z.coerce.number().int().min(1).max(100_000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(50),
 });
-
-/** Members whose effective status is probe, aktiv or ruhend (what a plain member may see of the others). */
-const VISIBLE_STATUSES: readonly string[] = COUNTED_STATUSES;
-
-function visibleStatusCondition(today: string): SQL {
-  return and(inArray(clubMembers.status, [...VISIBLE_STATUSES]), or(isNull(clubMembers.leftAt), gt(clubMembers.leftAt, today)))!;
-}
-
-/** Callers who manage members (members:write) or may read sensitive data also see former members and interessenten. */
-function canSeeAllMembers(c: { get(k: "clubRoleTypes"): string[] }): boolean {
-  return hasClubPermission(c.get("clubRoleTypes"), "members:write") || hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive");
-}
-
-/**
- * Read gate for ONE member row (detail and its sub-resources). 404 -- never 403 -- so existence is not leaked:
- * external guests only reach their own row; callers without members:write / members:read_sensitive only reach members
- * with an effective status probe|aktiv|ruhend and their own row.
- */
-function assertMemberReadable(c: { get(k: "membership"): { id: string; role: string }; get(k: "clubRoleTypes"): string[] }, row: ClubMemberRow, today = todayBerlin()): void {
-  const own = row.memberId !== null && row.memberId === c.get("membership").id;
-  if (own) return;
-  if (c.get("membership").role === "guest") throw new NotFoundError("Member not found");
-  if (!canSeeAllMembers(c) && !VISIBLE_STATUSES.includes(effectiveStatus(row, today))) throw new NotFoundError("Member not found");
-}
 
 /**
  * Natural ordering of member numbers ("DEMO-2" before "DEMO-10", zero padding ignored): text prefix, then the numeric
@@ -813,6 +811,13 @@ clubMemberRoutes.post("/import", csvWriteLimiter, requireMembersWriteMiddleware,
   return c.json({ data: { dryRun: false, created: result.created, skippedDuplicates: result.analysis.summary.duplicates, skippedSinceDryRun: Math.max(0, result.analysis.summary.duplicates - dryRunDuplicates), summary: result.analysis.summary, rows: result.analysis.rows } }, 201);
 });
 
+/** A stored custom field value as a CSV cell (lists joined, booleans in German). */
+function formatCustomValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(String).join(", ");
+  if (typeof value === "boolean") return value ? "Ja" : "Nein";
+  return value === null || value === undefined ? "" : String(value);
+}
+
 type ExportRow = { row: ClubMemberRow; categoryKey: string | null; accountEmail: string | null; departments: string };
 interface ExportColumn {
   header: string;
@@ -845,7 +850,8 @@ const NON_SENSITIVE_EXPORT_COLUMNS = EXPORT_COLUMN_KEYS.filter((k) => !EXPORT_CO
 const MAX_EXPORT_ROWS = 50_000;
 
 const exportQuerySchema = z.object({
-  columns: z.string().transform(csv).pipe(z.array(z.string().max(50)).max(EXPORT_COLUMN_KEYS.length).optional()).optional(),
+  // Standard columns plus `cf:<key>` for custom fields (opt-in, never part of the default selection).
+  columns: z.string().transform(csv).pipe(z.array(z.string().max(50)).max(EXPORT_COLUMN_KEYS.length + MAX_CUSTOM_FIELDS_PER_CLUB).optional()).optional(),
   status: z.string().transform(csv).pipe(z.array(z.enum(MEMBER_STATUSES)).max(MEMBER_STATUSES.length).optional()).optional(),
   category: z.string().transform(csv).pipe(z.array(z.string().max(50)).max(20).optional()).optional(),
   departmentId: z.string().uuid().optional(),
@@ -877,12 +883,21 @@ async function exportMembers(c: Context<ClubEnv>) {
   const query = parsed.data;
 
   const columnKeys = query.columns && query.columns.length > 0 ? [...new Set(query.columns)] : caller.canReadSensitive ? EXPORT_COLUMN_KEYS : NON_SENSITIVE_EXPORT_COLUMNS;
-  const unknown = columnKeys.filter((k) => !EXPORT_COLUMNS[k]);
+  const CUSTOM_PREFIX = "cf:";
+  const standardKeys = columnKeys.filter((k) => !k.startsWith(CUSTOM_PREFIX));
+  const customKeys = columnKeys.filter((k) => k.startsWith(CUSTOM_PREFIX));
+  const unknown = standardKeys.filter((k) => !EXPORT_COLUMNS[k]);
   if (unknown.length > 0) throw new ValidationError("Unknown export column", { details: { code: "unknown_column", columns: unknown, allowed: EXPORT_COLUMN_KEYS } });
   if (!caller.canReadSensitive) {
-    const denied = columnKeys.filter((k) => EXPORT_COLUMNS[k]!.sensitive);
+    const denied = standardKeys.filter((k) => EXPORT_COLUMNS[k]!.sensitive);
     if (denied.length > 0) throw new ForbiddenError("Missing members:read_sensitive permission for the requested columns", { details: { columns: denied } });
   }
+  // Custom field columns: only live definitions the exporter may read values of (same rules as the member profile).
+  const customDefs = customKeys.length === 0 ? [] : (await listDefinitions(clubId)).filter((d) => d.archivedAt === null && customKeys.includes(`${CUSTOM_PREFIX}${d.key}`));
+  const unknownCustom = customKeys.filter((k) => !customDefs.some((d) => `${CUSTOM_PREFIX}${d.key}` === k));
+  if (unknownCustom.length > 0) throw new ValidationError("Unknown export column", { details: { code: "unknown_column", columns: unknownCustom, allowed: EXPORT_COLUMN_KEYS } });
+  const unreadable = customDefs.filter((d) => !canReadValue(d, { roleTypes: c.get("clubRoleTypes"), isSelf: false })).map((d) => `${CUSTOM_PREFIX}${d.key}`);
+  if (unreadable.length > 0) throw new ForbiddenError("Missing permission for the requested custom field columns", { details: { columns: unreadable } });
 
   const today = todayBerlin();
   const conditions: Array<SQL | undefined> = [eq(clubMembers.clubId, clubId)];
@@ -927,7 +942,25 @@ async function exportMembers(c: Context<ClubEnv>) {
     for (const d of deptRows) departmentsByMember.set(d.clubMemberId, [...(departmentsByMember.get(d.clubMemberId) ?? []), d.name]);
   }
 
-  const columns = columnKeys.map((k) => EXPORT_COLUMNS[k]!);
+  const customValues = new Map<string, string>();
+  if (customDefs.length > 0 && rows.length > 0) {
+    const stored: Array<{ clubMemberId: string; fieldId: string; value: unknown }> = [];
+    // Chunked: 50,000 rows must not become one 50,000-parameter IN list.
+    for (let i = 0; i < rows.length; i += 5000) {
+      stored.push(
+        ...(await db
+          .select({ clubMemberId: memberFieldValues.clubMemberId, fieldId: memberFieldValues.fieldId, value: memberFieldValues.value })
+          .from(memberFieldValues)
+          .where(and(inArray(memberFieldValues.fieldId, customDefs.map((d) => d.id)), inArray(memberFieldValues.clubMemberId, rows.slice(i, i + 5000).map((r) => r.row.id))))),
+      );
+    }
+    for (const v of stored) customValues.set(`${v.clubMemberId}:${v.fieldId}`, formatCustomValue(v.value));
+  }
+  const columns: ExportColumn[] = columnKeys.map((k) => {
+    if (!k.startsWith(CUSTOM_PREFIX)) return EXPORT_COLUMNS[k]!;
+    const def = customDefs.find((d) => `${CUSTOM_PREFIX}${d.key}` === k)!;
+    return { header: def.label, sensitive: def.sensitive, value: (r) => customValues.get(`${r.row.id}:${def.id}`) ?? null };
+  });
   const body = buildCsv(
     columns.map((col) => col.header),
     rows.map((r) => {
@@ -940,7 +973,7 @@ async function exportMembers(c: Context<ClubEnv>) {
   await db.insert(auditLog).values({
     eventType: "club_member.export",
     subjectId: clubId,
-    payload: { clubId, exportedBy: c.get("membership").id, columns: columnKeys, rows: rows.length, filters: { status: query.status ?? null, category: query.category ?? null, departmentId: query.departmentId ?? null, includeFormer: query.includeFormer === "true" } },
+    payload: { clubId, exportedBy: c.get("membership").id, columns: columnKeys, ...(customDefs.length > 0 ? { customFieldIds: customDefs.map((d) => d.id), sensitiveCustomFieldIds: customDefs.filter((d) => d.sensitive).map((d) => d.id) } : {}), rows: rows.length, filters: { status: query.status ?? null, category: query.category ?? null, departmentId: query.departmentId ?? null, includeFormer: query.includeFormer === "true" } },
   });
 
   return csvResponse(c, body, `mitglieder-export-${today}.csv`);

@@ -48,6 +48,17 @@ export async function findCategoryByKey(executor: DbExecutor, clubId: string, ke
   return row ?? null;
 }
 
+/**
+ * Share-locks one category of a club (by id or key) for the rest of the transaction, so a concurrent archive (which
+ * locks all categories of the club first) cannot slip in between the check and the use. Lock order everywhere:
+ * categories -> member rows -> organization row. Returns the row (possibly archived) or null.
+ */
+export async function lockCategoryShared(tx: DbExecutor, clubId: string, ref: { id: string } | { key: string }): Promise<MemberCategoryRow | null> {
+  const where = "id" in ref ? and(eq(memberCategories.id, ref.id), eq(memberCategories.clubId, clubId)) : and(eq(memberCategories.clubId, clubId), eq(memberCategories.key, ref.key.trim().toLowerCase()));
+  const [row] = await tx.select().from(memberCategories).where(where).for("share");
+  return row ?? null;
+}
+
 export interface EnsureClubMemberDefaults {
   /** Category key for a newly created row; unknown keys fall back to "aktiv". */
   categoryKey?: string;

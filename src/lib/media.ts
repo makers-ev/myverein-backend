@@ -369,6 +369,34 @@ export async function attachUploadedImage(executor: DbExecutor, input: { clubId:
   return row;
 }
 
+/**
+ * Hands a registered file over from one feature row to another WITHOUT copying it (e.g. the photo of an accepted
+ * application becomes the member's profile photo): only the registry owner changes, the key stays. Applies only to a
+ * live, non-sensitive file of this club of the expected kind that is currently owned by `from`; returns null otherwise
+ * (the caller then keeps the file where it was). Run inside the feature transaction.
+ */
+export async function reassignMediaOwner(
+  executor: DbExecutor,
+  input: { storageKey: string; clubId: string; kind: MediaKind; from: { type: string; id: string }; to: { type: string; id: string } },
+): Promise<MediaFileRow | null> {
+  const [row] = await executor
+    .update(mediaFiles)
+    .set({ ownerType: input.to.type, ownerId: input.to.id })
+    .where(
+      and(
+        eq(mediaFiles.storageKey, input.storageKey),
+        eq(mediaFiles.clubId, input.clubId),
+        eq(mediaFiles.ownerType, input.from.type),
+        eq(mediaFiles.ownerId, input.from.id),
+        eq(mediaFiles.kind, input.kind),
+        eq(mediaFiles.sensitive, false),
+        isNull(mediaFiles.deletedAt),
+      ),
+    )
+    .returning();
+  return row ?? null;
+}
+
 /** Headers every media response carries. */
 function applyMediaHeaders(c: Context, row: MediaFileRow, cacheControl: string, disposition: "inline" | "attachment"): void {
   const asciiName = row.originalFilename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");

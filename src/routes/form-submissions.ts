@@ -7,11 +7,13 @@ import { z } from "zod";
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { clubApplications, type ClubApplicationRow } from "../db/schema/club-applications.js";
 import { forms, formSubmissionFiles, formSubmissions, formVersions, type FormRow, type FormSubmissionFileRow, type FormSubmissionRow, type FormVersionRow } from "../db/schema/forms.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import type { DbExecutor } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { applicationPendingError, closeApplicationOfSubmission, createApplicationForSubmission } from "../lib/form-applications.js";
 import { FIELD_KEY_RE, validateAnswers, visibleFieldKeys, type FormField, type ValidateResult } from "../lib/form-schema.js";
 import {
   ANSWERS_BODY_LIMIT,
@@ -574,50 +576,121 @@ formSubmissionRoutes.get("/:id/files/:fileId", async (c) => {
 
 // --- submit / withdraw -----------------------------------------------------------------------------------------
 
+/**
+ * Moves a draft to `submitted` and, for an application (`aufnahme`), creates the board's `club_applications` row in the
+ * SAME transaction -- a submitted application form always has exactly one application. `sub` must be locked FOR UPDATE by
+ * the caller (lock order: submission row, then the per-(user, club) advisory lock, then the application insert).
+ * Returns the files to `purgeMediaFile` after the commit.
+ */
+export async function submitDraftInTx(tx: DbExecutor, sub: FormSubmissionRow, userId: string, extraAnswers: unknown): Promise<{ row: FormSubmissionRow; application: ClubApplicationRow | null; purge: string[] }> {
+  const purge: string[] = [];
+  // The advisory lock orders parallel submits / applies of the same user and club behind each other.
+  await lockUserClub(tx, userId, sub.clubId);
+  assertDraft(sub);
+  const { target } = await resolveTarget(tx, sub);
+  await assertMayApply(tx, sub.clubId, userId);
+
+  const fields = target.version.fields as FormField[];
+  const files = await loadFiles(tx, [sub.id]);
+  const categoryKeys = (await applicantCategories(sub.clubId, tx)).map((k) => k.key);
+  const result = validateAnswers(fields, toAnswers(sub.answers, extraAnswers), {
+    mode: "submit",
+    categoryKeys,
+    uploadedFieldKeys: new Set(files.map((f) => f.file.fieldKey)),
+  });
+  if (!result.ok) throw invalidAnswers(result.errors);
+
+  // Files of fields the answers made invisible are not part of the application.
+  const visible = visibleFieldKeys(fields, result.answers);
+  const hidden = files.filter((f) => !visible.has(f.file.fieldKey));
+  purge.push(...(await removeFiles(tx, hidden.map((f) => f.file))));
+
+  const [row] = await tx
+    .update(formSubmissions)
+    .set({ answers: result.answers, status: "submitted", submittedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(formSubmissions.id, sub.id), eq(formSubmissions.status, "draft")))
+    .returning();
+  if (!row) throw new ConflictError("The submission can no longer be changed", { details: { code: "submission_not_editable" } });
+  const application = target.form.purpose === PURPOSE ? await createApplicationForSubmission(tx, row, fields) : null;
+  await tx.insert(auditLog).values({
+    eventType: "form_submission.submit",
+    subjectId: sub.id,
+    payload: { clubId: sub.clubId, formId: sub.formId, formVersionId: sub.formVersionId, userId, onBehalfOf: sub.onBehalfOf, fileCount: files.length - hidden.length, ...(application ? { applicationId: application.id } : {}) },
+  });
+  return { row, application, purge };
+}
+
+const applicationDto = (a: ClubApplicationRow) => ({ id: a.id, status: a.status, createdAt: a.createdAt });
+
 formSubmissionRoutes.post("/:id/submit", submitLimiter, jsonLimit, zValidator("json", z.object({ answers: z.unknown().optional() }).default({}), validationHook), async (c) => {
   const userId = c.get("user").id;
   const body = c.req.valid("json");
-  const purge: string[] = [];
 
   const submitted = await db.transaction(async (tx) => {
     const sub = await loadOwn(tx, c.req.param("id"), userId, true);
-    // The advisory lock orders parallel submits of the same user and club behind each other.
-    await lockUserClub(tx, userId, sub.clubId);
-    assertDraft(sub);
-    const { target } = await resolveTarget(tx, sub);
-    await assertMayApply(tx, sub.clubId, userId);
+    return submitDraftInTx(tx, sub, userId, body.answers);
+  });
+  await purgeAll(submitted.purge);
+  return c.json({ data: { submission: (await shapeSubmissions([submitted.row]))[0], application: submitted.application ? applicationDto(submitted.application) : null } });
+});
 
-    const fields = target.version.fields as FormField[];
-    const files = await loadFiles(tx, [sub.id]);
-    const categoryKeys = (await applicantCategories(sub.clubId, tx)).map((k) => k.key);
-    const result = validateAnswers(fields, toAnswers(sub.answers, body.answers), {
-      mode: "submit",
-      categoryKeys,
-      uploadedFieldKeys: new Set(files.map((f) => f.file.fieldKey)),
-    });
-    if (!result.ok) throw invalidAnswers(result.errors);
+/**
+ * `POST /club-members/apply` with the form builder: the one entry point that files an application. Three shapes:
+ * `submissionId` (an own draft is submitted, a submitted one without application gets it, one with an application is
+ * returned as is), `answers` (a submission is created and submitted in one go) -- both against the club's published form,
+ * stale versions answer `409 FORM_VERSION_OUTDATED`. Lock order: see `lib/form-applications.ts`.
+ */
+export async function applyWithForm(input: { userId: string; clubId: string; formVersionId?: string; answers?: unknown; submissionId?: string }): Promise<{ application: ClubApplicationRow; submission: FormSubmissionRow; created: boolean }> {
+  const { userId, clubId } = input;
+  await ensureFormBasics(clubId);
+  const purge: string[] = [];
 
-    // Files of fields the answers made invisible are not part of the application.
-    const visible = visibleFieldKeys(fields, result.answers);
-    const hidden = files.filter((f) => !visible.has(f.file.fieldKey));
-    purge.push(...(await removeFiles(tx, hidden.map((f) => f.file))));
+  const done = await db.transaction(async (tx) => {
+    if (input.submissionId !== undefined) {
+      // Same order as POST /:id/submit: submission row first.
+      const sub = await loadOwn(tx, input.submissionId, userId, true);
+      if (sub.clubId !== clubId) throw notFound();
+      if (sub.status === "submitted") {
+        const [existing] = await tx.select().from(clubApplications).where(eq(clubApplications.formSubmissionId, sub.id)).limit(1);
+        if (existing) return { application: existing, submission: sub, created: false };
+        // A submitted application without its application row (filed before the two were linked): complete it.
+        await lockUserClub(tx, userId, clubId);
+        const pinned = await loadPinned(tx, sub.formVersionId);
+        const [other] = await tx.select({ id: clubApplications.id, createdAt: clubApplications.createdAt }).from(clubApplications).where(and(eq(clubApplications.userId, userId), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending"))).limit(1);
+        if (other) throw applicationPendingError({ clubId, applicationId: other.id, submittedAt: other.createdAt });
+        return { application: await createApplicationForSubmission(tx, sub, pinned.version.fields as FormField[]), submission: sub, created: true };
+      }
+      if (sub.status !== "draft") throw new ConflictError("The submission can no longer be changed", { details: { code: "submission_not_editable", status: sub.status } });
+      if (input.formVersionId !== undefined && input.formVersionId !== sub.formVersionId) {
+        // The client names the version it rendered; the draft is pinned to another one: let the client re-render.
+        const current = await findCurrentForm(clubId, PURPOSE, tx);
+        if (!current || current.version.id !== input.formVersionId) throw outdatedError(await currentDefinition(clubId, tx), sub.id);
+      }
+      const submitted = await submitDraftInTx(tx, sub, userId, input.answers);
+      purge.push(...submitted.purge);
+      return { application: submitted.application!, submission: submitted.row, created: true };
+    }
 
-    const [row] = await tx
-      .update(formSubmissions)
-      .set({ answers: result.answers, status: "submitted", submittedAt: new Date(), updatedAt: new Date() })
-      .where(and(eq(formSubmissions.id, sub.id), eq(formSubmissions.status, "draft")))
+    // New answers: a fresh submission against the CURRENT published version, submitted in the same transaction.
+    await lockUserClub(tx, userId, clubId);
+    const current = await findCurrentForm(clubId, PURPOSE, tx);
+    if (!current) throw new NotFoundError("This club has no application form");
+    const categories = await applicantCategories(clubId, tx);
+    if (input.formVersionId !== undefined && input.formVersionId !== current.version.id) throw outdatedError(applicantDefinition(current.form, current.version, categories));
+    await assertMayApply(tx, clubId, userId);
+    const draftAnswers = validateAnswers(current.version.fields as FormField[], toAnswers(input.answers ?? {}), { mode: "draft", categoryKeys: categories.map((k) => k.key) });
+    if (!draftAnswers.ok) throw invalidAnswers(draftAnswers.errors);
+    const [draft] = await tx
+      .insert(formSubmissions)
+      .values({ formId: current.form.id, formVersionId: current.version.id, clubId, submittedByUserId: userId, onBehalfOf: "self", answers: draftAnswers.answers, status: "draft" })
       .returning();
-    if (!row) throw new ConflictError("The submission can no longer be changed", { details: { code: "submission_not_editable" } });
-    await tx.insert(auditLog).values({
-      eventType: "form_submission.submit",
-      subjectId: sub.id,
-      payload: { clubId: sub.clubId, formId: sub.formId, formVersionId: sub.formVersionId, userId, onBehalfOf: sub.onBehalfOf, fileCount: files.length - hidden.length },
-    });
-    return row;
+    const submitted = await submitDraftInTx(tx, draft!, userId, undefined);
+    purge.push(...submitted.purge);
+    return { application: submitted.application!, submission: submitted.row, created: true };
   });
   await purgeAll(purge);
-  return c.json({ data: { submission: (await shapeSubmissions([submitted]))[0] } });
-});
+  return done;
+}
 
 formSubmissionRoutes.post("/:id/withdraw", async (c) => {
   const userId = c.get("user").id;
@@ -629,6 +702,8 @@ formSubmissionRoutes.post("/:id/withdraw", async (c) => {
     // A withdrawn application keeps its answers as a record, but its uploaded files (photo, documents) are deleted.
     purge.push(...(await removeFiles(tx, (await loadFiles(tx, [sub.id])).map((f) => f.file))));
     const [row] = await tx.update(formSubmissions).set({ status: "withdrawn", updatedAt: new Date() }).where(eq(formSubmissions.id, sub.id)).returning();
+    // Lock order: submission row (above), then the application row.
+    await closeApplicationOfSubmission(tx, sub.id);
     await tx.insert(auditLog).values({ eventType: "form_submission.withdraw", subjectId: sub.id, payload: { clubId: sub.clubId, userId, previousStatus: sub.status } });
     return row!;
   });

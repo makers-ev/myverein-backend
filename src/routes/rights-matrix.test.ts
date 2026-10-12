@@ -39,6 +39,7 @@ import { internalStatsRoutes } from "./internal-stats.js";
 import { inventoryItemRoutes } from "./inventory-items.js";
 import { locationRoutes } from "./locations.js";
 import { mediaRoutes } from "./media.js";
+import { memberFieldRoutes } from "./member-fields.js";
 import { meetingRoutes } from "./meetings.js";
 import { myClubRoutes } from "./my-clubs.js";
 import { notificationRoutes } from "./notifications.js";
@@ -73,6 +74,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/club-members", "clubMemberRoutes", clubMemberRoutes],
   ["/club-applications", "clubApplicationRoutes", clubApplicationRoutes],
   ["/forms", "formRoutes", formRoutes],
+  ["/member-fields", "memberFieldRoutes", memberFieldRoutes],
   ["/club-forms", "clubFormRoutes", clubFormRoutes],
   ["/form-submissions", "formSubmissionRoutes", formSubmissionRoutes],
   ["/departments", "departmentRoutes", departmentRoutes],
@@ -121,6 +123,7 @@ const SELF_SERVICE: Record<string, string> = {
   "PATCH /inventory-items/:id/loans/:loanId": "return of the own loan (borrower or inventory:write)",
   "POST /inventory-items/:id/damage-reports": "self-service damage report",
   "POST /media": "image upload for damage reports / location photos (central media layer: magic bytes, EXIF strip, quota; the file stays unattached until a feature route claims it)",
+  "PATCH /club-members/me/custom-fields": "own custom field values (only fields with editable_by = self; others answer 403/422)",
   "PUT /club-members/me/photo": "own profile photo (minors are refused: the board sets them)",
   "DELETE /club-members/me/photo": "removing the own profile photo",
   "POST /club-members/invites/preview": "previewing an own invitation (session only; the secret token travels in the body, the response is masked)",
@@ -425,6 +428,27 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
         await db.delete(user).where(eq(user.id, other.userId));
       }
     });
+  });
+
+  it("keeps application decisions, custom field definitions and foreign custom field values behind their rights (Wave 8 B6/B7)", async () => {
+    const target = (await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, adminMemberId) }))!;
+    const own = (await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, plainMemberId) }))!;
+    for (const cookie of [cookiePlain, cookieGuest]) {
+      expect((await req("/club-applications", cookie)).status).toBe(403);
+      expect((await req(`/club-applications/${randomUUID()}/approve`, cookie, { method: "POST", body: { categoryKey: "aktiv" } })).status).toBe(403);
+      expect((await req(`/club-applications/${randomUUID()}/reject`, cookie, { method: "POST", body: { note: "x" } })).status).toBe(403);
+      // Definitions: managing needs forms:write, archived ones are not even listed.
+      expect((await req("/member-fields?includeArchived=true", cookie)).status).toBe(403);
+      expect((await req("/member-fields", cookie, { method: "POST", body: { key: "nope", label: "Nope", type: "text" } })).status).toBe(403);
+      // Writing other people's values needs members:write -- even for the person's own row.
+      expect((await req(`/club-members/${own.id}/custom-fields`, cookie, { method: "PUT", body: { values: { nope: "x" } } })).status).toBe(403);
+    }
+    // The board reads and manages them.
+    expect((await req("/member-fields", cookieFounder)).status).toBe(200);
+    expect((await req(`/club-members/${target.id}/custom-fields`, cookieFounder)).status).toBe(200);
+    // A guest cannot read a member's values (404, like the member detail), a plain member can (only the visible slice).
+    expect((await req(`/club-members/${target.id}/custom-fields`, cookieGuest)).status).toBe(404);
+    expect((await req(`/club-members/${target.id}/custom-fields`, cookiePlain)).status).toBe(200);
   });
 
   // --- B16 bugfixes (verification) -----------------------------------------------------------------

@@ -46,6 +46,8 @@ function intEnv(name: string, fallback: number, min: number, max: number): numbe
 export const draftMaxBytesPerUser = () => intEnv("FORM_DRAFT_MAX_BYTES_PER_USER", 25 * 1024 * 1024, 1024, 1024 * 1024 * 1024);
 /** Idle days after which a draft (and its files) is swept (`FORM_DRAFT_TTL_DAYS`, default 30). */
 export const draftTtlDays = () => intEnv("FORM_DRAFT_TTL_DAYS", 30, 1, 365);
+/** Days after the rejection of an application until its uploaded files are deleted (`FORM_REJECTED_FILE_TTL_DAYS`, default 30). */
+export const rejectedFileTtlDays = () => intEnv("FORM_REJECTED_FILE_TTL_DAYS", 30, 1, 3650);
 export const uploadsPerHour = () => hourlyLimit("FORM_UPLOADS_PER_HOUR", 30);
 export const submissionsPerHour = () => hourlyLimit("FORM_SUBMISSIONS_PER_HOUR", 20);
 
