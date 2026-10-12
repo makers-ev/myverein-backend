@@ -654,8 +654,8 @@ Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runti
 | `0019_media-security-layer` | `media_files` upload registry; renames `locations.photo_url` / `inventory_damage_reports.photo_url` to `photo_key`; adds `club_members.photo_key` (FK to `media_files.storage_key`) |
 | `0020_media-legacy-photo-keys` | Idempotent clean-up: clears pre-registry `photo_key` values that are not of the form `<clubId>/<file>` (external URLs, `/media/...` paths, other clubs' keys, traversal) |
 | `0021_key-history-wifi-security` | `location_key_history` (key handover log), `location_key_holders.key_label`, `location_wifi_networks.security` (default `wpa`) |
-| `0023_form-versions-one-published` | Partial unique index: at most one `published` version per form (publish archives the old row first) |
 | `0022_configurable-forms` | Wave 8 B2: form-builder tables (see [Form builder data model](#form-builder-data-model-wave-8)), additive columns on `club_applications` / `club_exit_requests`, seeds the standard `aufnahme`/`austritt` forms v1 for every existing club (idempotent) |
+| `0023_form-versions-one-published` | Partial unique index: at most one `published` version per form (publish archives the old row first) |
 
 ## API reference
 
