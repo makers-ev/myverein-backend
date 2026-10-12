@@ -58,10 +58,22 @@ describe("field definition", () => {
     expect(parse([...base].reverse()).success).toBe(false);
     expect(parse([f({ key: "plate", visibleIf: { fieldKey: "plate", op: "checked" } })]).success).toBe(false);
     expect(parse([f({ key: "aa", type: "text" }), f({ key: "bb", visibleIf: { fieldKey: "aa", op: "checked" } })]).success).toBe(false);
+    const sel = f({ key: "aa", type: "select", options: [{ value: "x", label: "X" }] });
+    expect(parse([sel, f({ key: "bb", visibleIf: { fieldKey: "aa", op: "eq", value: "x" } })]).success).toBe(true);
+    expect(parse([sel, f({ key: "bb", visibleIf: { fieldKey: "aa", op: "eq", value: "nope" } })]).success).toBe(false);
+    expect(parse([f({ key: "aa", type: "multiselect", options: [{ value: "x", label: "X" }] }), f({ key: "bb", visibleIf: { fieldKey: "aa", op: "eq", value: "x" } })]).success).toBe(false);
+    expect(parse([f({ key: "aa", type: "checkbox" }), f({ key: "bb", visibleIf: { fieldKey: "aa", op: "eq", value: "x" } })]).success).toBe(false);
     expect(parse([f({ key: "aa" }), f({ key: "bb", visibleIf: { fieldKey: "aa", op: "in", value: "x" } })]).success).toBe(false);
     expect(parse([f({ key: "aa" }), f({ key: "bb", visibleIf: { fieldKey: "aa", op: "in", value: ["x", "y"] } })]).success).toBe(true);
     expect(parse([f({ key: "aa" }), f({ key: "bb", visibleIf: { fieldKey: "aa", op: "eq" } })]).success).toBe(false);
     expect(parse([f({ key: "aa", type: "date" }), f({ key: "bb", visibleIf: { fieldKey: "aa", op: "eq", value: "x" } })]).success).toBe(false);
+  });
+
+  it("rejects definitions whose limits the engine would ignore or bypass", () => {
+    expect(parse([f({ validation: { maxLength: 201 } })]).success).toBe(false);
+    expect(parse([f({ type: "textarea", validation: { maxLength: 1000 } })]).success).toBe(true);
+    expect(parse([f({ type: "select", options: [{ value: "foo", label: "Foo" }], mapsTo: "category" })]).success).toBe(false);
+    expect(parse([f({ type: "select", optionsSource: "member_categories", mapsTo: "category" })]).success).toBe(true);
   });
 
   it("validates the mapping targets: allowlist, type fit, uniqueness, exclusivity", () => {
@@ -152,6 +164,15 @@ describe("validateAnswers", () => {
       f({ key: "cc", required: true, visibleIf: { fieldKey: "bb", op: "checked" } }),
     ]);
     expect(validateAnswers(fields, { aa: false, bb: true, cc: "x" }, submit)).toEqual({ ok: true, answers: {} });
+  });
+
+  it("hides dependants of a hidden field even for negative conditions", () => {
+    const fields = defs([
+      f({ key: "gate", type: "checkbox" }),
+      f({ key: "mid", visibleIf: { fieldKey: "gate", op: "checked" } }),
+      f({ key: "leaf", required: true, visibleIf: { fieldKey: "mid", op: "neq", value: "x" } }),
+    ]);
+    expect(validateAnswers(fields, { gate: false, leaf: "y" }, submit)).toEqual({ ok: true, answers: {} });
   });
 
   it("rejects unknown keys and prototype-pollution keys", () => {

@@ -618,7 +618,7 @@ Generic, versioned form builder ([ADR-005](../../lpj-its-vault/20_Products/MyVer
 | Table | Purpose |
 |---|---|
 | `forms` | A form of a club: `purpose` (`aufnahme` \| `austritt` \| `veranstaltungsanmeldung` \| `einwilligung` \| `umfrage`), `name`, `archived_at`. Partial unique `(club_id, purpose)` for `aufnahme`/`austritt` while not archived = at most one active form each |
-| `form_versions` | Immutable versions: `version` (unique per form), `status` (`draft` \| `published` \| `archived`), `fields` (JSONB field definition), `privacy_notice`, `published_at/by`. Partial unique: at most one `draft` per form |
+| `form_versions` | Immutable versions: `version` (unique per form), `status` (`draft` \| `published` \| `archived`), `fields` (JSONB field definition), `privacy_notice`, `published_at/by`. Partial unique: at most one `draft` and at most one `published` version per form |
 | `form_submissions` | One filled-in form: `form_version_id` (the version it was filled in, `RESTRICT`), `submitted_by_user_id`, `subject_club_member_id`, `on_behalf_of` (`self` \| `guardian`), `answers` (JSONB keyed by field key), `status` (`draft` \| `submitted` \| `accepted` \| `rejected` \| `withdrawn`), decision data |
 | `form_submission_files` | File/photo answers: `field_key`, `storage_key` (FK `media_files.storage_key`, never a URL), filename, MIME, size |
 | `member_field_definitions` | Custom fields per club: unique `(club_id, key)`, `field_type`, `options`, `visible_to` (`vorstand` \| `funktionstraeger` \| `mitglied`), `editable_by` (`vorstand` \| `self`), `sensitive`, `archived_at` |
@@ -640,7 +640,7 @@ Generic, versioned form builder ([ADR-005](../../lpj-its-vault/20_Products/MyVer
 
 Rules: max 60 fields; key `^[a-z][a-z0-9_]{1,40}$`, unique, `constructor`/`prototype` etc. reserved; `visibleIf` = exactly one `{ fieldKey, op: eq \| neq \| in \| checked, value }` on an **earlier** `text`/`select`/`multiselect`/`checkbox`/`consent` field; hidden fields are dropped from the result and never required (chains stay hidden). `mapsTo` ∈ allowlist `firstName, lastName, birthDate, street, postalCode, city, phone, contactEmail, emergencyContactName, emergencyContactPhone, category, photo` (each with a fixed compatible field type, used at most once per form; never a free column name) **or** `customField` (a custom field key), not both. Validation result `{ ok: true, answers }` or `{ ok: false, errors: { [fieldKey]: code } }` with codes `unknown_field` (also `__proto__`/`constructor`, and answers for `info`/`file`/`image` fields), `required`, `invalid_type`, `invalid_value`, `too_short`, `too_long`, `too_small`, `too_large`, `invalid_format`, `not_an_option`. Mode `draft` skips the required checks, `submit` enforces them. Routes using the engine follow with B4/B5 (`422` with these codes).
 
-### Migrations 0014-0022 (Wave 7, Wave 8)
+### Migrations 0014-0023 (Wave 7, Wave 8)
 
 Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runtime` (Docker boot) or `npm run db:migrate`.
 
@@ -654,6 +654,7 @@ Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runti
 | `0019_media-security-layer` | `media_files` upload registry; renames `locations.photo_url` / `inventory_damage_reports.photo_url` to `photo_key`; adds `club_members.photo_key` (FK to `media_files.storage_key`) |
 | `0020_media-legacy-photo-keys` | Idempotent clean-up: clears pre-registry `photo_key` values that are not of the form `<clubId>/<file>` (external URLs, `/media/...` paths, other clubs' keys, traversal) |
 | `0021_key-history-wifi-security` | `location_key_history` (key handover log), `location_key_holders.key_label`, `location_wifi_networks.security` (default `wpa`) |
+| `0023_form-versions-one-published` | Partial unique index: at most one `published` version per form (publish archives the old row first) |
 | `0022_configurable-forms` | Wave 8 B2: form-builder tables (see [Form builder data model](#form-builder-data-model-wave-8)), additive columns on `club_applications` / `club_exit_requests`, seeds the standard `aufnahme`/`austritt` forms v1 for every existing club (idempotent) |
 
 ## API reference

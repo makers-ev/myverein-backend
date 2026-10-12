@@ -81,6 +81,10 @@ export const formVersions = pgTable(
     uniqueIndex("form_versions_one_draft_uidx")
       .on(table.formId)
       .where(sql`${table.status} = 'draft'`),
+    // At most one published version per form: publishing archives the old row BEFORE the draft becomes published.
+    uniqueIndex("form_versions_one_published_uidx")
+      .on(table.formId)
+      .where(sql`${table.status} = 'published'`),
   ],
 );
 

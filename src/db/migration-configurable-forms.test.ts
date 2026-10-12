@@ -62,6 +62,7 @@ describe("migration 0022 configurable-forms", () => {
     await expect(pool.query(`INSERT INTO forms (club_id, purpose, name) VALUES ('o1', 'aufnahme', 'Zweites')`)).rejects.toThrow(/forms_club_singleton_purpose_uidx/);
     await pool.query(`INSERT INTO forms (club_id, purpose, name) VALUES ('o1', 'umfrage', 'A'), ('o1', 'umfrage', 'B')`);
     await expect(pool.query(`INSERT INTO form_versions (form_id, version, status) VALUES ($1, 1, 'draft')`, [form])).rejects.toThrow(/form_versions_form_version_uidx/);
+    await expect(pool.query(`INSERT INTO form_versions (form_id, version, status) VALUES ($1, 2, 'published')`, [form])).rejects.toThrow(/form_versions_one_published_uidx/);
     await pool.query(`INSERT INTO form_versions (form_id, version, status) VALUES ($1, 2, 'draft')`, [form]);
     await expect(pool.query(`INSERT INTO form_versions (form_id, version, status) VALUES ($1, 3, 'draft')`, [form])).rejects.toThrow(/form_versions_one_draft_uidx/);
   });

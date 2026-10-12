@@ -103,6 +103,7 @@ export const formFieldsSchema = z
       if (field.mapsTo !== undefined) {
         if (field.customField !== undefined) issue("mapsTo and customField are exclusive", ["mapsTo"]);
         if (!mappingAcceptsType(field.mapsTo, field.type)) issue("mapsTo does not fit the field type", ["mapsTo"]);
+        if (field.mapsTo === "category" && field.optionsSource !== "member_categories") issue("category mapping needs optionsSource member_categories", ["mapsTo"]);
         if (mapped.has(field.mapsTo)) issue("mapsTo target used twice", ["mapsTo"]);
         mapped.add(field.mapsTo);
       }
@@ -119,6 +120,7 @@ export const formFieldsSchema = z
         if (v.pattern !== undefined && field.type !== "text") issue("pattern only for text", ["validation"]);
         if ((v.min !== undefined || v.max !== undefined) && field.type !== "number") issue("min/max only for number", ["validation"]);
         if ((v.minDate !== undefined || v.maxDate !== undefined) && field.type !== "date") issue("date limits only for date", ["validation"]);
+        if (field.type === "text" && v.maxLength !== undefined && v.maxLength > TEXT_MAX) issue(`maxLength of a text field is at most ${TEXT_MAX}`, ["validation"]);
         if (v.minLength !== undefined && v.maxLength !== undefined && v.minLength > v.maxLength) issue("minLength > maxLength", ["validation"]);
         if (v.min !== undefined && v.max !== undefined && v.min > v.max) issue("min > max", ["validation"]);
         if (v.minDate !== undefined && v.maxDate !== undefined && v.minDate > v.maxDate) issue("minDate > maxDate", ["validation"]);
@@ -129,8 +131,17 @@ export const formFieldsSchema = z
         const source = seen.get(cond.fieldKey);
         if (!source) issue("visibleIf must reference an earlier field", ["visibleIf", "fieldKey"]);
         else if (!CONDITION_SOURCE_TYPES.includes(source.type)) issue("visibleIf source type not supported", ["visibleIf", "fieldKey"]);
-        else if (cond.op === "checked" ? cond.value !== undefined || !["checkbox", "consent"].includes(source.type) : cond.value === undefined) issue("visibleIf operator and value do not fit", ["visibleIf"]);
-        else if (cond.op === "in" ? !Array.isArray(cond.value) : Array.isArray(cond.value)) issue("visibleIf value shape does not fit the operator", ["visibleIf", "value"]);
+        else {
+          const bool = source.type === "checkbox" || source.type === "consent";
+          const opsOk = bool ? cond.op === "checked" : source.type === "multiselect" ? cond.op === "in" : cond.op !== "checked";
+          if (!opsOk) issue("visibleIf operator does not fit the source field", ["visibleIf", "op"]);
+          else if (cond.op === "checked" ? cond.value !== undefined : cond.value === undefined || Array.isArray(cond.value) !== (cond.op === "in")) issue("visibleIf value does not fit the operator", ["visibleIf", "value"]);
+          else if (cond.op !== "checked") {
+            const values = (Array.isArray(cond.value) ? cond.value : [cond.value]) as unknown[];
+            if (values.some((x) => typeof x !== "string")) issue("visibleIf value must be text", ["visibleIf", "value"]);
+            else if (source.options && values.some((x) => !source.options!.some((o) => o.value === x))) issue("visibleIf value is not an option of the source field", ["visibleIf", "value"]);
+          }
+        }
       }
       seen.set(field.key, field);
     });
@@ -167,9 +178,11 @@ function isIsoDate(value: string): boolean {
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === value;
 }
 
-function conditionHolds(field: FormField, values: Answers): boolean {
+function conditionHolds(field: FormField, values: Answers, visibleKeys: ReadonlySet<string>): boolean {
   const cond = field.visibleIf;
   if (!cond) return true;
+  // A field behind a hidden field is hidden too.
+  if (!visibleKeys.has(cond.fieldKey)) return false;
   const actual = Object.hasOwn(values, cond.fieldKey) ? values[cond.fieldKey] : undefined;
   switch (cond.op) {
     case "checked":
@@ -253,10 +266,12 @@ export function validateAnswers(fields: readonly FormField[], answers: unknown, 
   if (Object.keys(errors).length > 0) return { ok: false, errors };
 
   const cleaned: Answers = {};
+  const visibleKeys = new Set<string>();
   for (const field of fields) {
     if (field.type === "info") continue;
-    const visible = conditionHolds(field, cleaned);
+    const visible = conditionHolds(field, cleaned, visibleKeys);
     if (!visible) continue;
+    visibleKeys.add(field.key);
 
     if (FILE_TYPES.includes(field.type)) {
       if (ctx.mode === "submit" && field.required && !ctx.uploadedFieldKeys?.has(field.key)) errors[field.key] = "required";
