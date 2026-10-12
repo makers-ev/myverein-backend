@@ -626,6 +626,20 @@ Generic, versioned form builder ([ADR-005](../../lpj-its-vault/20_Products/MyVer
 
 `club_applications` gets the nullable columns `form_submission_id` and `club_member_id` (legacy `category`/`birth_date` stay readable); `club_exit_requests` gets `form_submission_id`. **Standard forms:** every club has a published v1 `aufnahme` form (category select, optional birth date, optional photo, privacy notice + mandatory consent) and `austritt` form (optional reason, confirmation) — migration `0022` seeds them for existing clubs, `ensureDefaultForms(clubId)` (`src/lib/form-defaults.ts`, idempotent) for new ones; `src/db/migration-configurable-forms.test.ts` keeps the SQL seed and the code definitions in sync.
 
+**Field definition and validation engine (B3, `src/lib/form-schema.ts`, `src/lib/form-mapping.ts`).** `formFieldsSchema` (Zod) validates what an editor saves; `validateAnswers(fields, answers, { mode, categoryKeys, uploadedFieldKeys })` is the server-side authority for submissions (pure, no I/O).
+
+| Field type | Answer | Notes |
+|---|---|---|
+| `text` / `textarea` | string (max 200 / 5000) | `validation`: `minLength`, `maxLength`, `pattern` (preset `email` \| `postal_code` \| `phone` — **no free regex**, ReDoS; `text` only) |
+| `number` | finite number | `min`, `max` |
+| `date` | ISO `YYYY-MM-DD` (real calendar date) | `minDate`, `maxDate` |
+| `select` / `multiselect` | option value / unique list of values | `options` (max 50) **or** `optionsSource: "member_categories"` (the club's active category keys) |
+| `checkbox` / `consent` | boolean | `required` means "must be `true"` |
+| `file` / `image` | none in `answers` (uploads live in `form_submission_files`) | `required` is checked against `uploadedFieldKeys` |
+| `info` | none (display only; `infoKind: "privacy_notice"` renders the version's `privacy_notice`) | carries no `required`/mapping |
+
+Rules: max 60 fields; key `^[a-z][a-z0-9_]{1,40}$`, unique, `constructor`/`prototype` etc. reserved; `visibleIf` = exactly one `{ fieldKey, op: eq \| neq \| in \| checked, value }` on an **earlier** `text`/`select`/`multiselect`/`checkbox`/`consent` field; hidden fields are dropped from the result and never required (chains stay hidden). `mapsTo` ∈ allowlist `firstName, lastName, birthDate, street, postalCode, city, phone, contactEmail, emergencyContactName, emergencyContactPhone, category, photo` (each with a fixed compatible field type, used at most once per form; never a free column name) **or** `customField` (a custom field key), not both. Validation result `{ ok: true, answers }` or `{ ok: false, errors: { [fieldKey]: code } }` with codes `unknown_field` (also `__proto__`/`constructor`, and answers for `info`/`file`/`image` fields), `required`, `invalid_type`, `invalid_value`, `too_short`, `too_long`, `too_small`, `too_large`, `invalid_format`, `not_an_option`. Mode `draft` skips the required checks, `submit` enforces them. Routes using the engine follow with B4/B5 (`422` with these codes).
+
 ### Migrations 0014-0022 (Wave 7, Wave 8)
 
 Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runtime` (Docker boot) or `npm run db:migrate`.
