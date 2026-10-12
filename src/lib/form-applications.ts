@@ -43,7 +43,7 @@ export async function createApplicationForSubmission(tx: DbExecutor, sub: FormSu
   try {
     const [row] = await tx
       .insert(clubApplications)
-      .values({ userId: sub.submittedByUserId, clubId: sub.clubId, category: plan.categoryKey ?? "aktiv", birthDate: plan.master.birthDate ?? null, formSubmissionId: sub.id })
+      .values({ userId: sub.submittedByUserId, clubId: sub.clubId, category: plan.categoryKey ?? "aktiv", birthDate: plan.master.birthDate ?? null, formSubmissionId: sub.id, onBehalfOf: sub.onBehalfOf === "guardian" ? "guardian" : "self" })
       .returning();
     return row!;
   } catch (err) {
@@ -202,15 +202,38 @@ export async function rejectSubmission(tx: DbExecutor, context: DecisionContext,
 
 /**
  * Evidence of what the applicant consented to, derived from the PINNED version (ids and a text hash, never answer
- * values): which consent fields were given, in which version, with which text.
+ * values): which consent fields were given, in which version, with which text -- and WHO consented and WHEN: the
+ * submitter (for a child application the guardian, `onBehalfOf: "guardian"`) at the submission time. Structured so that the
+ * consent management of Wave 10 can take it over as is.
  */
-export function consentEvidence(context: DecisionContext): { formVersionId: string; consentFieldKeys: string[]; textSha256: string } {
+export interface ConsentEvidence {
+  formVersionId: string;
+  consentFieldKeys: string[];
+  textSha256: string;
+  /** User id of the person who gave the consent (the guardian for a child application). */
+  consentedBy: string;
+  onBehalfOf: string;
+  /** ISO time the application was submitted (= when the consent was given); null for a record without it. */
+  consentedAt: string | null;
+  /** The club member the consent is about (the child), once accepted. */
+  subjectClubMemberId?: string;
+}
+
+export function consentEvidence(context: DecisionContext, subjectClubMemberId?: string): ConsentEvidence {
   const fields = context.version.fields as FormField[];
   const answers = (context.sub.answers ?? {}) as Record<string, unknown>;
   const consents = fields.filter((f) => f.type === "consent");
   const given = consents.filter((f) => Object.hasOwn(answers, f.key) && answers[f.key] === true).map((f) => f.key);
   const text = [context.version.privacyNotice ?? "", ...consents.map((f) => f.label)].join("\n");
-  return { formVersionId: context.version.id, consentFieldKeys: given, textSha256: createHash("sha256").update(text).digest("hex") };
+  return {
+    formVersionId: context.version.id,
+    consentFieldKeys: given,
+    textSha256: createHash("sha256").update(text).digest("hex"),
+    consentedBy: context.sub.submittedByUserId,
+    onBehalfOf: context.sub.onBehalfOf,
+    consentedAt: context.sub.submittedAt?.toISOString() ?? null,
+    ...(subjectClubMemberId ? { subjectClubMemberId } : {}),
+  };
 }
 
 /** Postgres lock timeout / deadlock while deciding (a concurrent account merge): retryable instead of a 500. */

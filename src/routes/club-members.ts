@@ -259,6 +259,8 @@ const applySchema = z
     answers: z.unknown().optional(),
     formVersionId: z.uuid().optional(),
     submissionId: z.uuid().optional(),
+    // 'guardian': a parent applies for a child (Wave 8 B8); needs answers or a submissionId, never the legacy shape.
+    onBehalfOf: z.enum(["self", "guardian"]).optional(),
   })
   .refine((body) => body.clubId ?? body.clubSlug, { message: "clubId or clubSlug is required" });
 
@@ -287,17 +289,28 @@ clubMemberRoutes.post(
     // Hourly per-user limit for every shape (an application creates rows and, with answers, a submission).
     await formApplyLimiter(c, async () => undefined);
 
-    if (body.submissionId !== undefined || body.answers !== undefined || body.formVersionId !== undefined) {
-      if (body.submissionId === undefined && body.answers === undefined) throw new ValidationError("answers or submissionId is required together with formVersionId");
-      const filed = await applyWithForm({ userId: currentUser.id, clubId, formVersionId: body.formVersionId, answers: body.answers, submissionId: body.submissionId });
+    if (body.submissionId !== undefined || body.answers !== undefined || body.formVersionId !== undefined || body.onBehalfOf === "guardian") {
+      if (body.submissionId === undefined && body.answers === undefined) throw new ValidationError("answers or submissionId is required together with formVersionId or onBehalfOf");
+      const filed = await applyWithForm({
+        userId: currentUser.id,
+        clubId,
+        formVersionId: body.formVersionId,
+        answers: body.answers,
+        submissionId: body.submissionId,
+        onBehalfOf: body.onBehalfOf,
+        emailVerified: currentUser.emailVerified === true,
+      });
       if (filed.created) {
         await db.insert(auditLog).values({
           eventType: "club_member.apply",
           subjectId: filed.application.id,
-          payload: { clubId, userId: currentUser.id, formSubmissionId: filed.submission.id, formVersionId: filed.submission.formVersionId },
+          payload: { clubId, userId: currentUser.id, formSubmissionId: filed.submission.id, formVersionId: filed.submission.formVersionId, onBehalfOf: filed.submission.onBehalfOf },
         });
       }
-      return c.json({ data: { application: filed.application, submission: { id: filed.submission.id, status: filed.submission.status, formVersionId: filed.submission.formVersionId } } }, filed.created ? 201 : 200);
+      return c.json(
+        { data: { application: filed.application, submission: { id: filed.submission.id, status: filed.submission.status, formVersionId: filed.submission.formVersionId, onBehalfOf: filed.submission.onBehalfOf }, warnings: filed.warnings } },
+        filed.created ? 201 : 200,
+      );
     }
 
     // Legacy application (old clients). Same preconditions as the form path, under the same per-(user, club) lock so

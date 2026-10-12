@@ -124,9 +124,12 @@ describe("form submissions (applicant side)", () => {
 
     const byId = await call(who, "/form-submissions", { method: "POST", body: { clubId: a.clubId, formVersionId: sub.formVersionId } });
     expect(byId.status).toBe(201);
-    // Not an Aufnahme form / not the self variant: refused (child application is B8).
+    // Not an Aufnahme form: refused. A child application needs a form that asks for the child's name (B8; the standard form does not).
     expect((await createDraft(who, a, { purpose: "austritt" })).status).toBe(422);
-    expect((await createDraft(who, a, { onBehalfOf: "guardian" })).status).toBe(422);
+    const guardian = await createDraft(who, a, { onBehalfOf: "guardian" });
+    expect(guardian.status).toBe(409);
+    expect((await body(guardian)).error.details.code).toBe("child_application_unsupported");
+    expect((await createDraft(who, a, { onBehalfOf: "somebody" })).status).toBe(422);
     // Invalid initial answers are not stored.
     const before = (await body(await call(who, "/form-submissions/mine"))).data.length;
     const bad = await createDraft(who, a, { answers: { category: "no-such-category" } });

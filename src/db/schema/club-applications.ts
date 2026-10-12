@@ -29,6 +29,8 @@ export const clubApplications = pgTable(
     category: text("category").notNull().default("aktiv"),
     birthDate: date("birth_date", { mode: "string" }),
     status: text("status").notNull().default("pending"),
+    // Wave 8 B8: `self` (the applicant joins) or `guardian` (a parent applies for a child; `user_id` is the PARENT's account).
+    onBehalfOf: text("on_behalf_of").notNull().default("self"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     decidedBy: text("decided_by").references(() => member.id, { onDelete: "set null" }),
@@ -40,7 +42,9 @@ export const clubApplications = pgTable(
   (table) => [
     uniqueIndex("club_applications_pending_user_club_uidx")
       .on(table.userId, table.clubId)
-      .where(sql`${table.status} = 'pending'`),
+      // Only a person's OWN application is limited to one open one per club; a parent may have several children pending
+      // (capped at 5 open child applications per account in the routes).
+      .where(sql`${table.status} = 'pending' AND ${table.onBehalfOf} = 'self'`),
     index("club_applications_club_status_idx").on(table.clubId, table.status),
   ],
 );

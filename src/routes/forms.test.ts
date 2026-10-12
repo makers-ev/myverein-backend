@@ -319,7 +319,7 @@ describe("form management API", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toContain("private");
     const def = (await body(res)).data;
-    expect(Object.keys(def).sort()).toEqual(["fields", "formId", "formVersionId", "name", "privacyNotice", "purpose", "version"]);
+    expect(Object.keys(def).sort()).toEqual(["childApplication", "fields", "formId", "formVersionId", "name", "privacyNotice", "purpose", "version"]);
     const text = JSON.stringify(def);
     expect(text).not.toContain("secret_draft");
     expect(text).not.toContain("mapsTo");

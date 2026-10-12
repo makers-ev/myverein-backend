@@ -14,6 +14,7 @@ import type { DbExecutor } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { applicationPendingError, closeApplicationOfSubmission, createApplicationForSubmission } from "../lib/form-applications.js";
+import { assertGuardianMayApply, checkChildAnswers, type ChildWarning, childUnsupportedError, supportsChildApplication } from "../lib/form-children.js";
 import { FIELD_KEY_RE, validateAnswers, visibleFieldKeys, type FormField, type ValidateResult } from "../lib/form-schema.js";
 import {
   ANSWERS_BODY_LIMIT,
@@ -257,9 +258,9 @@ const createSchema = z
   .object({
     clubId: z.string().regex(SLUG_RE).optional(),
     clubSlug: z.string().regex(SLUG_RE).optional(),
-    // Only the Aufnahme form is reachable for applicants in Wave 8; 'guardian' (child application) comes with B8.
+    // Only the Aufnahme form is reachable for applicants in Wave 8. 'guardian' = a parent applies for a child (B8).
     purpose: z.literal(PURPOSE).optional(),
-    onBehalfOf: z.literal("self").optional(),
+    onBehalfOf: z.enum(["self", "guardian"]).optional(),
     formVersionId: z.uuid().optional(),
     answers: z.unknown().optional(),
   })
@@ -282,7 +283,13 @@ formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", crea
     const categories = await applicantCategories(org.id, tx);
     if (body.formVersionId !== undefined && body.formVersionId !== current.version.id) throw outdatedError(applicantDefinition(current.form, current.version, categories));
 
-    await assertMayApply(tx, org.id, userId);
+    const onBehalfOf = body.onBehalfOf ?? "self";
+    await assertMayApply(tx, org.id, userId, onBehalfOf);
+    if (onBehalfOf === "guardian") {
+      if (!supportsChildApplication(current.version.fields as FormField[])) throw childUnsupportedError();
+      // Counted under the user-wide lock taken above, so parallel drafts cannot exceed the cap.
+      await assertGuardianMayApply(tx, { clubId: org.id, userId, emailVerified: c.get("user").emailVerified === true, countOpen: true });
+    }
     const [{ drafts }] = await tx
       .select({ drafts: count() })
       .from(formSubmissions)
@@ -299,9 +306,9 @@ formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", crea
     }
     const [row] = await tx
       .insert(formSubmissions)
-      .values({ formId: current.form.id, formVersionId: current.version.id, clubId: org.id, submittedByUserId: userId, onBehalfOf: "self", answers, status: "draft" })
+      .values({ formId: current.form.id, formVersionId: current.version.id, clubId: org.id, submittedByUserId: userId, onBehalfOf, answers, status: "draft" })
       .returning();
-    await tx.insert(auditLog).values({ eventType: "form_submission.create", subjectId: row!.id, payload: { clubId: org.id, formId: current.form.id, formVersionId: current.version.id, userId } });
+    await tx.insert(auditLog).values({ eventType: "form_submission.create", subjectId: row!.id, payload: { clubId: org.id, formId: current.form.id, formVersionId: current.version.id, userId, onBehalfOf } });
     return row!;
   });
   return c.json({ data: { submission: (await shapeSubmissions([created]))[0] } }, 201);
@@ -582,13 +589,18 @@ formSubmissionRoutes.get("/:id/files/:fileId", async (c) => {
  * the caller (lock order: submission row, then the per-(user, club) advisory lock, then the application insert).
  * Returns the files to `purgeMediaFile` after the commit.
  */
-export async function submitDraftInTx(tx: DbExecutor, sub: FormSubmissionRow, userId: string, extraAnswers: unknown): Promise<{ row: FormSubmissionRow; application: ClubApplicationRow | null; purge: string[] }> {
+export async function submitDraftInTx(
+  tx: DbExecutor,
+  sub: FormSubmissionRow,
+  userId: string,
+  extraAnswers: unknown,
+): Promise<{ row: FormSubmissionRow; application: ClubApplicationRow | null; purge: string[]; warnings: ChildWarning[] }> {
   const purge: string[] = [];
   // The advisory lock orders parallel submits / applies of the same user and club behind each other.
   await lockUserClub(tx, userId, sub.clubId);
   assertDraft(sub);
   const { target } = await resolveTarget(tx, sub);
-  await assertMayApply(tx, sub.clubId, userId);
+  await assertMayApply(tx, sub.clubId, userId, sub.onBehalfOf === "guardian" ? "guardian" : "self");
 
   const fields = target.version.fields as FormField[];
   const files = await loadFiles(tx, [sub.id]);
@@ -599,6 +611,12 @@ export async function submitDraftInTx(tx: DbExecutor, sub: FormSubmissionRow, us
     uploadedFieldKeys: new Set(files.map((f) => f.file.fieldKey)),
   });
   if (!result.ok) throw invalidAnswers(result.errors);
+  let warnings: ChildWarning[] = [];
+  if (sub.onBehalfOf === "guardian") {
+    // The parent must still be allowed to sponsor (e-mail was verified at creation; the account may have left meanwhile).
+    await assertGuardianMayApply(tx, { clubId: sub.clubId, userId, emailVerified: true, countOpen: false });
+    warnings = checkChildAnswers(fields, result.answers);
+  }
 
   // Files of fields the answers made invisible are not part of the application.
   const visible = visibleFieldKeys(fields, result.answers);
@@ -615,9 +633,9 @@ export async function submitDraftInTx(tx: DbExecutor, sub: FormSubmissionRow, us
   await tx.insert(auditLog).values({
     eventType: "form_submission.submit",
     subjectId: sub.id,
-    payload: { clubId: sub.clubId, formId: sub.formId, formVersionId: sub.formVersionId, userId, onBehalfOf: sub.onBehalfOf, fileCount: files.length - hidden.length, ...(application ? { applicationId: application.id } : {}) },
+    payload: { clubId: sub.clubId, formId: sub.formId, formVersionId: sub.formVersionId, userId, onBehalfOf: sub.onBehalfOf, fileCount: files.length - hidden.length, ...(application ? { applicationId: application.id } : {}), ...(warnings.length > 0 ? { warnings } : {}) },
   });
-  return { row, application, purge };
+  return { row, application, purge, warnings };
 }
 
 const applicationDto = (a: ClubApplicationRow) => ({ id: a.id, status: a.status, createdAt: a.createdAt });
@@ -631,7 +649,7 @@ formSubmissionRoutes.post("/:id/submit", submitLimiter, jsonLimit, zValidator("j
     return submitDraftInTx(tx, sub, userId, body.answers);
   });
   await purgeAll(submitted.purge);
-  return c.json({ data: { submission: (await shapeSubmissions([submitted.row]))[0], application: submitted.application ? applicationDto(submitted.application) : null } });
+  return c.json({ data: { submission: (await shapeSubmissions([submitted.row]))[0], application: submitted.application ? applicationDto(submitted.application) : null, warnings: submitted.warnings } });
 });
 
 /**
@@ -640,7 +658,16 @@ formSubmissionRoutes.post("/:id/submit", submitLimiter, jsonLimit, zValidator("j
  * returned as is), `answers` (a submission is created and submitted in one go) -- both against the club's published form,
  * stale versions answer `409 FORM_VERSION_OUTDATED`. Lock order: see `lib/form-applications.ts`.
  */
-export async function applyWithForm(input: { userId: string; clubId: string; formVersionId?: string; answers?: unknown; submissionId?: string }): Promise<{ application: ClubApplicationRow; submission: FormSubmissionRow; created: boolean }> {
+export async function applyWithForm(input: {
+  userId: string;
+  clubId: string;
+  formVersionId?: string;
+  answers?: unknown;
+  submissionId?: string;
+  /** New answers only: who the application is for (a submissionId carries its own). */
+  onBehalfOf?: "self" | "guardian";
+  emailVerified?: boolean;
+}): Promise<{ application: ClubApplicationRow; submission: FormSubmissionRow; created: boolean; warnings: ChildWarning[] }> {
   const { userId, clubId } = input;
   await ensureFormBasics(clubId);
   const purge: string[] = [];
@@ -652,15 +679,22 @@ export async function applyWithForm(input: { userId: string; clubId: string; for
       if (sub.clubId !== clubId) throw notFound();
       if (sub.status === "submitted") {
         const [existing] = await tx.select().from(clubApplications).where(eq(clubApplications.formSubmissionId, sub.id)).limit(1);
-        if (existing) return { application: existing, submission: sub, created: false };
+        if (existing) return { application: existing, submission: sub, created: false, warnings: [] };
         // A submitted application without its application row (filed before the two were linked): complete it.
         await lockUserClub(tx, userId, clubId);
         const pinned = await loadPinned(tx, sub.formVersionId);
-        const [other] = await tx.select({ id: clubApplications.id, createdAt: clubApplications.createdAt }).from(clubApplications).where(and(eq(clubApplications.userId, userId), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending"))).limit(1);
-        if (other) throw applicationPendingError({ clubId, applicationId: other.id, submittedAt: other.createdAt });
-        return { application: await createApplicationForSubmission(tx, sub, pinned.version.fields as FormField[]), submission: sub, created: true };
+        if (sub.onBehalfOf !== "guardian") {
+          const [other] = await tx
+            .select({ id: clubApplications.id, createdAt: clubApplications.createdAt })
+            .from(clubApplications)
+            .where(and(eq(clubApplications.userId, userId), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending"), eq(clubApplications.onBehalfOf, "self")))
+            .limit(1);
+          if (other) throw applicationPendingError({ clubId, applicationId: other.id, submittedAt: other.createdAt });
+        }
+        return { application: await createApplicationForSubmission(tx, sub, pinned.version.fields as FormField[]), submission: sub, created: true, warnings: [] };
       }
       if (sub.status !== "draft") throw new ConflictError("The submission can no longer be changed", { details: { code: "submission_not_editable", status: sub.status } });
+      if (input.onBehalfOf !== undefined && input.onBehalfOf !== sub.onBehalfOf) throw new ValidationError("onBehalfOf does not match the submission");
       if (input.formVersionId !== undefined && input.formVersionId !== sub.formVersionId) {
         // The client names the version it rendered; the draft is pinned to another one: let the client re-render.
         const current = await findCurrentForm(clubId, PURPOSE, tx);
@@ -668,25 +702,32 @@ export async function applyWithForm(input: { userId: string; clubId: string; for
       }
       const submitted = await submitDraftInTx(tx, sub, userId, input.answers);
       purge.push(...submitted.purge);
-      return { application: submitted.application!, submission: submitted.row, created: true };
+      return { application: submitted.application!, submission: submitted.row, created: true, warnings: submitted.warnings };
     }
 
     // New answers: a fresh submission against the CURRENT published version, submitted in the same transaction.
     await lockUserClub(tx, userId, clubId);
+    const onBehalfOf = input.onBehalfOf ?? "self";
+    // Same order as POST /form-submissions: (user, club) lock, then the user-wide one that guards the cap of open child applications.
+    if (onBehalfOf === "guardian") await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`form-submission-user:${userId}`}, 0))`);
     const current = await findCurrentForm(clubId, PURPOSE, tx);
     if (!current) throw new NotFoundError("This club has no application form");
     const categories = await applicantCategories(clubId, tx);
     if (input.formVersionId !== undefined && input.formVersionId !== current.version.id) throw outdatedError(applicantDefinition(current.form, current.version, categories));
-    await assertMayApply(tx, clubId, userId);
+    await assertMayApply(tx, clubId, userId, onBehalfOf);
+    if (onBehalfOf === "guardian") {
+      if (!supportsChildApplication(current.version.fields as FormField[])) throw childUnsupportedError();
+      await assertGuardianMayApply(tx, { clubId, userId, emailVerified: input.emailVerified === true, countOpen: true });
+    }
     const draftAnswers = validateAnswers(current.version.fields as FormField[], toAnswers(input.answers ?? {}), { mode: "draft", categoryKeys: categories.map((k) => k.key) });
     if (!draftAnswers.ok) throw invalidAnswers(draftAnswers.errors);
     const [draft] = await tx
       .insert(formSubmissions)
-      .values({ formId: current.form.id, formVersionId: current.version.id, clubId, submittedByUserId: userId, onBehalfOf: "self", answers: draftAnswers.answers, status: "draft" })
+      .values({ formId: current.form.id, formVersionId: current.version.id, clubId, submittedByUserId: userId, onBehalfOf, answers: draftAnswers.answers, status: "draft" })
       .returning();
     const submitted = await submitDraftInTx(tx, draft!, userId, undefined);
     purge.push(...submitted.purge);
-    return { application: submitted.application!, submission: submitted.row, created: true };
+    return { application: submitted.application!, submission: submitted.row, created: true, warnings: submitted.warnings };
   });
   await purgeAll(purge);
   return done;
@@ -697,6 +738,9 @@ formSubmissionRoutes.post("/:id/withdraw", async (c) => {
   const purge: string[] = [];
   const withdrawn = await db.transaction(async (tx) => {
     const sub = await loadOwn(tx, c.req.param("id"), userId, true);
+    // A cancellation (austritt) is withdrawn through its exit request, which keeps the member's status consistent.
+    const [kind] = await tx.select({ purpose: forms.purpose }).from(forms).where(eq(forms.id, sub.formId)).limit(1);
+    if (kind?.purpose !== PURPOSE) throw new ConflictError("This submission belongs to an exit request; withdraw the exit request instead", { details: { code: "submission_not_withdrawable", status: sub.status } });
     // Once the board has decided (B6 sets decided_at together with accepted/rejected) there is nothing to withdraw.
     if ((sub.status !== "draft" && sub.status !== "submitted") || sub.decidedAt !== null) throw new ConflictError("The submission can no longer be withdrawn", { details: { code: "submission_not_withdrawable", status: sub.status } });
     // A withdrawn application keeps its answers as a record, but its uploaded files (photo, documents) are deleted.

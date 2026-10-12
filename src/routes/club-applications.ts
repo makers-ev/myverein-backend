@@ -9,8 +9,13 @@ import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import { clubMembers } from "../db/schema/club-members.js";
-import { assertRejoinAllowed, type DbExecutor, ensureClubMember, isUuid, lockCategoryShared } from "../lib/club-members.js";
-import type { MemberCategoryRow } from "../db/schema/club-members.js";
+import { assertRejoinAllowed, DEFAULT_CATEGORY_KEY, type DbExecutor, ensureClubMember, findCategoryByKey, isUuid, lockCategoryShared } from "../lib/club-members.js";
+import { clubMemberStatusHistory, type MemberCategoryRow } from "../db/schema/club-members.js";
+import { nextMemberNumber } from "../lib/member-number.js";
+import { planAcceptance } from "../lib/form-acceptance.js";
+import { childDisplayName, ensureGuardianAccount, linkGuardian, type GuardianAccount } from "../lib/form-children.js";
+import { formVersions, formSubmissions } from "../db/schema/forms.js";
+import type { FormField } from "../lib/form-schema.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { applyAcceptance, compensateAbortedApproval, asDecisionBusy, assertSubmissionDecidable, consentEvidence, lockDecisionSubmission, rejectSubmission, type DecisionContext, type MappingReport } from "../lib/form-applications.js";
@@ -146,6 +151,7 @@ clubApplicationRoutes.post("/:id/approve", decisionBodyLimit, async (c) => {
   // A withdrawn / already decided submission is refused before any account membership is created.
   await assertSubmissionDecidable(db, application);
   await assertCategoryChoosable(clubId, override);
+  if (application.onBehalfOf === "guardian") return c.json({ data: await approveChild(clubId, application, decider, override) });
 
   const existing = await db.query.member.findFirst({
     where: and(eq(member.organizationId, clubId), eq(member.userId, application.userId)),
@@ -261,6 +267,103 @@ clubApplicationRoutes.post("/:id/approve", decisionBodyLimit, async (c) => {
     throw asDecisionBusy(err);
   }
 });
+
+/**
+ * Acceptance of an application a parent filed for a CHILD (Wave 8 B8): an account-less `club_members` row for the child
+ * (no account is created for the child, no e-mail), the form mapped onto it exactly like for an adult, and the guardian link
+ * child <- parent. The parent keeps their account membership or gets an external one (see `lib/form-children.ts`). The
+ * applicant is the parent: nothing here touches the parent's own member record unless the parent is new to the club.
+ *
+ * Lock order (same as an adult acceptance, README "Locks"): submission -> application -> category (share) -> organization
+ * row (member number) -> the child's new `club_members` row -> media -> custom field definitions -> values. The Better Auth
+ * call for a new external parent runs before the transaction and is compensated like an adult's.
+ */
+async function approveChild(clubId: string, application: typeof clubApplications.$inferSelect, decider: { id: string }, override: CategoryOverride) {
+  const today = todayBerlin();
+
+  // Pre-flight without locks: the child must be nameable, BEFORE any account membership is created for the parent.
+  const [pinned] = await db
+    .select({ fields: formVersions.fields, answers: formSubmissions.answers })
+    .from(formSubmissions)
+    .innerJoin(formVersions, eq(formVersions.id, formSubmissions.formVersionId))
+    .where(eq(formSubmissions.id, application.formSubmissionId ?? "00000000-0000-0000-0000-000000000000"))
+    .limit(1);
+  if (!pinned || childDisplayName(planAcceptance(pinned.fields as FormField[], pinned.answers)) === null) {
+    throw new ConflictError("The application does not name the child (first and last name); reject it and ask the parent to apply again", { details: { code: "child_name_missing" } });
+  }
+
+  const guardian: GuardianAccount = await ensureGuardianAccount(clubId, application.userId);
+  try {
+    const result = await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '10s'`);
+      const context = await lockDecisionSubmission(tx, application);
+      if (!context) throw new ConflictError("Application has already been decided");
+      const [decided] = await tx
+        .update(clubApplications)
+        .set({ status: "approved", decidedAt: new Date(), decidedBy: decider.id })
+        .where(and(eq(clubApplications.id, application.id), eq(clubApplications.status, "pending")))
+        .returning();
+      if (!decided) throw new ConflictError("Application has already been decided");
+
+      const category = (await chooseCategory(tx, clubId, override, application.category)) ?? (await findCategoryByKey(tx, clubId, DEFAULT_CATEGORY_KEY));
+      const name = childDisplayName(planAcceptance(context.version.fields as FormField[], context.sub.answers));
+      if (!name) throw new ConflictError("The application does not name the child", { details: { code: "child_name_missing" } });
+
+      const [child] = await tx
+        .insert(clubMembers)
+        .values({ clubId, memberId: null, lastUserId: null, displayName: name, memberNumber: await nextMemberNumber(tx, clubId), categoryId: category?.id ?? null, status: "aktiv", joinedAt: today })
+        .returning();
+      await tx.insert(clubMemberStatusHistory).values({ clubMemberId: child!.id, fromStatus: null, toStatus: "aktiv", toCategoryId: category?.id ?? null, effectiveOn: today, reason: "Aufnahmeantrag (Kind)", changedBy: decider.id });
+
+      const applied = await applyAcceptance(tx, { clubId, context, clubMemberId: child!.id, decidedBy: decider.id });
+      const link = await linkGuardian(tx, { clubId, guardian, childClubMemberId: child!.id, decidedBy: decider.id });
+      const [finalApplication] = await tx.update(clubApplications).set({ clubMemberId: child!.id }).where(eq(clubApplications.id, application.id)).returning();
+
+      await tx.insert(auditLog).values({
+        eventType: "club_application.approve",
+        subjectId: application.id,
+        // Ids, field keys and counts only -- never the child's name or any answer.
+        payload: {
+          clubId,
+          userId: application.userId,
+          guardianMemberId: guardian.account.id,
+          clubMemberId: child!.id,
+          decidedBy: decider.id,
+          onBehalfOf: "guardian",
+          guardianCreated: guardian.created,
+          guardianLinked: link.linked,
+          memberNumber: applied.clubMember.memberNumber,
+          formSubmissionId: context.sub.id,
+          formVersionId: context.version.id,
+          mapped: { targets: applied.mapping.applied, customFields: applied.mapping.customFields, skipped: applied.mapping.skipped.length },
+          consent: consentEvidence(context, child!.id),
+        },
+      });
+      return { application: finalApplication!, clubMember: applied.clubMember, mapping: applied.mapping, purge: applied.purge, linked: link.linked };
+    });
+    await Promise.all(result.purge.map((key) => purgeMediaFile(key)));
+    return {
+      application: result.application,
+      // The child has no account; the parent's account membership is reported under `guardian`.
+      member: null,
+      clubMember: result.clubMember,
+      guardian: { memberId: guardian.account.id, userId: application.userId, createdAsExternal: guardian.created, linked: true },
+      mapping: result.mapping,
+    };
+  } catch (err) {
+    if (guardian.created) {
+      const removed = await compensateAbortedApproval({ id: guardian.account.id, organizationId: clubId, userId: application.userId }).catch((cleanupErr) => {
+        logger.error({ err: cleanupErr, memberId: guardian.account.id }, "[club-applications] failed to remove guardian membership after aborted approval");
+        return false;
+      });
+      if (!removed) logger.warn({ memberId: guardian.account.id, applicationId: application.id }, "[club-applications] aborted child approval left the guardian membership in place");
+    }
+    // The parent's account membership vanished under us (FK of the guardian link): the same retryable busy answer.
+    const code = (err as { code?: string })?.code ?? (err as { cause?: { code?: string } })?.cause?.code;
+    if (code === "23503") throw new ConflictError("The guardian's membership changed while the application was being decided; try again", { details: { code: "decision_busy" } });
+    throw asDecisionBusy(err);
+  }
+}
 
 /** Audit payload of an accepted form application: ids, mapped target names and counts, consent evidence (a text hash). */
 function auditOfMapping(context: DecisionContext, mapping: MappingReport) {

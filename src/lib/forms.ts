@@ -5,11 +5,12 @@ import { db } from "../db/client.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
-import { forms, formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, type FormPurpose, type FormRow, type FormVersionRow } from "../db/schema/forms.js";
+import { forms, formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, type FormPurpose, type FormRow, type FormVersionRow, type SubmissionOnBehalfOf } from "../db/schema/forms.js";
 import { IMPLICIT_ROLE_TYPE } from "./club-permissions.js";
 import type { DbExecutor } from "./club-members.js";
 import { ConflictError, ValidationError, type AppErrorOptions } from "./errors.js";
 import { ensureClubFormDefaults } from "./form-defaults.js";
+import { supportsChildApplication } from "./form-children.js";
 import { FIELD_KEY_RE, type FieldErrorCode, type FormField, resolveFieldOptions } from "./form-schema.js";
 import { markMediaDeleted } from "./media.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "./member-lifecycle.js";
@@ -143,7 +144,8 @@ export function applicantDefinition(form: FormRow, version: FormVersionRow, cate
     const options = field.type === "select" || field.type === "multiselect" ? resolveFieldOptions(field, categories) : undefined;
     return options ? { ...visible, options } : visible;
   });
-  return { formId: form.id, formVersionId: version.id, version: version.version, purpose: form.purpose, name: form.name, privacyNotice: version.privacyNotice, fields };
+  // `childApplication`: a parent may apply for a child with this form (it asks for first and last name). Says nothing else about the mapping.
+  return { formId: form.id, formVersionId: version.id, version: version.version, purpose: form.purpose, name: form.name, privacyNotice: version.privacyNotice, childApplication: supportsChildApplication(version.fields as FormField[]), fields };
 }
 
 /** `409 FORM_VERSION_OUTDATED` carrying the definition the client has to re-render (null: the club currently has no such form). */
@@ -174,7 +176,10 @@ export async function clubRoleTypesOf(userId: string, clubId: string, executor: 
  * Preconditions of an application (same rules as `POST /club-members/apply`): not already a member, not excluded /
  * deceased, no pending application and no other submitted application form of this user for the club.
  */
-export async function assertMayApply(executor: DbExecutor, clubId: string, userId: string): Promise<void> {
+export async function assertMayApply(executor: DbExecutor, clubId: string, userId: string, onBehalfOf: SubmissionOnBehalfOf = "self"): Promise<void> {
+  // A parent applying for a child (B8) is not the applicant: being a member (even a guest guardian) or having applied for
+  // oneself or another child is no obstacle. Their account must merely not be a former one (checked by the caller).
+  if (onBehalfOf === "guardian") return;
   const existing = await executor.query.member.findFirst({ where: and(eq(member.organizationId, clubId), eq(member.userId, userId)) });
   if (existing) {
     const own = await executor.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, existing.id) });
@@ -186,10 +191,10 @@ export async function assertMayApply(executor: DbExecutor, clubId: string, userI
     }
     if (state !== "ausgetreten") throw new ConflictError("Already a member of this club", { code: "ALREADY_MEMBER", details: { clubId, ...(own ? { clubMemberId: own.id } : {}) } });
   }
-  const pending = await executor.query.clubApplications.findFirst({ where: and(eq(clubApplications.userId, userId), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending")) });
+  const pending = await executor.query.clubApplications.findFirst({ where: and(eq(clubApplications.userId, userId), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending"), eq(clubApplications.onBehalfOf, "self")) });
   if (pending) throw new ConflictError("An application for this club is already pending", { code: "APPLICATION_PENDING", details: { clubId, applicationId: pending.id, submittedAt: pending.createdAt } });
   const submitted = await executor.query.formSubmissions.findFirst({
-    where: and(eq(formSubmissions.submittedByUserId, userId), eq(formSubmissions.clubId, clubId), eq(formSubmissions.status, "submitted")),
+    where: and(eq(formSubmissions.submittedByUserId, userId), eq(formSubmissions.clubId, clubId), eq(formSubmissions.status, "submitted"), eq(formSubmissions.onBehalfOf, "self")),
     with: { form: { columns: { purpose: true } } },
   });
   if (submitted && submitted.form.purpose === "aufnahme") {
