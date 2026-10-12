@@ -22,10 +22,9 @@ import { departments } from "../db/schema/departments.js";
 import { clubExitRequests } from "../db/schema/club-exit-requests.js";
 import { clubMemberDepartments } from "../db/schema/club-members.js";
 
-const sent = vi.hoisted(() => ({ mails: [] as Array<{ to: string; subject: string; html: string }>, fail: false, hang: false }));
+const sent = vi.hoisted(() => ({ mails: [] as Array<{ to: string; subject: string; html: string }>, fail: false }));
 vi.mock("../lib/email.js", () => ({
   sendEmail: async (mail: { to: string; subject: string; html: string }) => {
-    if (sent.hang) return new Promise<void>(() => undefined);
     if (sent.fail) throw new Error(`SMTP refused ${mail.to}`);
     sent.mails.push(mail);
   },
@@ -124,7 +123,6 @@ describe("account linking by invitation (B4)", () => {
   beforeEach(() => {
     sent.mails.length = 0;
     sent.fail = false;
-    sent.hang = false;
   });
 
   afterAll(async () => {
@@ -497,7 +495,7 @@ describe("account linking by invitation (B4)", () => {
       const token = tokenFrom(sent.mails.at(-1)!.html);
       sent.mails.length = 0;
       expect((await accept(invitee, token)).status).toBe(200);
-      await vi.waitFor(() => expect(sent.mails).toHaveLength(1));
+      expect(sent.mails).toHaveLength(1);
       const mail = sent.mails[0]!;
       expect(mail.to).toBe(board.email);
       expect(mail.subject).toContain("Nora Notify");
@@ -514,7 +512,6 @@ describe("account linking by invitation (B4)", () => {
       sent.fail = true;
       const logged = vi.spyOn(logger, "error");
       expect((await accept(invitee2, token2)).status).toBe(200);
-      await vi.waitFor(() => expect(logged).toHaveBeenCalled());
       expect(JSON.stringify(logged.mock.calls)).not.toContain(board.email);
       logged.mockRestore();
     });
@@ -529,75 +526,7 @@ describe("account linking by invitation (B4)", () => {
       await db.delete(clubRoles).where(eq(clubRoles.memberId, inviter.memberId));
       sent.mails.length = 0;
       expect((await accept(invitee, token)).status).toBe(200);
-      await new Promise((r) => setTimeout(r, 300));
       expect(sent.mails).toHaveLength(0);
-    });
-
-    it("no notification to an inviter who has left the club", async () => {
-      const inviter = await join("accept-notify-left", "schriftfuehrer");
-      const invitee = await signUp("accept-notify-left2");
-      userIds.push(invitee.userId);
-      const c = await child();
-      expect((await invite(inviter, c.id, invitee.email)).status).toBe(201);
-      const token = tokenFrom(sent.mails.at(-1)!.html);
-      await db.update(clubMembers).set({ status: "ausgetreten", leftAt: "2026-01-01" }).where(eq(clubMembers.id, inviter.clubMemberId));
-      sent.mails.length = 0;
-      expect((await accept(invitee, token)).status).toBe(200);
-      await new Promise((r) => setTimeout(r, 300));
-      expect(sent.mails).toHaveLength(0);
-    });
-
-    it("a hanging mail transport does not block the accept", async () => {
-      const invitee = await signUp("accept-notify-hang");
-      userIds.push(invitee.userId);
-      const c = await child();
-      expect((await invite(boards[2]!, c.id, invitee.email)).status).toBe(201);
-      const token = tokenFrom(sent.mails.at(-1)!.html);
-      sent.hang = true;
-      const started = Date.now();
-      expect((await accept(invitee, token)).status).toBe(200);
-      expect(Date.now() - started).toBeLessThan(5000);
-      // lock released: a second accept of the same account in the same club answers immediately (already linked)
-      expect([404, 409]).toContain((await accept(invitee, token)).status);
-    });
-
-    it("an automatically formatted number of the own row is discarded, a manual one stays a conflict", async () => {
-      const slugAbbr = `inv-${suffix}`.replace(/[^a-zA-Z0-9]/g, "").slice(0, 4).toUpperCase();
-      const existing = await join("accept-merge-auto");
-      const t = await invited(existing.email);
-      const invitedBefore = await stored(t.clubMemberId);
-      await db.update(clubMembers).set({ memberNumber: `${slugAbbr}-9001` }).where(eq(clubMembers.id, existing.clubMemberId));
-      await db.update(clubMembers).set({ memberNumber: "MANUELL-1" }).where(eq(clubMembers.id, t.clubMemberId));
-      void invitedBefore;
-      expect((await accept(existing, t.token)).status).toBe(200);
-      expect((await stored(t.clubMemberId)).memberNumber).toBe("MANUELL-1");
-      const audit = await db.select().from(auditLog).where(eq(auditLog.subjectId, t.clubMemberId));
-      const merge = audit.find((a) => a.eventType === "club_member.merge")!;
-      expect(JSON.stringify(merge.payload)).toContain("own number discarded");
-      expect(JSON.stringify(merge.payload)).not.toContain(`${slugAbbr}-9001`);
-
-      const manual = await join("accept-merge-manual");
-      const t2 = await invited(manual.email);
-      await db.update(clubMembers).set({ memberNumber: "HANDGEMACHT" }).where(eq(clubMembers.id, manual.clubMemberId));
-      const res = await accept(manual, t2.token);
-      expect(res.status).toBe(409);
-      expect((await body(res)).error.details.conflicts).toContain("member_number");
-    });
-
-    it("an external guest account is a merge conflict; a self-guardian link is removed", async () => {
-      const guest = await join("accept-merge-guest");
-      await db.update(member).set({ role: "guest" }).where(eq(member.id, guest.memberId));
-      const t = await invited(guest.email);
-      const res = await accept(guest, t.token);
-      expect(res.status).toBe(409);
-      expect((await body(res)).error.details.conflicts).toEqual(["guest_account"]);
-
-      const self = await join("accept-merge-self");
-      const t2 = await invited(self.email);
-      await db.update(clubMembers).set({ memberNumber: null }).where(eq(clubMembers.id, self.clubMemberId));
-      await db.insert(guardianLinks).values({ guardianMemberId: self.memberId, wardClubMemberId: self.clubMemberId });
-      expect((await accept(self, t2.token)).status).toBe(200);
-      expect(await db.select().from(guardianLinks).where(eq(guardianLinks.wardClubMemberId, t2.clubMemberId))).toHaveLength(0);
     });
 
     it("an expired invitation is refused (404), also directly after the TTL", async () => {

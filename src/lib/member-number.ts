@@ -41,17 +41,3 @@ export async function nextMemberNumber(tx: DbTransaction, clubId: string): Promi
 
   return `${abbr}-${String(Math.max(count, maxSuffix) + 1).padStart(4, "0")}`;
 }
-
-/**
- * True if `number` has the automatic format of the club ("PREFIX-NNNN": `club_settings.member_number_prefix` or the slug
- * abbreviation, 1-9 digits). Used as a heuristic by the account merge: such a number was handed out by the system and may be
- * discarded, a manual or differently formatted number is data of the board.
- */
-export async function isAutomaticMemberNumber(tx: DbTransaction | typeof db, clubId: string, number: string | null | undefined): Promise<boolean> {
-  if (!number) return false;
-  const org = await tx.execute<{ slug: string | null }>(sql`SELECT slug FROM organization WHERE id = ${clubId}`);
-  const settings = await tx.execute<{ prefix: string | null }>(sql`SELECT member_number_prefix AS prefix FROM club_settings WHERE club_id = ${clubId}`);
-  const configured = settings.rows[0]?.prefix?.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-  const abbr = configured || clubAbbreviation(org.rows[0]?.slug ?? null);
-  return new RegExp(`^${abbr.replace(/[^A-Z0-9]/g, "")}-[0-9]{1,9}$`).test(number);
-}
