@@ -31,6 +31,7 @@ import { recordKeyReturnsForRemovedAccount } from "./key-returns.js";
 import { locationKeyHolders, locations } from "../db/schema/locations.js";
 import { accountLinkLockKey, assertRejoinAllowed, type DbExecutor } from "./club-members.js";
 import { hasClubPermission, IMPLICIT_ROLE_TYPE } from "./club-permissions.js";
+import { isAutomaticMemberNumber } from "./member-number.js";
 import { isOwnerRole } from "./member-protection.js";
 import { BOARD_ROLE_TYPES } from "./club-permissions.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError } from "./errors.js";
@@ -130,21 +131,22 @@ export async function acceptInvite(token: string, account: AcceptingUser): Promi
   const { invite, row } = await findUsableInvite(token);
   // Accepts of ONE account in ONE club run one after the other, so two parallel accepts (e.g. two invitations to the same
   // address) deterministically end with the first linked and the second refused as "already a member" (single replica).
-  return serialized(`${row.clubId}:${account.id}`, async () => {
+  const result = await serialized(`${row.clubId}:${account.id}`, async () => {
     // Session-level advisory lock per (club, account) around addMember + link: the repair paths (ensureClubMember, taken
     // by GET /club-members, id resolution, ...) take the same lock and so cannot create a competing club_members row
     // for the new account membership while it is not linked yet.
     const lockClient = await pool.connect();
     try {
       await lockClient.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [accountLinkLockKey(row.clubId, account.id)]);
-      const result = await acceptClaimed(invite, row, account);
-      await notifyInviter(invite, row, result.clubName, account.id);
-      return result;
+      return await acceptClaimed(invite, row, account);
     } finally {
       await lockClient.query("SELECT pg_advisory_unlock(hashtextextended($1, 0))", [accountLinkLockKey(row.clubId, account.id)]).catch(() => undefined);
       lockClient.release();
     }
   });
+  // Lock and transactions are released: the mail must never hold them (or the response) hostage. Fire and forget.
+  void notifyInviter(invite, row, result.clubName, account.id);
+  return result;
 }
 
 const tails = new Map<string, Promise<unknown>>();
@@ -170,7 +172,16 @@ async function acceptClaimed(invite: ClubMemberInviteRow, row: ClubMemberRow, ac
   await assertRejoinAllowed(db, clubId, account.id);
 
   const existing = await db.query.member.findFirst({ where: and(eq(member.organizationId, clubId), eq(member.userId, account.id)) });
-  if (existing) return mergeIntoInvitedRow(invite, row, account, existing);
+  if (existing) {
+    try {
+      return await mergeIntoInvitedRow(invite, row, account, existing);
+    } catch (err) {
+      if ((err as { code?: string })?.code === "55P03" || (err as { cause?: { code?: string } })?.cause?.code === "55P03") {
+        throw new ConflictError("The member record is being changed by someone else; try again in a moment", { details: { code: "merge_busy" } });
+      }
+      throw err;
+    }
+  }
 
   const [claimed] = await db
     .update(clubMemberInvites)
@@ -206,10 +217,12 @@ async function acceptClaimed(invite: ClubMemberInviteRow, row: ClubMemberRow, ac
       const accountMemberships = await tx.select({ id: member.id }).from(member).where(and(eq(member.organizationId, clubId), eq(member.userId, account.id)));
       if (accountMemberships.length > 1) throw new ConflictError("This account is already a member of the club", { details: { code: "already_member" } });
 
-      await tx
+      const linked = await tx
         .update(clubMembers)
         .set({ memberId: created.id, lastUserId: account.id, accountUnlinkedAt: null, contactEmail: locked.contactEmail ?? account.email, updatedAt: new Date() })
-        .where(and(eq(clubMembers.id, locked.id), isNull(clubMembers.memberId)));
+        .where(and(eq(clubMembers.id, locked.id), isNull(clubMembers.memberId)))
+        .returning({ id: clubMembers.id });
+      if (linked.length !== 1) throw new ConflictError("Member already has an account");
       await tx.insert(clubMemberStatusHistory).values({
         clubMemberId: locked.id,
         fromStatus: locked.status,
@@ -250,6 +263,10 @@ const isEmpty = (value: string | null | undefined) => value === null || value ==
 async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberRow, account: AcceptingUser, existing: typeof member.$inferSelect): Promise<AcceptResult> {
   const clubId = row.clubId;
   const result = await db.transaction(async (tx) => {
+    // Lock order: an application approval holds its application row and then waits for the (club, account) advisory lock
+    // we hold, while we need that application row for the repointing -- Postgres cannot see that cycle. A short lock timeout
+    // turns it into a retryable 409 instead of a hang.
+    await tx.execute(sql`SET LOCAL lock_timeout = '5s'`);
     const probe = await tx.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, existing.id) });
     // Lock both rows in id order (no deadlock with a concurrent merge in the other direction).
     const ids = [row.id, ...(probe ? [probe.id] : [])];
@@ -261,6 +278,11 @@ async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberR
     if (own && own.id === invited.id) throw new ConflictError("Member already has an account");
     if (isLeftStatus(effectiveStatus(invited, todayBerlin()))) throw new NotFoundError(NOT_FOUND_MESSAGE);
 
+    if (existing.role === "guest") {
+      throw new ConflictError("The account is an external guest of the club and cannot be merged automatically; ask the board to resolve it", { details: { code: "merge_conflict", conflicts: ["guest_account"] } });
+    }
+
+    let ownNumberDiscarded = false;
     if (own) {
       const [deps, exits, history, ownFields, invitedFields] = await Promise.all([
         tx.select({ n: sql<number>`count(*)::int` }).from(clubMemberDepartments).where(eq(clubMemberDepartments.clubMemberId, own.id)),
@@ -271,7 +293,11 @@ async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberR
         tx.select({ fieldId: memberFieldValues.fieldId }).from(memberFieldValues).where(eq(memberFieldValues.clubMemberId, invited.id)),
       ]);
       const conflicts: string[] = [];
-      if (!isEmpty(own.memberNumber) && !isEmpty(invited.memberNumber) && own.memberNumber !== invited.memberNumber) conflicts.push("member_number");
+      if (!isEmpty(own.memberNumber) && !isEmpty(invited.memberNumber) && own.memberNumber !== invited.memberNumber) {
+        // Heuristic: an automatically assigned number ("PREFIX-NNNN") of the own row is discarded, anything else is a conflict.
+        if (await isAutomaticMemberNumber(tx, clubId, own.memberNumber)) ownNumberDiscarded = true;
+        else conflicts.push("member_number");
+      }
       if ((deps[0]?.n ?? 0) > 0) conflicts.push("departments");
       if (own.photoKey) conflicts.push("photo");
       if ((history[0]?.n ?? 0) > 0) conflicts.push("status_history");
@@ -303,6 +329,8 @@ async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberR
         await tx.delete(guardianLinks).where(and(eq(guardianLinks.wardClubMemberId, own.id), inArray(guardianLinks.guardianMemberId, keptGuardians.map((g) => g.guardianMemberId))));
       }
       await tx.update(guardianLinks).set({ wardClubMemberId: invited.id }).where(eq(guardianLinks.wardClubMemberId, own.id));
+      // The account must not end up as its own guardian.
+      await tx.delete(guardianLinks).where(and(eq(guardianLinks.guardianMemberId, existing.id), eq(guardianLinks.wardClubMemberId, invited.id)));
       await tx.update(clubApplications).set({ clubMemberId: invited.id }).where(eq(clubApplications.clubMemberId, own.id));
       await tx.update(formSubmissions).set({ subjectClubMemberId: invited.id }).where(eq(formSubmissions.subjectClubMemberId, own.id));
       await tx.update(memberFieldValues).set({ clubMemberId: invited.id }).where(eq(memberFieldValues.clubMemberId, own.id));
@@ -310,15 +338,17 @@ async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberR
         eventType: "club_member.merge",
         subjectId: invited.id,
         // Ids only: the retired row is gone afterwards, this is the trace.
-        payload: { clubId, keptClubMemberId: invited.id, retiredClubMemberId: own.id, memberId: existing.id, userId: account.id, inviteId: invite.id },
+        payload: { clubId, keptClubMemberId: invited.id, retiredClubMemberId: own.id, memberId: existing.id, userId: account.id, inviteId: invite.id, ...(ownNumberDiscarded ? { note: "own number discarded" } : {}) },
       });
       await tx.delete(clubMembers).where(eq(clubMembers.id, own.id));
     }
 
-    await tx
+    const linkedRows = await tx
       .update(clubMembers)
       .set({ ...patch, memberId: existing.id, lastUserId: account.id, accountUnlinkedAt: null, contactEmail: patch.contactEmail ?? invited.contactEmail ?? account.email, updatedAt: new Date() })
-      .where(and(eq(clubMembers.id, invited.id), isNull(clubMembers.memberId)));
+      .where(and(eq(clubMembers.id, invited.id), isNull(clubMembers.memberId)))
+      .returning({ id: clubMembers.id });
+    if (linkedRows.length !== 1) throw new ConflictError("Member already has an account");
     await tx.insert(clubMemberStatusHistory).values({
       clubMemberId: invited.id,
       fromStatus: invited.status,
@@ -341,6 +371,15 @@ async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberR
   return { clubId, clubName: club?.name ?? null, clubMemberId: row.id, memberId: existing.id, merged: result.merged };
 }
 
+const NOTIFY_TIMEOUT_MS = 10_000;
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout")), ms);
+    timer.unref();
+    work.then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}
+
 /**
  * Tells the board member who sent the invitation that the member is now linked. Best effort: never throws, nothing but
  * the member's display name and the club name is mailed (no token, no address, no profile data).
@@ -350,17 +389,21 @@ async function notifyInviter(invite: ClubMemberInviteRow, row: ClubMemberRow, cl
     if (!invite.createdBy) return;
     const inviter = await db.query.member.findFirst({ where: and(eq(member.id, invite.createdBy), eq(member.organizationId, row.clubId)) });
     if (!inviter || inviter.userId === accountUserId) return;
+    // Only an inviter who is still an active board member of the club: no guest account, a club_members row that is not left.
+    if (inviter.role === "guest") return;
+    const inviterRow = await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, inviter.id) });
+    if (!inviterRow || isLeftStatus(effectiveStatus(inviterRow, todayBerlin()))) return;
     const inviterUser = await db.query.user.findFirst({ where: eq(user.id, inviter.userId) });
-    if (!inviterUser?.email) return;
+    if (!inviterUser?.email || !inviterUser.emailVerified) return;
     const roles = await db.select({ roleType: clubRoles.roleType }).from(clubRoles).where(eq(clubRoles.memberId, inviter.id));
     if (!hasClubPermission([IMPLICIT_ROLE_TYPE, ...roles.map((r) => r.roleType)], "members:write")) return;
     const club = clubName ?? "deinem Verein";
-    await sendEmail({
+    await withTimeout(sendEmail({
       to: inviterUser.email,
       subject: `${row.displayName.replace(/[\r\n]+/g, " ")} hat ein Konto bei ${APP_NAME} verknüpft`,
       html: buildMemberLinkedEmail({ name: inviterUser.name, memberName: row.displayName, clubName: club, url: `${SITE_URL}` }),
       attachments: [{ filename: "logo.png", path: LOGO_PATH, cid: LOGO_CID }],
-    });
+    }), NOTIFY_TIMEOUT_MS);
   } catch (err) {
     logger.error({ errorName: err instanceof Error ? err.name : "unknown", inviteId: invite.id }, "[invites] inviter notification could not be sent");
   }
