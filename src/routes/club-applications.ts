@@ -20,6 +20,8 @@ import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { applyAcceptance, compensateAbortedApproval, asDecisionBusy, assertSubmissionDecidable, consentEvidence, lockDecisionSubmission, rejectSubmission, type DecisionContext, type MappingReport } from "../lib/form-applications.js";
 import { purgeMediaFile } from "../lib/media.js";
+import { buildApplicationReview, listExtras } from "../lib/application-review.js";
+import { lazyCleanup } from "../lib/form-sweeper.js";
 import { cleanText } from "../lib/text-policy.js";
 import { logger } from "../lib/logger.js";
 import { effectiveStatus, todayBerlin, transitionMember } from "../lib/member-lifecycle.js";
@@ -120,6 +122,8 @@ async function chooseCategory(tx: DbExecutor, clubId: string, override: Category
 
 clubApplicationRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
+  // Overdue data of this club (rejected applications' files / child answers) is cleaned lazily when the board looks at the queue.
+  await lazyCleanup({ clubId });
 
   const rows = await db
     .select({
@@ -130,6 +134,7 @@ clubApplicationRoutes.get("/", async (c) => {
       category: clubApplications.category,
       birthDate: clubApplications.birthDate,
       status: clubApplications.status,
+      onBehalfOf: clubApplications.onBehalfOf,
       createdAt: clubApplications.createdAt,
       formSubmissionId: clubApplications.formSubmissionId,
     })
@@ -139,7 +144,31 @@ clubApplicationRoutes.get("/", async (c) => {
     .orderBy(asc(clubApplications.createdAt), asc(clubApplications.id));
 
   // `legacy`: filed before the form builder (or by an old client): category/birth date only, no answers, no consent record.
-  return c.json({ data: rows.map((r) => ({ ...r, legacy: r.formSubmissionId === null })) });
+  // `summary`: a few non-sensitive answers rendered against the version the applicant filled in; the full view is `GET /:id`.
+  const extras = await listExtras(clubId, rows, new Map(rows.map((r) => [r.id, r.name])));
+  return c.json({ data: rows.map((r) => ({ ...r, legacy: r.formSubmissionId === null, ...extras.get(r.id)! })) });
+});
+
+/**
+ * Full review of one application (any status, so the board can look at a decided one): answers rendered against the ORIGINAL
+ * version, mapping preview, files, consent evidence, duplicate hint. Answers of `sensitive` fields need
+ * `members:read_sensitive` (redacted otherwise) and every delivery of them is audited with field keys, never values.
+ */
+clubApplicationRoutes.get("/:id", async (c) => {
+  const clubId = c.get("clubId");
+  const id = c.req.param("id");
+  if (!isUuid(id)) throw new NotFoundError("Application not found");
+  const application = await db.query.clubApplications.findFirst({ where: and(eq(clubApplications.id, id), eq(clubApplications.clubId, clubId)) });
+  if (!application) throw new NotFoundError("Application not found");
+  await lazyCleanup({ clubId });
+
+  const review = await buildApplicationReview(application, { clubId, canReadSensitive: hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive") });
+  const { sensitiveKeysRead, ...data } = review;
+  if (sensitiveKeysRead.length > 0) {
+    await db.insert(auditLog).values({ eventType: "club_application.sensitive_read", subjectId: application.id, payload: { clubId, readBy: c.get("membership").id, formSubmissionId: application.formSubmissionId, fieldKeys: sensitiveKeysRead } });
+  }
+  c.header("Cache-Control", "private, no-store");
+  return c.json({ data });
 });
 
 clubApplicationRoutes.post("/:id/approve", decisionBodyLimit, async (c) => {

@@ -38,6 +38,22 @@ export function validateCustomValue(def: Pick<MemberFieldDefinitionRow, "key" | 
   return { ok: true, value: Object.hasOwn(result.answers, def.key) ? result.answers[def.key] : undefined };
 }
 
+export type CustomAssignmentCheck = { ok: true; value: unknown | undefined } | { ok: false; reason: "custom_field_unknown" | "custom_field_archived" | "custom_field_type_mismatch" | "custom_field_not_sensitive" | "invalid_value" };
+
+/**
+ * Whether an answer of an application form can be written to the custom field it names (acceptance, B6, and its preview,
+ * B10 -- one function so both always agree). A definition that was archived, deleted, retyped or un-flagged `sensitive` after
+ * the form was published is TOLERATED (the value is skipped with a reason), never an error.
+ */
+export function checkCustomAssignment(def: Pick<MemberFieldDefinitionRow, "key" | "label" | "fieldType" | "options" | "sensitive" | "archivedAt"> | undefined, assignment: { type: FormField["type"]; sensitive: boolean; value: unknown }): CustomAssignmentCheck {
+  if (!def) return { ok: false, reason: "custom_field_unknown" };
+  if (def.archivedAt) return { ok: false, reason: "custom_field_archived" };
+  if (def.fieldType !== (assignment.type === "consent" ? "checkbox" : assignment.type)) return { ok: false, reason: "custom_field_type_mismatch" };
+  if (assignment.sensitive && !def.sensitive) return { ok: false, reason: "custom_field_not_sensitive" };
+  const checked = validateCustomValue(def, assignment.value);
+  return checked.ok ? { ok: true, value: checked.value } : { ok: false, reason: "invalid_value" };
+}
+
 /** Option values a select/multiselect definition currently offers. */
 export function optionValues(options: unknown): string[] {
   return Array.isArray(options) ? (options as Array<{ value: string }>).map((o) => o.value) : [];

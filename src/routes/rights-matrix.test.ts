@@ -129,7 +129,7 @@ const SELF_SERVICE: Record<string, string> = {
   "POST /club-members/invites/preview": "previewing an own invitation (session only; the secret token travels in the body, the response is masked)",
   "POST /club-members/invites/accept": "accepting an own invitation (session only; bound to the secret token and the account e-mail, no club membership needed)",
   "POST /club-exit-requests": "the member's own cancellation (recording a cancellation for others and exclusions need members:write, asserted in the B6 test)",
-  "POST /form-submissions": "own application draft (session only; the applicant is not a member yet; refused for members)",
+  "POST /form-submissions": "own application draft, also for a child (onBehalfOf=guardian, B8: verified e-mail, max 5 open child applications; session only; the applicant is not a member yet; refused for members for themself)",
   "PATCH /form-submissions/:id": "own draft (ownership checked, foreign ids are 404)",
   "POST /form-submissions/:id/files": "file upload into the own draft (central media layer; ownership checked)",
   "DELETE /form-submissions/:id/files/:fileId": "removing a file of the own draft (ownership checked)",

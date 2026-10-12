@@ -9,7 +9,7 @@ import { clubMembers, clubMemberStatusHistory, type ClubMemberRow } from "../db/
 import { forms, formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, type FormRow, type FormSubmissionRow, type FormVersionRow } from "../db/schema/forms.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { accountLinkLockKey, type DbExecutor } from "./club-members.js";
-import { validateCustomValue, writeValues } from "./custom-fields.js";
+import { checkCustomAssignment, writeValues } from "./custom-fields.js";
 import { ConflictError, isUniqueViolation, NotFoundError } from "./errors.js";
 import { MASTER_TARGETS, planAcceptance } from "./form-acceptance.js";
 import type { FormField } from "./form-schema.js";
@@ -164,17 +164,9 @@ export async function applyAcceptance(
     const byKey = new Map(defs.map((d) => [d.key, d]));
     const changes: Array<{ fieldId: string; value: unknown }> = [];
     for (const assignment of plan.custom) {
-      const def = byKey.get(assignment.customKey);
-      const skip = (reason: string) => mapping.skipped.push({ fieldKey: assignment.fieldKey, reason });
-      if (!def) skip("custom_field_unknown");
-      else if (def.archivedAt) skip("custom_field_archived");
-      else if (def.fieldType !== (assignment.type === "consent" ? "checkbox" : assignment.type)) skip("custom_field_type_mismatch");
-      else if (assignment.sensitive && !def.sensitive) skip("custom_field_not_sensitive");
-      else {
-        const checked = validateCustomValue(def, assignment.value);
-        if (!checked.ok) skip("invalid_value");
-        else if (checked.value !== undefined) changes.push({ fieldId: def.id, value: checked.value });
-      }
+      const checked = checkCustomAssignment(byKey.get(assignment.customKey), assignment);
+      if (!checked.ok) mapping.skipped.push({ fieldKey: assignment.fieldKey, reason: checked.reason });
+      else if (checked.value !== undefined) changes.push({ fieldId: byKey.get(assignment.customKey)!.id, value: checked.value });
     }
     await writeValues(tx, clubMemberId, decidedBy, changes);
     mapping.customFields = changes.length;
@@ -219,7 +211,7 @@ export interface ConsentEvidence {
   subjectClubMemberId?: string;
 }
 
-export function consentEvidence(context: DecisionContext, subjectClubMemberId?: string): ConsentEvidence {
+export function consentEvidence(context: Pick<DecisionContext, "sub" | "version">, subjectClubMemberId?: string): ConsentEvidence {
   const fields = context.version.fields as FormField[];
   const answers = (context.sub.answers ?? {}) as Record<string, unknown>;
   const consents = fields.filter((f) => f.type === "consent");

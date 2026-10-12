@@ -12,7 +12,8 @@ import { forms, formSubmissionFiles, formSubmissions, formVersions, type FormRow
 import { mediaFiles } from "../db/schema/media-files.js";
 import type { DbExecutor } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
-import { ConflictError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { lazyCleanup } from "../lib/form-sweeper.js";
 import { applicationPendingError, closeApplicationOfSubmission, createApplicationForSubmission } from "../lib/form-applications.js";
 import { assertGuardianMayApply, checkChildAnswers, type ChildWarning, childUnsupportedError, supportsChildApplication } from "../lib/form-children.js";
 import { FIELD_KEY_RE, validateAnswers, visibleFieldKeys, type FormField, type ValidateResult } from "../lib/form-schema.js";
@@ -273,6 +274,8 @@ formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", crea
   const org = await db.query.organization.findFirst({ where: body.clubId ? eq(organization.id, body.clubId) : eq(organization.slug, body.clubSlug!), columns: { id: true } });
   if (!org) throw new NotFoundError("Club not found");
   await ensureFormBasics(org.id);
+  // The caller's own overdue drafts (and their files) go first, so they do not count against the draft caps.
+  await lazyCleanup({ userId });
 
   const created = await db.transaction(async (tx) => {
     await lockUserClub(tx, userId, org.id);
@@ -318,6 +321,7 @@ formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", crea
 
 // Registered before "/:id" so "mine" is not read as an id.
 formSubmissionRoutes.get("/mine", async (c) => {
+  await lazyCleanup({ userId: c.get("user").id });
   const rows = await db
     .select({ sub: formSubmissions, purpose: forms.purpose, version: formVersions.version, clubName: organization.name, clubSlug: organization.slug })
     .from(formSubmissions)
@@ -563,15 +567,23 @@ formSubmissionRoutes.get("/:id/files/:fileId", async (c) => {
   const [sub] = await db.select().from(formSubmissions).where(eq(formSubmissions.id, id)).limit(1);
   if (!sub) throw notFound();
   let viaBoard = false;
+  let boardRoles: string[] | null = null;
   if (sub.submittedByUserId !== userId) {
     // Not the submitter: only the board of THIS club, never drafts. Everyone else cannot tell the id exists.
     const roles = await clubRoleTypesOf(userId, sub.clubId);
     const [form] = await db.select({ purpose: forms.purpose }).from(forms).where(eq(forms.id, sub.formId)).limit(1);
     if (!roles || !hasClubPermission(roles, "members:write") || sub.status === "draft" || form?.purpose !== PURPOSE) throw notFound();
     viaBoard = true;
+    boardRoles = roles;
   }
   const [file] = await db.select().from(formSubmissionFiles).where(and(eq(formSubmissionFiles.id, fileId), eq(formSubmissionFiles.submissionId, sub.id))).limit(1);
   if (!file) throw new NotFoundError("File not found");
+  if (viaBoard) {
+    // Files of a field marked `sensitive` follow the answers of such a field: members:read_sensitive.
+    const pinned = await loadPinned(db, sub.formVersionId);
+    const field = (pinned.version.fields as FormField[]).find((f) => f.key === file.fieldKey);
+    if (field?.sensitive === true && !hasClubPermission(boardRoles ?? [], "members:read_sensitive")) throw new ForbiddenError("Missing members:read_sensitive permission");
+  }
   const media = await findMediaByKey(file.storageKey);
   if (!media) throw new NotFoundError("File not found");
 
