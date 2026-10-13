@@ -60,6 +60,7 @@ curl http://localhost:3000/health
 | `npm run db:generate` | Generate a Drizzle migration from schema changes |
 | `npm run db:migrate` | Apply migrations via the `drizzle-kit` CLI (host mode) |
 | `npm run db:migrate:runtime` | Apply migrations via Drizzle's own migrator, no `drizzle-kit` dependency needed — what the Docker image runs |
+| `npm run db:verify-counts` | Read-only count/integrity report against `DATABASE_URL` (Wave 7 B12, see [Verifying the Wave 7 migrations](#verifying-the-wave-7-migrations-b12)); prints table names and numbers only, exit code 1 if a check fails |
 | `npm run seed:admin` | Create or promote the admin user from `ADMIN_EMAIL`/`ADMIN_PASSWORD` |
 | `npm run seed:club` | Bootstrap a demo club and make `ADMIN_EMAIL` its "vorsitz" — needed for local dev. Real users create clubs through the Wave 6 registration + review flow (`/club-registrations`, [Club registration](#club-registration)); `organization/create` is closed for end users, `seed:club` and the approval call `auth.api.createOrganization` server-side, which is still allowed. See `src/scripts/seed-club.ts` |
 | `npm run auth:generate` | Regenerate `src/auth/auth-schema.ts` from the Better Auth config |
@@ -622,6 +623,22 @@ Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runti
 | `0019_media-security-layer` | `media_files` upload registry; renames `locations.photo_url` / `inventory_damage_reports.photo_url` to `photo_key`; adds `club_members.photo_key` (FK to `media_files.storage_key`) |
 | `0020_media-legacy-photo-keys` | Idempotent clean-up: clears pre-registry `photo_key` values that are not of the form `<clubId>/<file>` (external URLs, `/media/...` paths, other clubs' keys, traversal) |
 | `0021_key-history-wifi-security` | `location_key_history` (key handover log), `location_key_holders.key_label`, `location_wifi_networks.security` (default `wpa`) |
+
+#### Verifying the Wave 7 migrations (B12)
+
+**Automated count check.** `src/db/migration-counts.test.ts` builds a scratch database migrated to `0013` (state before Wave 7), seeds a realistic dataset via SQL (3 clubs, 300 accounts with owner/admin/member/guest roles, 225 `club_memberships` with and without number/birth date, past/boundary/future `left_at`, empty and 800-character names, duplicate names and member numbers, umlaut and free-text categories, 40 guardian links incl. cross-club, departments/roles/applications, key holders, loans, meeting invitees/attendance, availability, event attendees, calendar visibility, photo values of every kind) and applies `0014`-`0021`. It asserts: row counts of all 27 preserved tables before == after; content fingerprints of every untouched column; exactly one `club_members` row per `member` (no duplicates, unique `member_id`, same club); master data, member numbers, join dates and the `left_at` -> `status` mapping (`<= today` = `ausgetreten`, future stays `aktiv`); categories folded and created once; `guardian_links` repointed to `club_members.id` with none dangling; legacy `visible_to_guests`/`meetings.type`/photo-key/wifi-security mappings; one `location_key_history` entry per key holder; idempotency (re-running the 0014 backfill, the 0015 fold, 0020 and the migrator changes nothing); strictly increasing journal and unbroken snapshot chain. No migration bug was found by it.
+
+**On a copy of production.** Never run this against the live database. Restore a dump into a separate database, then:
+
+```bash
+export DATABASE_URL=postgres://user:pass@host:5432/copy_of_prod
+npm run db:verify-counts > before.txt     # pre-Wave-7 copy: only row counts (club_members does not exist yet)
+npm run db:migrate:runtime                # applies 0014-0021
+npm run db:verify-counts > after.txt      # row counts + integrity checks
+diff before.txt after.txt                 # only the new tables and the Wave 7 checks may appear; every `rows.<table>` of a pre-existing table must be identical
+```
+
+The script runs in a `READ ONLY` transaction and prints only table names, counts and flags (`OK`/`FAIL`), never names, e-mail addresses or member numbers, so the output can be pasted into a ticket. Checks (all must be `OK`, exit code 0): every `member` has its `club_members` row, no duplicate `member_id`, linked rows match the account's club, no `ausgetreten` without `left_at`, every linked member has a category and `last_user_id`, no umlaut/unnormalised category keys and all five default categories per club, no dangling `guardian_links` ward and the legacy `ward_member_id` column gone, no foreign/external/traversal `photo_key`, every key holder covered by a history entry, no `open` wifi with a password, `meetings.type` within the controlled set, no unvalidated constraint. Informational lines (not failures): duplicate member-number groups (legacy data), `aktiv` members with a future `left_at`, cross-club guardian links. The script needs `tsx`, i.e. host mode (a checkout), not the production container.
 
 ## API reference
 

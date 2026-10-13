@@ -11,6 +11,7 @@
     "db:migrate:runtime": "tsx src/db/migrate.ts",
     "seed:admin": "tsx src/scripts/seed-admin.ts",
     "seed:club": "tsx src/scripts/seed-club.ts",
+    "db:verify-counts": "tsx src/scripts/verify-counts.ts",
     "auth:generate": "better-auth generate --config src/auth/auth.ts --output src/auth/auth-schema.ts -y",
     "lint": "eslint .",
     "test": "vitest run"
