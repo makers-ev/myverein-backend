@@ -12,7 +12,7 @@ import { childWarnings, childDisplayName, type ChildWarning } from "./form-child
 import { isMasterTarget, planAcceptance } from "./form-acceptance.js";
 import { consentEvidence, type ConsentEvidence } from "./form-applications.js";
 import { isMappingTarget, type MappingTarget } from "./form-mapping.js";
-import { renderAnswers, summarizeAnswers, type AnswerSummaryItem, type RenderedAnswer } from "./form-review.js";
+import { isProtectedField, renderAnswers, summarizeAnswers, type AnswerSummaryItem, type RenderedAnswer } from "./form-review.js";
 import { visibleFieldKeys, type FormField } from "./form-schema.js";
 import { ageOn, todayBerlin } from "./member-lifecycle.js";
 
@@ -198,10 +198,12 @@ function consentEvidenceOf(sub: FormSubmissionRow, version: FormVersionRow): Con
 }
 
 export interface ApplicationReview {
+  /** `birthDate` is null without `members:read_sensitive`. */
   application: { id: string; status: string; onBehalfOf: string; legacy: boolean; createdAt: Date; decidedAt: Date | null; decidedBy: string | null; clubMemberId: string | null; category: string; birthDate: string | null };
   applicant: { userId: string; name: string; email: string };
   /** The person the application is for. */
-  subject: { displayName: string | null; birthDate: string | null; ageYears: number | null; isMinor: boolean | null; clubMemberId: string | null };
+  /** `birthDate` and `ageYears` need `members:read_sensitive`; everybody else gets `isMinor` and the `ageBand` only. */
+  subject: { displayName: string | null; birthDate: string | null; ageYears: number | null; ageBand: "<18" | ">=18" | null; isMinor: boolean | null; clubMemberId: string | null };
   form: { formId: string; formVersionId: string; version: number; name: string; purpose: string; privacyNotice: string | null; publishedAt: Date | null } | null;
   answers: RenderedAnswer[];
   /** `false` if the answers were erased by the retention rules (child application rejected / withdrawn long ago). */
@@ -252,13 +254,18 @@ export async function buildApplicationReview(application: ClubApplicationRow, in
   };
   const pending = application.status === "pending";
   const today = todayBerlin();
+  const subjectAge = (birthDate: string | null, name: string | null, clubMemberId: string | null) => {
+    const age = birthDate ? ageOn(birthDate, today) : null;
+    return { displayName: name, birthDate: canReadSensitive ? birthDate : null, ageYears: canReadSensitive ? age : null, ageBand: age === null ? null : age < 18 ? ("<18" as const) : (">=18" as const), isMinor: age === null ? null : age < 18, clubMemberId };
+  };
+  if (!canReadSensitive) base.application.birthDate = null;
 
   if (!found) {
     // Legacy application (before the form builder): category and birth date only.
     const duplicates = pending ? await duplicateHints({ clubId, self, names: [applicant.name], birthDate: application.birthDate, emails: [applicant.email], excludeClubMemberId: application.clubMemberId }, executor) : [];
     return {
       ...base,
-      subject: { displayName: self ? applicant.name : null, birthDate: application.birthDate, ageYears: application.birthDate ? ageOn(application.birthDate, today) : null, isMinor: application.birthDate ? ageOn(application.birthDate, today) < 18 : null, clubMemberId: application.clubMemberId },
+      subject: subjectAge(application.birthDate, self ? applicant.name : null, application.clubMemberId),
       form: null,
       answers: [],
       answersRetained: true,
@@ -277,7 +284,7 @@ export async function buildApplicationReview(application: ClubApplicationRow, in
   const categories = await clubCategories(clubId, executor);
   const answers = renderAnswers(fields, sub.answers, { categories, canReadSensitive });
   const plan = planAcceptance(fields, sub.answers);
-  const sensitiveByKey = new Map(fields.map((f) => [f.key, f.sensitive === true]));
+  const sensitiveByKey = new Map(fields.map((f) => [f.key, isProtectedField(f)]));
   const labelByKey = new Map(fields.map((f) => [f.key, f.label]));
 
   const fileRows = await executor
@@ -321,12 +328,11 @@ export async function buildApplicationReview(application: ClubApplicationRow, in
   const duplicates = pending ? await duplicateHints({ clubId, self, names, birthDate: subjectBirth, emails, excludeClubMemberId: application.clubMemberId }, executor) : [];
 
   const guardian = sub.onBehalfOf === "guardian";
-  const age = subjectBirth ? ageOn(subjectBirth, today) : null;
   const erased = guardian && (sub.status === "rejected" || sub.status === "withdrawn") && Object.keys((sub.answers ?? {}) as object).length === 0;
 
   return {
     ...base,
-    subject: { displayName: composedName ?? (self ? applicant.name : null), birthDate: subjectBirth, ageYears: age, isMinor: age === null ? null : age < 18, clubMemberId: application.clubMemberId ?? sub.subjectClubMemberId },
+    subject: subjectAge(subjectBirth, composedName ?? (self ? applicant.name : null), application.clubMemberId ?? sub.subjectClubMemberId),
     form: { formId: form.id, formVersionId: version.id, version: version.version, name: form.name, purpose: form.purpose, privacyNotice: version.privacyNotice, publishedAt: version.publishedAt },
     answers,
     answersRetained: !erased,
@@ -334,7 +340,7 @@ export async function buildApplicationReview(application: ClubApplicationRow, in
     files,
     consent: { ...evidence, givenBy: { userId: sub.submittedByUserId, name: submitter?.name ?? "" }, role: guardian ? "guardian" : "self", fields: consentFields, privacyNoticeShown: Boolean(version.privacyNotice?.trim() || fields.some((f) => f.type === "info" && f.infoKind === "privacy_notice")) },
     duplicates,
-    warnings: guardian ? childWarnings(plan.master.birthDate, today) : [],
+    warnings: guardian ? [...childWarnings(plan.master.birthDate, today), ...(composedName && composedName.trim().toLowerCase() === applicant.name.trim().toLowerCase() ? (["child_name_matches_guardian"] as const) : [])] : [],
     decision: sub.decidedAt || application.decidedAt ? { decidedAt: application.decidedAt ?? sub.decidedAt, decidedBy: application.decidedBy ?? sub.decidedBy, decisionNote: sub.decisionNote, internalNote: sub.decisionInternalNote } : null,
     sensitiveKeysRead: canReadSensitive ? answers.filter((a) => a.sensitive && a.answered).map((a) => a.key) : [],
   };

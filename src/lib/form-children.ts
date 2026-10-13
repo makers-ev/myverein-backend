@@ -9,6 +9,8 @@ import { clubRoles } from "../db/schema/club-roles.js";
 import { formSubmissions } from "../db/schema/forms.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { assertRejoinAllowed, type DbExecutor, ensureClubMember } from "./club-members.js";
+import { inviteLinkContext } from "./invite-context.js";
+import { compensateAbortedApproval } from "./form-applications.js";
 import { ConflictError, ForbiddenError, ValidationError } from "./errors.js";
 import { planAcceptance, type AcceptancePlan } from "./form-acceptance.js";
 import { type FormField } from "./form-schema.js";
@@ -34,6 +36,8 @@ const EXTERNAL_GUEST_ROLE = "guest" as unknown as "member";
 
 /** Child applications (draft or submitted, not yet decided) one account may have open at the same time, over all clubs. */
 export const MAX_OPEN_CHILD_APPLICATIONS = 5;
+/** Open child applications (draft or submitted) one club may hold at once -- a cap against flooding the board's queue. */
+export const MAX_OPEN_CHILD_APPLICATIONS_PER_CLUB = 100;
 
 /** The field definition can name a child: a visible-capable `firstName` and `lastName` mapping exist. */
 export function supportsChildApplication(fields: readonly FormField[]): boolean {
@@ -55,6 +59,13 @@ export async function assertGuardianMayApply(executor: DbExecutor, input: { club
       throw new ConflictError("Too many open applications for children; wait for a decision or withdraw one", { details: { code: "child_application_limit", limit: MAX_OPEN_CHILD_APPLICATIONS } });
     }
   }
+  if (input.countOpen) {
+    const [club] = await executor
+      .select({ open: count() })
+      .from(formSubmissions)
+      .where(and(eq(formSubmissions.clubId, input.clubId), eq(formSubmissions.onBehalfOf, "guardian"), inArray(formSubmissions.status, ["draft", "submitted"])));
+    if ((club?.open ?? 0) >= MAX_OPEN_CHILD_APPLICATIONS_PER_CLUB) throw new ConflictError("This club has too many open applications for children; try again later", { details: { code: "club_child_application_limit" } });
+  }
   await assertGuardianAccountUsable(executor, input.clubId, input.userId);
 }
 
@@ -72,7 +83,7 @@ export async function assertGuardianAccountUsable(executor: DbExecutor, clubId: 
   if (isLeftStatus(state)) throw new ConflictError("A former member cannot apply for a child; re-join the club first", { details: { code: "guardian_not_active" } });
 }
 
-export type ChildWarning = "child_is_adult" | "birth_date_missing";
+export type ChildWarning = "child_is_adult" | "birth_date_missing" | "child_name_matches_guardian";
 
 /** Advice for the board (never blocks): the child's age cannot be confirmed to be under 18. */
 export function childWarnings(birthDate: string | undefined | null, today = todayBerlin()): ChildWarning[] {
@@ -126,37 +137,36 @@ export async function ensureGuardianAccount(clubId: string, userId: string): Pro
     await assertGuardianAccountUsable(db, clubId, userId);
     const existing = await find();
     if (existing) return { account: existing, created: false };
-    const created = await auth.api.addMember({ body: { userId, organizationId: clubId, role: EXTERNAL_GUEST_ROLE } });
+    // The `afterAddMember` hook is skipped (it would create an `aktiv` member WITH a member number); the club_members row is
+    // created right below as `interessent` without a number, so the parent is never visible as an active member.
+    const created = await inviteLinkContext.run({ clubMemberId: "guardian" }, () => auth.api.addMember({ body: { userId, organizationId: clubId, role: EXTERNAL_GUEST_ROLE } }));
     if (!created) throw new ConflictError("Could not create the guardian's account membership");
-    return { account: created as typeof member.$inferSelect, created: true };
+    const account = created as typeof member.$inferSelect;
+    try {
+      await db.transaction(async (tx) => {
+        const own = await ensureClubMember(tx, account, { memberNumber: null });
+        if (own.status !== "interessent") {
+          await tx.update(clubMembers).set({ status: "interessent", updatedAt: new Date() }).where(eq(clubMembers.id, own.id));
+          await tx.insert(clubMemberStatusHistory).values({ clubMemberId: own.id, fromStatus: null, toStatus: "interessent", toCategoryId: own.categoryId, effectiveOn: todayBerlin(), reason: "Externe Rolle: Erziehungsberechtigte" });
+        }
+      });
+    } catch (err) {
+      await compensateAbortedApproval({ id: account.id, organizationId: clubId, userId }).catch(() => false);
+      throw err;
+    }
+    return { account, created: true };
   });
 }
 
 /**
- * Inside the decision transaction: makes the (new) guest account a clean external role -- `club_members.status = 'interessent'`
- * (not a member) and the club role `erziehungsberechtigt` -- and writes the guardian link. A parent who already is a member
+ * Inside the decision transaction: gives a guest account the club role `erziehungsberechtigt` and writes the guardian link
+ * (a new guest account is already `interessent` without a member number, see `ensureGuardianAccount`). A parent who already is a member
  * keeps their status and roles; only the link is added.
  */
 export async function linkGuardian(tx: DbExecutor, input: { clubId: string; guardian: GuardianAccount; childClubMemberId: string; decidedBy: string }): Promise<{ linked: boolean }> {
   const { clubId, guardian, childClubMemberId, decidedBy } = input;
   if (guardian.account.role === "guest") {
     await tx.insert(clubRoles).values({ memberId: guardian.account.id, roleType: "erziehungsberechtigt" }).onConflictDoNothing();
-    if (guardian.created) {
-      const own = await ensureClubMember(tx, guardian.account);
-      if (own.status === "aktiv") {
-        await tx.update(clubMembers).set({ status: "interessent", updatedAt: new Date() }).where(eq(clubMembers.id, own.id));
-        await tx.insert(clubMemberStatusHistory).values({
-          clubMemberId: own.id,
-          fromStatus: "aktiv",
-          toStatus: "interessent",
-          fromCategoryId: own.categoryId,
-          toCategoryId: own.categoryId,
-          effectiveOn: todayBerlin(),
-          reason: "Externe Rolle: Erziehungsberechtigte",
-          changedBy: decidedBy,
-        });
-      }
-    }
   }
   const inserted = await tx.insert(guardianLinks).values({ guardianMemberId: guardian.account.id, wardClubMemberId: childClubMemberId }).onConflictDoNothing().returning({ id: guardianLinks.id });
   if (inserted.length > 0) {

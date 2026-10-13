@@ -52,13 +52,6 @@ export async function prepareExitAnswers(clubId: string, answers: unknown, formV
   return { form: current.form, version: current.version, answers: result.answers };
 }
 
-/** The free-text reason of the answers (key `reason`, text/textarea): what the request shows in lists. `null` if none. */
-export function reasonOfAnswers(version: FormVersionRow, answers: Record<string, unknown>): string | null {
-  const field = (version.fields as FormField[]).find((f) => f.key === "reason" && (f.type === "textarea" || f.type === "text"));
-  const value = field ? answers["reason"] : undefined;
-  return typeof value === "string" && value.trim() ? value.trim().slice(0, 2000) : null;
-}
-
 /** Inserts the (already `submitted`) submission of a cancellation. */
 export async function insertExitSubmission(tx: DbExecutor, prepared: PreparedExitAnswers, input: { clubId: string; submittedByUserId: string; subjectClubMemberId: string }): Promise<FormSubmissionRow> {
   const now = new Date();

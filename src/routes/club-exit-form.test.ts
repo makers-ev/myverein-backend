@@ -12,6 +12,7 @@ import { loadClubSettings } from "../lib/club-settings.js";
 import { logger } from "../lib/logger.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
 import { clubExitRequestRoutes } from "./club-exit-requests.js";
+import { clubMemberRoutes } from "./club-members.js";
 import { formRoutes } from "./forms.js";
 import { formSubmissionRoutes } from "./form-submissions.js";
 import { createClub, dropClubs, installErrorHandler, requester, signUpAndVerify, type Account } from "./forms-test-support.js";
@@ -24,6 +25,7 @@ import { createClub, dropClubs, installErrorHandler, requester, signUpAndVerify,
 
 const app = new Hono();
 app.route("/club-exit-requests", clubExitRequestRoutes);
+app.route("/club-members", clubMemberRoutes);
 app.route("/forms", formRoutes);
 app.route("/form-submissions", formSubmissionRoutes);
 installErrorHandler(app);
@@ -92,8 +94,8 @@ describe("exit form (B9)", () => {
     expect(res.status, await res.clone().text()).toBe(201);
     const data = (await body(res)).data;
     expect(data.formSubmissionId).toBeTruthy();
-    // The reason of the form is what the request shows.
-    expect(data.reason).toBe(SECRET);
+    // The answers live in the submission only: the request column (and later the status history) gets only an explicit `reason`.
+    expect(data.reason).toBeNull();
     // The notice logic is the club's: earliest date from club_settings, no field can change it.
     const settings = await loadClubSettings(db, club.clubId);
     expect(data.earliestEffectiveOn).toBe(earliestExitDate(todayBerlin(), settings));
@@ -273,6 +275,39 @@ describe("exit form (B9)", () => {
     const listText = await list.text();
     expect(listText).not.toContain("KRANKHEIT-4712");
     expect(JSON.parse(listText).data.find((r: { id: string }) => r.id === fresh.id).formSubmissionId).toBeTruthy();
+    await act(club.founder, fresh.id, "reject", { note: "cleanup" });
+  });
+
+  it("closes the exit form together with the request on a direct status change and audits sensitive deliveries", async () => {
+    const who = await newMember("direct");
+    const r = (await body(await post(who, { answers: { confirm: true } }))).data;
+    const row = (await db.query.clubMembers.findFirst({ where: eq(clubMembers.id, (await submissionOf(r.id)).request.clubMemberId) }))!;
+    const moved = await call(club.founder, `/club-members/${row.id}/transition`, { method: "POST", clubId: club.clubId, body: { toStatus: "ausgetreten", reason: "direkt" } });
+    expect(moved.status, await moved.clone().text()).toBe(200);
+    const after = await submissionOf(r.id);
+    expect(after.request.status).toBe("rejected");
+    expect(after.submission!.status).toBe("rejected");
+
+    // Reading sensitive answers of someone else's request is audited with keys only.
+    const exitFormRow = (await db.select().from(forms).where(and(eq(forms.clubId, club.clubId), eq(forms.purpose, "austritt"))))[0]!;
+    const fields = [
+      { key: "health", type: "textarea", label: "Gesundheit", sensitive: true },
+      { key: "confirm", type: "checkbox", label: "Ich möchte meine Mitgliedschaft beenden.", required: true },
+    ];
+    expect((await call(club.founder, `/forms/${exitFormRow.id}/draft`, { method: "PUT", clubId: club.clubId, body: { fields } })).status).toBe(200);
+    expect((await call(club.founder, `/forms/${exitFormRow.id}/publish`, { method: "POST", clubId: club.clubId })).status).toBe(200);
+    const second = await newMember("sensaudit");
+    const fresh = (await body(await post(second, { answers: { confirm: true, health: "AUDIT-GEHEIM" } }))).data;
+    const read = await get(club.founder, fresh.id);
+    expect(read.headers.get("cache-control")).toContain("no-store");
+    expect((await get(club.members.schriftfuehrer!, fresh.id)).status).toBe(200);
+    await get(second, fresh.id);
+    const audits = await db.select().from(auditLog).where(and(eq(auditLog.eventType, "club_exit_request.sensitive_read"), eq(auditLog.subjectId, fresh.id)));
+    expect(audits).toHaveLength(1);
+    expect(audits[0]!.payload).toMatchObject({ fieldKeys: ["health"] });
+    expect(JSON.stringify(audits[0]!.payload)).not.toContain("AUDIT-GEHEIM");
+    // The sensitive text is nowhere in the request columns.
+    expect(JSON.stringify(await db.select().from(clubExitRequests).where(eq(clubExitRequests.id, fresh.id)))).not.toContain("AUDIT-GEHEIM");
     await act(club.founder, fresh.id, "reject", { note: "cleanup" });
   });
 

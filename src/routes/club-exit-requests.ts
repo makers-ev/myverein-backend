@@ -15,7 +15,7 @@ import { loadClubSettings } from "../lib/club-settings.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { addDays, earliestExitDate } from "../lib/exit-notice.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
-import { closeExitSubmission, currentExitDefinition, insertExitSubmission, loadExitSubmission, prepareExitAnswers, reasonOfAnswers, type PreparedExitAnswers } from "../lib/form-exit.js";
+import { closeExitSubmission, currentExitDefinition, insertExitSubmission, loadExitSubmission, prepareExitAnswers, type PreparedExitAnswers } from "../lib/form-exit.js";
 import { renderAnswers } from "../lib/form-review.js";
 import { ANSWERS_BODY_LIMIT, applicantCategories } from "../lib/forms.js";
 import { assertExitAllowed } from "../lib/member-protection.js";
@@ -229,6 +229,12 @@ clubExitRequestRoutes.get("/:id", async (c) => {
         answers: renderAnswers(submission.version.fields as FormField[], submission.sub.answers, { categories: await applicantCategories(clubId), canReadSensitive }),
       }
     : null;
+  const delivered = rendered && submission && submission.sub.submittedByUserId !== c.get("user").id ? rendered.answers.filter((a) => a.sensitive && a.answered && !a.redacted).map((a) => a.key) : [];
+  if (delivered.length > 0 && submission) {
+    // Keys only, never values (same trail as the application review).
+    await db.insert(auditLog).values({ eventType: "club_exit_request.sensitive_read", subjectId: request.id, payload: { clubId, readBy: actor.id, formSubmissionId: submission.sub.id, fieldKeys: delivered } });
+  }
+  c.header("Cache-Control", "private, no-store");
   return c.json({ data: { ...shapeRequest(request, member, settings), checklist, submission: rendered } });
 });
 
@@ -278,8 +284,9 @@ clubExitRequestRoutes.post("/", createBodyLimit, zValidator("json", createSchema
 
   // Form answers are validated before any lock is taken (a bad form is a 422/409 without side effects).
   const prepared: PreparedExitAnswers | null = body.answers === undefined ? null : await prepareExitAnswers(clubId, body.answers, body.formVersionId);
-  // An explicit reason wins; otherwise the free-text reason of the form is what the request shows.
-  const requestReason = reason ?? (prepared ? reasonOfAnswers(prepared.version, prepared.answers) : null);
+  // Only an explicit `reason` parameter lands in the request (and, on approval, the status history). The answers of the form,
+  // including any free text or sensitive field, live in the submission only; the board reads them in the review view.
+  const requestReason = reason;
 
   const settings = await loadClubSettings(db, clubId);
   const earliest = earliestExitDate(today, settings);

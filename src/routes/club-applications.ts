@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, count, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -21,10 +21,10 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from ".
 import { applyAcceptance, compensateAbortedApproval, asDecisionBusy, assertSubmissionDecidable, consentEvidence, lockDecisionSubmission, rejectSubmission, type DecisionContext, type MappingReport } from "../lib/form-applications.js";
 import { purgeMediaFile } from "../lib/media.js";
 import { buildApplicationReview, listExtras } from "../lib/application-review.js";
-import { lazyCleanup } from "../lib/form-sweeper.js";
+import { scheduleLazyCleanup } from "../lib/form-sweeper.js";
 import { cleanText } from "../lib/text-policy.js";
 import { logger } from "../lib/logger.js";
-import { effectiveStatus, todayBerlin, transitionMember } from "../lib/member-lifecycle.js";
+import { effectiveStatus, isLeftStatus, todayBerlin, transitionMember } from "../lib/member-lifecycle.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -120,11 +120,22 @@ async function chooseCategory(tx: DbExecutor, clubId: string, override: Category
   return row && !row.archivedAt ? row : null;
 }
 
+const listQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).max(100_000).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+});
+
 clubApplicationRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
+  const parsed = listQuerySchema.safeParse({ page: c.req.query("page"), pageSize: c.req.query("pageSize") });
+  if (!parsed.success) throw new ValidationError("Invalid query", { details: parsed.error.issues });
+  const { page, pageSize } = parsed.data;
   // Overdue data of this club (rejected applications' files / child answers) is cleaned lazily when the board looks at the queue.
-  await lazyCleanup({ clubId });
+  scheduleLazyCleanup({ clubId });
+  const canReadSensitive = hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive");
 
+  const where = and(eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending"));
+  const [totalRow] = await db.select({ n: count() }).from(clubApplications).where(where);
   const rows = await db
     .select({
       id: clubApplications.id,
@@ -140,13 +151,17 @@ clubApplicationRoutes.get("/", async (c) => {
     })
     .from(clubApplications)
     .innerJoin(user, eq(user.id, clubApplications.userId))
-    .where(and(eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending")))
-    .orderBy(asc(clubApplications.createdAt), asc(clubApplications.id));
+    .where(where)
+    .orderBy(asc(clubApplications.createdAt), asc(clubApplications.id))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
 
   // `legacy`: filed before the form builder (or by an old client): category/birth date only, no answers, no consent record.
   // `summary`: a few non-sensitive answers rendered against the version the applicant filled in; the full view is `GET /:id`.
+  // `birthDate` stays in the shape but is null without members:read_sensitive.
   const extras = await listExtras(clubId, rows, new Map(rows.map((r) => [r.id, r.name])));
-  return c.json({ data: rows.map((r) => ({ ...r, legacy: r.formSubmissionId === null, ...extras.get(r.id)! })) });
+  c.header("Cache-Control", "private, no-store");
+  return c.json({ data: rows.map((r) => ({ ...r, birthDate: canReadSensitive ? r.birthDate : null, legacy: r.formSubmissionId === null, ...extras.get(r.id)! })), page, pageSize, total: totalRow?.n ?? 0 });
 });
 
 /**
@@ -160,7 +175,7 @@ clubApplicationRoutes.get("/:id", async (c) => {
   if (!isUuid(id)) throw new NotFoundError("Application not found");
   const application = await db.query.clubApplications.findFirst({ where: and(eq(clubApplications.id, id), eq(clubApplications.clubId, clubId)) });
   if (!application) throw new NotFoundError("Application not found");
-  await lazyCleanup({ clubId });
+  scheduleLazyCleanup({ clubId });
 
   const review = await buildApplicationReview(application, { clubId, canReadSensitive: hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive") });
   const { sensitiveKeysRead, ...data } = review;
@@ -188,8 +203,10 @@ clubApplicationRoutes.post("/:id/approve", decisionBodyLimit, async (c) => {
   if (existing) {
     // A former member (ausgetreten) who re-applied is re-admitted by reopening the existing club_members row.
     const former = await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, existing.id) });
-    if (!former || effectiveStatus(former, todayBerlin()) !== "ausgetreten") throw new ConflictError("Applicant is already a member of this club");
-    return c.json(await readmit(clubId, application, existing, former, decider.id, override));
+    // An external guest (guardian, `member.role = guest`) who applies for themself becomes a regular member.
+    const promote = existing.role === "guest" && former !== undefined;
+    if (!former || (!promote && effectiveStatus(former, todayBerlin()) !== "ausgetreten")) throw new ConflictError("Applicant is already a member of this club");
+    return c.json(await readmit(clubId, application, existing, former, decider.id, override, promote));
   }
   // Excluded / deceased persons cannot be re-admitted by an application; the board must reopen them first.
   await assertRejoinAllowed(db, clubId, application.userId);
@@ -415,6 +432,7 @@ async function readmit(
   former: typeof clubMembers.$inferSelect,
   deciderId: string,
   override: CategoryOverride,
+  promoteGuest = false,
 ) {
   const today = todayBerlin();
   try {
@@ -429,14 +447,28 @@ async function readmit(
       if (!decided) throw new ConflictError("Application has already been decided");
 
       const category = await chooseCategory(tx, clubId, override, application.category);
-      const done = await transitionMember(
-        tx,
-        clubId,
-        former.id,
-        { toStatus: "aktiv", reopen: true, reason: "Wiederaufnahme per Aufnahmeantrag", category: category ?? undefined },
-        deciderId,
-        today,
-      );
+      const currentStatus = effectiveStatus(former, today);
+      let done: { row: typeof clubMembers.$inferSelect };
+      if (promoteGuest && currentStatus === "aktiv") {
+        // A legacy guest row that is already `aktiv`: no status change, only the category the board chose.
+        done = { row: category ? (await tx.update(clubMembers).set({ categoryId: category.id, updatedAt: new Date() }).where(eq(clubMembers.id, former.id)).returning())[0]! : former };
+      } else {
+        done = await transitionMember(
+          tx,
+          clubId,
+          former.id,
+          { toStatus: "aktiv", reopen: isLeftStatus(currentStatus), reason: promoteGuest ? "Aufnahme als Mitglied (zuvor externe Rolle)" : "Wiederaufnahme per Aufnahmeantrag", category: category ?? undefined },
+          deciderId,
+          today,
+        );
+      }
+      if (promoteGuest) {
+        // Guest-specific leftovers go: the account becomes a regular member (the role erziehungsberechtigt and guardian links stay).
+        await tx.update(member).set({ role: "member" }).where(eq(member.id, account.id));
+        // A guest row was created without a member number (see ensureGuardianAccount): the member gets one now.
+        const number = former.memberNumber ?? (await nextMemberNumber(tx, clubId));
+        await tx.update(clubMembers).set({ joinedAt: today, memberNumber: number, updatedAt: new Date() }).where(eq(clubMembers.id, former.id));
+      }
       let clubMember = application.birthDate && !context
         ? (await tx.update(clubMembers).set({ birthDate: application.birthDate, updatedAt: new Date() }).where(eq(clubMembers.id, former.id)).returning())[0]!
         : done.row;
@@ -452,7 +484,7 @@ async function readmit(
       await tx.insert(auditLog).values({
         eventType: "club_application.approve",
         subjectId: application.id,
-        payload: { clubId, userId: application.userId, memberId: account.id, clubMemberId: former.id, decidedBy: deciderId, readmission: true, ...(context ? auditOfMapping(context, mapping!) : {}) },
+        payload: { clubId, userId: application.userId, memberId: account.id, clubMemberId: former.id, decidedBy: deciderId, ...(promoteGuest ? { promotedGuest: true } : { readmission: true }), ...(context ? auditOfMapping(context, mapping!) : {}) },
       });
       return { application: finalApplication!, clubMember, mapping, purge };
     });
@@ -463,7 +495,7 @@ async function readmit(
     return {
       data: {
         application: result.application,
-        member: account,
+        member: { ...account, role: promoteGuest ? "member" : account.role },
         membership: {
           id: clubMember.id,
           memberId: account.id,

@@ -10,7 +10,7 @@ import { clubMembers } from "../db/schema/club-members.js";
 import { formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions } from "../db/schema/forms.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { eraseFormDataOfMember } from "../lib/form-retention.js";
-import { lazyCleanup, resetLazyCleanup, sweepRejectedChildAnswers } from "../lib/form-sweeper.js";
+import { lazyCleanup, resetLazyCleanup, settleLazyCleanups, sweepRejectedChildAnswers } from "../lib/form-sweeper.js";
 import { logger } from "../lib/logger.js";
 import { makePng, PDF_BYTES } from "../lib/media-fixtures.js";
 import { purgeMediaFile } from "../lib/media.js";
@@ -151,7 +151,8 @@ describe("application review API and hygiene (B10)", () => {
       { key: "first_name", label: "Vorname", display: "Anna" },
       { key: "last_name", label: "Nachname", display: "Review" },
       { key: "category", label: "Mitgliedschaft", display: "Passiv" },
-      { key: "birth_date", label: "Geburtsdatum", display: "1990-04-02" },
+      // birth date, address, phone and emergency contact are protected (members:read_sensitive) and never part of a summary
+      { key: "email", label: "E-Mail", display: "anna.review@example.com" },
     ]);
     // A legacy row (before the form builder) has no summary and keeps its shape.
     const legacyUser = await newUser("legacy");
@@ -276,7 +277,7 @@ describe("application review API and hygiene (B10)", () => {
     expect(full.data.files.find((f: { fieldKey: string }) => f.fieldKey === "attest")).toMatchObject({ redacted: false, filename: "attest-vertraulich.pdf" });
     const audits = await db.select().from(auditLog).where(and(eq(auditLog.eventType, "club_application.sensitive_read"), eq(auditLog.subjectId, applicationId)));
     expect(audits).toHaveLength(1);
-    expect(audits[0]!.payload).toMatchObject({ clubId: club.clubId, fieldKeys: ["health"] });
+    expect(audits[0]!.payload).toMatchObject({ clubId: club.clubId, fieldKeys: ["birth_date", "health"] });
     expect(JSON.stringify(audits[0]!.payload)).not.toContain(SECRET);
   });
 
@@ -340,12 +341,14 @@ describe("application review API and hygiene (B10)", () => {
     const draftB = await draftOf(b);
     resetLazyCleanup();
     expect((await call(a, "/form-submissions/mine")).status).toBe(200);
+    await settleLazyCleanups();
     expect(await db.query.formSubmissions.findFirst({ where: eq(formSubmissions.id, draftA) })).toBeUndefined();
     expect(await db.select().from(formSubmissionFiles).where(eq(formSubmissionFiles.submissionId, draftA))).toHaveLength(0);
     expect(await db.query.formSubmissions.findFirst({ where: eq(formSubmissions.id, draftB) })).toBeDefined();
     // The throttle: a second touch within the window does not sweep again.
     const draftA2 = await draftOf(a);
     await call(a, "/form-submissions/mine");
+    await settleLazyCleanups();
     expect(await db.query.formSubmissions.findFirst({ where: eq(formSubmissions.id, draftA2) })).toBeDefined();
     resetLazyCleanup();
     await lazyCleanup({ userId: a.userId });
@@ -361,6 +364,7 @@ describe("application review API and hygiene (B10)", () => {
     await db.update(formSubmissions).set({ decidedAt: new Date(Date.now() - 40 * DAY) }).where(eq(formSubmissions.id, submissionId));
     resetLazyCleanup();
     expect((await list(club.founder)).status).toBe(200);
+    await settleLazyCleanups();
     expect(await db.select().from(formSubmissionFiles).where(eq(formSubmissionFiles.submissionId, submissionId))).toHaveLength(0);
     const expired = await db.select().from(auditLog).where(and(eq(auditLog.eventType, "form_submission.files_expired"), eq(auditLog.subjectId, submissionId)));
     expect(expired).toHaveLength(1);
@@ -423,6 +427,69 @@ describe("application review API and hygiene (B10)", () => {
     const audit = JSON.stringify(await db.select().from(auditLog).where(eq(auditLog.eventType, "form_submission.erased")));
     expect(audit).not.toContain("Anna");
     expect(await db.select().from(member).where(eq(member.userId, who.userId))).toHaveLength(1);
+  });
+
+  // --- protected master data, pagination, scrubbing -------------------------------------------------------------------
+
+  it("treats birth date, address, phone and emergency contact as sensitive: redacted without members:read_sensitive, age band only", async () => {
+    const who = await newUser("prot");
+    const { applicationId } = await fileApplication(who, answersOf({ birth_date: "2015-06-07" }));
+    const asBoard = await body(await detail(club.members.schriftfuehrer!, applicationId));
+    const text = JSON.stringify(asBoard);
+    expect(text).not.toContain("2015-06-07");
+    expect(asBoard.data.answers.find((a: { key: string }) => a.key === "birth_date")).toMatchObject({ redacted: true, value: null, display: null });
+    expect(asBoard.data.subject).toMatchObject({ birthDate: null, ageYears: null, ageBand: "<18", isMinor: true });
+    expect(asBoard.data.application.birthDate).toBeNull();
+    // The mapping preview stays.
+    expect(asBoard.data.mapping.entries.find((m: { fieldKey: string }) => m.fieldKey === "birth_date")).toMatchObject({ target: "birthDate", willApply: true });
+    // List: the field is kept for old clients but null without the right; the founder still gets it.
+    const boardList = ((await body(await list(club.members.schriftfuehrer!))).data as Array<Record<string, unknown>>).find((a) => a.id === applicationId)!;
+    expect(boardList).toHaveProperty("birthDate", null);
+    const founderList = ((await body(await list(club.founder))).data as Array<Record<string, unknown>>).find((a) => a.id === applicationId)!;
+    expect(founderList.birthDate).toBe("2015-06-07");
+    const asFounder = (await body(await detail(club.founder, applicationId))).data;
+    expect(asFounder.subject).toMatchObject({ birthDate: "2015-06-07", ageBand: "<18", isMinor: true });
+    expect(typeof asFounder.subject.ageYears).toBe("number");
+  });
+
+  it("pages the queue (page, pageSize, total) with a backward compatible default", async () => {
+    const res = await body(await list(club.founder));
+    expect(res).toMatchObject({ page: 1, pageSize: 50 });
+    expect(res.total).toBeGreaterThan(0);
+    const small = await body(await call(club.founder, "/club-applications?pageSize=1&page=2", { clubId: club.clubId }));
+    expect(small.data).toHaveLength(1);
+    expect(small.pageSize).toBe(1);
+    expect((await call(club.founder, "/club-applications?pageSize=101", { clubId: club.clubId })).status).toBe(422);
+  });
+
+  it("warns when a child carries the name of the guardian", async () => {
+    const parent = await newUser("samename", "Max Mustermann");
+    const { applicationId } = await fileApplication(parent, answersOf({ first_name: "Max", last_name: "Mustermann", birth_date: "2016-03-04" }), { onBehalfOf: "guardian" });
+    expect((await body(await detail(club.founder, applicationId))).data.warnings).toEqual(["child_name_matches_guardian"]);
+  });
+
+  it("scrubs the application row copies the same way in the sweeper and in the anonymisation hook", async () => {
+    const parent = await newUser("scrub");
+    const swept = await fileApplication(parent, answersOf({ first_name: "Fege", last_name: "Kind", birth_date: "2016-03-04", category: "jugend" }), { onBehalfOf: "guardian" });
+    expect((await decide(club.founder, swept.applicationId, "reject")).status).toBe(200);
+    const old = new Date(Date.now() - 40 * DAY);
+    await db.update(formSubmissions).set({ decidedAt: old, updatedAt: old }).where(eq(formSubmissions.id, swept.submissionId));
+    expect(await sweepRejectedChildAnswers(Date.now(), { clubId: club.clubId })).toBeGreaterThanOrEqual(1);
+
+    const erased = await fileApplication(await newUser("scrub2"), answersOf({ first_name: "Loesch", last_name: "Mich", birth_date: "2016-03-04", category: "jugend" }));
+    expect((await decide(club.founder, erased.applicationId, "approve")).status).toBe(200);
+    const memberId = (await db.query.clubApplications.findFirst({ where: eq(clubApplications.id, erased.applicationId) }))!.clubMemberId!;
+    await db.transaction((tx) => eraseFormDataOfMember(tx, { clubId: club.clubId, clubMemberId: memberId, erasedBy: null }));
+
+    for (const id of [swept.applicationId, erased.applicationId]) {
+      const row = (await db.query.clubApplications.findFirst({ where: eq(clubApplications.id, id) }))!;
+      expect(row.birthDate, id).toBeNull();
+      expect(row.category, id).toBe("aktiv");
+      const review = (await body(await detail(club.founder, id))).data;
+      expect(review.subject).toMatchObject({ birthDate: null, ageYears: null, ageBand: null });
+      expect(review.application.birthDate).toBeNull();
+      expect(review.answers.every((a: { answered: boolean }) => !a.answered)).toBe(true);
+    }
   });
 
   // --- privacy ---------------------------------------------------------------------------------------------------

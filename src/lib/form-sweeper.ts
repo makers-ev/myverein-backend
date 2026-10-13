@@ -2,6 +2,8 @@ import { and, eq, exists, inArray, isNull, lt, notExists, or, sql } from "drizzl
 
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { clubApplications } from "../db/schema/club-applications.js";
+import { scrubApplicationCopies } from "./form-retention.js";
 import { formSubmissionFiles, formSubmissions } from "../db/schema/forms.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { draftTtlDays, rejectedFileTtlDays, removeFiles } from "./forms.js";
@@ -147,6 +149,8 @@ export async function sweepRejectedChildAnswers(now = Date.now(), scope: { clubI
           .for("update", { skipLocked: true });
         if (!locked) return;
         await tx.update(formSubmissions).set({ answers: {}, decisionNote: null, decisionInternalNote: null, updatedAt: new Date() }).where(eq(formSubmissions.id, id));
+        // The copies on the application row (birth date, category) go with the answers.
+        await scrubApplicationCopies(tx, eq(clubApplications.formSubmissionId, id));
         await tx.insert(auditLog).values({ eventType: "form_submission.answers_erased", subjectId: id, payload: { clubId: locked.clubId, reason: "rejected_child_retention" } });
         erased += 1;
       });
@@ -160,17 +164,24 @@ export async function sweepRejectedChildAnswers(now = Date.now(), scope: { clubI
 /** How long a lazy cleanup for the same key is skipped after it ran (one query round per key per window is plenty). */
 const LAZY_WINDOW_MS = 10 * 60 * 1000;
 const lazyRuns = new Map<string, number>();
+const lazyPending = new Set<Promise<void>>();
 
 /** Forgets the throttle (tests). */
 export function resetLazyCleanup(): void {
   lazyRuns.clear();
 }
 
+/** Resolves when every scheduled lazy cleanup has finished (tests, graceful shutdown). */
+export async function settleLazyCleanups(): Promise<void> {
+  await Promise.allSettled([...lazyPending]);
+}
+
 /**
  * Lazy cleanup hook (Wave 8 B10, no scheduler needed): called when someone touches their data, it removes what is overdue
  * in exactly that scope -- `userId`: the caller's own stale drafts and their files; `clubId`: files of rejected applications
- * and answers of rejected child applications of that club -- at most once per key per 10 minutes. It never fails the request
- * (errors are logged) and never touches a decided application of anybody else's scope. The hourly sweeper does the same job globally.
+ * and answers of rejected child applications of that club -- at most once per key per 10 minutes. A failure never reaches the
+ * request and is logged WITHOUT data; the key stays throttled (backoff: the next try is after the window). The hourly sweeper
+ * does the same globally.
  */
 export async function lazyCleanup(scope: { userId?: string; clubId?: string }, now = Date.now()): Promise<void> {
   const key = scope.userId ? `user:${scope.userId}` : scope.clubId ? `club:${scope.clubId}` : null;
@@ -186,9 +197,15 @@ export async function lazyCleanup(scope: { userId?: string; clubId?: string }, n
       await sweepRejectedChildAnswers(now, { clubId: scope.clubId });
     }
   } catch (err) {
-    lazyRuns.delete(key);
-    logger.error({ err }, "[forms] lazy cleanup failed");
+    logger.error({ code: (err as { code?: string })?.code }, "[forms] lazy cleanup failed");
   }
+}
+
+/** Fire-and-forget `lazyCleanup`: the request never waits for it, so it can neither slow down nor fail the request (errors are logged without data). */
+export function scheduleLazyCleanup(scope: { userId?: string; clubId?: string }): void {
+  const run = lazyCleanup(scope).catch(() => undefined);
+  lazyPending.add(run);
+  void run.finally(() => lazyPending.delete(run));
 }
 
 /** Starts the sweep now and then hourly (like `startMediaSweeper`); the timer does not keep the process alive. */

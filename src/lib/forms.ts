@@ -189,7 +189,9 @@ export async function assertMayApply(executor: DbExecutor, clubId: string, userI
         details: { code: "member_rejoin_blocked", clubMemberId: own!.id, status: state },
       });
     }
-    if (state !== "ausgetreten") throw new ConflictError("Already a member of this club", { code: "ALREADY_MEMBER", details: { clubId, ...(own ? { clubMemberId: own.id } : {}) } });
+    // An external guest (a guardian, `member.role = guest`) is not a member: applying for oneself is allowed and, once accepted,
+    // promotes the guest to a regular member (`POST /club-applications/:id/approve`).
+    if (existing.role !== "guest" && state !== "ausgetreten") throw new ConflictError("Already a member of this club", { code: "ALREADY_MEMBER", details: { clubId, ...(own ? { clubMemberId: own.id } : {}) } });
   }
   const pending = await executor.query.clubApplications.findFirst({ where: and(eq(clubApplications.userId, userId), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending"), eq(clubApplications.onBehalfOf, "self")) });
   if (pending) throw new ConflictError("An application for this club is already pending", { code: "APPLICATION_PENDING", details: { clubId, applicationId: pending.id, submittedAt: pending.createdAt } });

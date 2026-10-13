@@ -8,6 +8,8 @@ import { db } from "../db/client.js";
 import { clubMembers, clubMemberStatusHistory, type ClubMemberRow } from "../db/schema/club-members.js";
 import { forms, formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, type FormRow, type FormSubmissionRow, type FormVersionRow } from "../db/schema/forms.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { guardianLinks } from "../db/schema/guardian-links.js";
+import { clubRoles } from "../db/schema/club-roles.js";
 import { accountLinkLockKey, type DbExecutor } from "./club-members.js";
 import { checkCustomAssignment, writeValues } from "./custom-fields.js";
 import { ConflictError, isUniqueViolation, NotFoundError } from "./errors.js";
@@ -246,6 +248,15 @@ export async function compensateAbortedApproval(created: { id: string; organizat
   return db.transaction(async (tx) => {
     const [lock] = (await tx.execute<{ ok: boolean }>(sql`SELECT pg_try_advisory_xact_lock(hashtextextended(${accountLinkLockKey(created.organizationId, created.userId)}, 0)) AS ok`)).rows;
     if (!lock?.ok) return false;
+    // The account row is locked FOR UPDATE first: a child acceptance that is inserting a guardian link (key-share lock on this
+    // row) finishes before we look, and one that comes later waits and then fails on the FK (409 decision_busy). Without this a
+    // delete would cascade away a link that another application relies on.
+    const [account] = await tx.select({ id: member.id }).from(member).where(eq(member.id, created.id)).for("update");
+    if (!account) return false;
+    const [{ n: links }] = await tx.select({ n: sql<number>`count(*)::int` }).from(guardianLinks).where(eq(guardianLinks.guardianMemberId, created.id));
+    const [{ n: roles }] = await tx.select({ n: sql<number>`count(*)::int` }).from(clubRoles).where(eq(clubRoles.memberId, created.id));
+    // A guest that is somebody's guardian, or holds any club role (e.g. from another application), is never removed.
+    if (links > 0 || roles > 0) return false;
     const rows = await tx.select().from(clubMembers).where(eq(clubMembers.memberId, created.id)).for("update");
     if (rows.length > 1) return false;
     const row = rows[0];

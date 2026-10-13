@@ -323,6 +323,21 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     expect((await req("/club-settings", cookiePlain, { method: "PATCH", body: { allowSelfLoans: false } })).status).toBe(403);
   });
 
+  it("keeps the application review and the exit request reads closed to outsiders (board only; exit form for members)", async () => {
+    const appId = "00000000-0000-4000-8000-0000000000aa";
+    for (const cookie of [cookiePlain, cookieGuest]) {
+      for (const path of ["/club-applications", `/club-applications/${appId}`, "/club-exit-requests"]) {
+        const res = await req(path, cookie);
+        expect(res.status, `${path} -> ${res.status}`).toBe(403);
+      }
+      // A request that exists for nobody the caller is involved in is a 404, never data.
+      expect((await req(`/club-exit-requests/${appId}`, cookie)).status).toBe(404);
+    }
+    expect((await req("/club-exit-requests/form", cookiePlain)).status).toBe(200);
+    expect((await req("/club-applications", cookieFounder)).status).toBe(200);
+    expect((await req(`/club-applications/${appId}`, cookieFounder)).status).toBe(404);
+  });
+
   it("keeps the form builder behind forms:write (board allowed, mitglied and guest denied, reads included)", async () => {
     expect((await req("/forms", cookieFounder)).status).toBe(200);
     for (const cookie of [cookiePlain, cookieGuest]) {

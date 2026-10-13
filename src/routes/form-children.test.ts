@@ -6,10 +6,11 @@ import { member, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubApplications } from "../db/schema/club-applications.js";
-import { clubMembers } from "../db/schema/club-members.js";
+import { clubMembers, clubMemberStatusHistory } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { formSubmissions } from "../db/schema/forms.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
+import { compensateAbortedApproval } from "../lib/form-applications.js";
 import { countOpenChildApplications, MAX_OPEN_CHILD_APPLICATIONS } from "../lib/form-children.js";
 import { logger } from "../lib/logger.js";
 import { makePng } from "../lib/media-fixtures.js";
@@ -249,12 +250,13 @@ describe("child application by a parent (B8)", () => {
     expect(await db.select().from(guardianLinks).where(eq(guardianLinks.guardianMemberId, accounts1[0]!.id))).toHaveLength(2);
     expect(await db.select().from(clubRoles).where(eq(clubRoles.memberId, accounts1[0]!.id))).toHaveLength(1);
 
-    // The same parent is now an external guest: a child application is fine, an application for oneself is still ALREADY_MEMBER.
+    // The same parent is now an external guest: a child application is fine and so is an application for oneself (see the promotion test).
     const third = await applyChild(parent, child({ first_name: "Sieben" }));
     expect(third.status).toBe(201);
     const self = await call(parent, "/club-members/apply", { method: "POST", body: { clubSlug: club.slug, answers: { first_name: "x", last_name: "y", category: "aktiv", privacy_consent: true } } });
+    // The parent's own application from above is still pending (a guest may apply for themself, one open application at a time).
     expect(self.status).toBe(409);
-    expect((await body(self)).error.code).toBe("ALREADY_MEMBER");
+    expect((await body(self)).error.code).toBe("APPLICATION_PENDING");
     const accepted = await decide(club.founder, (await body(third)).data.application.id, "approve");
     expect(accepted.status).toBe(200);
     expect((await body(accepted)).data.guardian).toMatchObject({ createdAsExternal: false });
@@ -342,6 +344,68 @@ describe("child application by a parent (B8)", () => {
     const sub = (await db.query.formSubmissions.findFirst({ where: eq(formSubmissions.id, filed.submissionId) }))!;
     expect(await db.select().from(guardianLinks).where(eq(guardianLinks.wardClubMemberId, sub.subjectClubMemberId!))).toHaveLength(1);
     expect(await db.select().from(member).where(and(eq(member.organizationId, club.clubId), eq(member.userId, other.userId)))).toHaveLength(1);
+  });
+
+  it("never shows a new guest parent as an active member and gives them no member number", async () => {
+    const parent = await newUser("neveraktiv");
+    const { applicationId } = await filedChild(parent);
+    expect((await decide(club.founder, applicationId, "approve")).status).toBe(200);
+    const account = (await accountOf(parent.userId))!;
+    const row = (await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, account.id) }))!;
+    expect(row).toMatchObject({ status: "interessent", memberNumber: null });
+    const history = await db.select().from(clubMemberStatusHistory).where(eq(clubMemberStatusHistory.clubMemberId, row.id));
+    expect(history.map((h) => h.toStatus)).toEqual(["interessent"]);
+  });
+
+  it("promotes a guest parent to a regular member when their own application is accepted (child first, parent afterwards)", async () => {
+    const parent = await newUser("promote");
+    const kid = await filedChild(parent);
+    expect((await decide(club.founder, kid.applicationId, "approve")).status).toBe(200);
+    const guest = (await accountOf(parent.userId))!;
+    expect(guest.role).toBe("guest");
+    // A guest is not a member: no ALREADY_MEMBER, the own application can be filed ...
+    const own = await call(parent, "/club-members/apply", { method: "POST", body: { clubSlug: club.slug, answers: { first_name: "Eltern", last_name: "Teil", category: "aktiv", privacy_consent: true } } });
+    expect(own.status, await own.clone().text()).toBe(201);
+    const ownId = (await body(own)).data.application.id as string;
+    // ... but still only one open one.
+    expect((await call(parent, "/club-members/apply", { method: "POST", body: { clubSlug: club.slug, answers: { first_name: "x", last_name: "y", category: "aktiv", privacy_consent: true } } })).status).toBe(409);
+    const approved = await decide(club.founder, ownId, "approve");
+    expect(approved.status, await approved.clone().text()).toBe(200);
+    const data = (await body(approved)).data;
+    expect(data.member).toMatchObject({ id: guest.id, role: "member" });
+    expect((await accountOf(parent.userId))!.role).toBe("member");
+    const row = (await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, guest.id) }))!;
+    expect(row).toMatchObject({ status: "aktiv", displayName: "Eltern Teil" });
+    expect(row.memberNumber).toMatch(/-\d{4}$/);
+    const history = await db.select().from(clubMemberStatusHistory).where(eq(clubMemberStatusHistory.clubMemberId, row.id));
+    expect(history.map((h) => `${h.fromStatus}>${h.toStatus}`)).toEqual(["null>interessent", "interessent>aktiv"]);
+    // The guardian role and the link stay; the person now has the implicit member role.
+    expect((await db.select().from(clubRoles).where(eq(clubRoles.memberId, guest.id))).map((r) => r.roleType)).toEqual(["erziehungsberechtigt"]);
+    expect(await db.select().from(guardianLinks).where(eq(guardianLinks.guardianMemberId, guest.id))).toHaveLength(1);
+    const me = await call(parent, "/club-members/me", { clubId: club.clubId });
+    expect(me.status).toBe(200);
+    // Applying again is now ALREADY_MEMBER.
+    const again = await call(parent, "/club-members/apply", { method: "POST", body: { clubSlug: club.slug, answers: { first_name: "x", last_name: "y", category: "aktiv", privacy_consent: true } } });
+    expect((await body(again)).error.code).toBe("ALREADY_MEMBER");
+  });
+
+  it("never removes a guest account that is somebody's guardian when an acceptance is compensated", async () => {
+    const parent = await newUser("compensate");
+    const { applicationId } = await filedChild(parent);
+    expect((await decide(club.founder, applicationId, "approve")).status).toBe(200);
+    const account = (await accountOf(parent.userId))!;
+    const created = { id: account.id, organizationId: club.clubId, userId: parent.userId };
+    // With a guardian link ...
+    expect(await compensateAbortedApproval(created)).toBe(false);
+    expect(await accountOf(parent.userId)).toBeDefined();
+    // ... and with only the guardian role left (it stems from some other application).
+    await db.delete(guardianLinks).where(eq(guardianLinks.guardianMemberId, account.id));
+    expect(await compensateAbortedApproval(created)).toBe(false);
+    expect(await accountOf(parent.userId)).toBeDefined();
+    // A bare guest without link and role is removable (the aborted acceptance's own creation).
+    await db.delete(clubRoles).where(eq(clubRoles.memberId, account.id));
+    expect(await compensateAbortedApproval(created)).toBe(true);
+    expect(await accountOf(parent.userId)).toBeUndefined();
   });
 
   it("keeps the child out of the logs, the audit entries and error answers", async () => {

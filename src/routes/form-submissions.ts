@@ -13,7 +13,7 @@ import { mediaFiles } from "../db/schema/media-files.js";
 import type { DbExecutor } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
-import { lazyCleanup } from "../lib/form-sweeper.js";
+import { scheduleLazyCleanup } from "../lib/form-sweeper.js";
 import { applicationPendingError, closeApplicationOfSubmission, createApplicationForSubmission } from "../lib/form-applications.js";
 import { assertGuardianMayApply, checkChildAnswers, type ChildWarning, childUnsupportedError, supportsChildApplication } from "../lib/form-children.js";
 import { FIELD_KEY_RE, validateAnswers, visibleFieldKeys, type FormField, type ValidateResult } from "../lib/form-schema.js";
@@ -275,7 +275,7 @@ formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", crea
   if (!org) throw new NotFoundError("Club not found");
   await ensureFormBasics(org.id);
   // The caller's own overdue drafts (and their files) go first, so they do not count against the draft caps.
-  await lazyCleanup({ userId });
+  scheduleLazyCleanup({ userId });
 
   const created = await db.transaction(async (tx) => {
     await lockUserClub(tx, userId, org.id);
@@ -321,7 +321,7 @@ formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", crea
 
 // Registered before "/:id" so "mine" is not read as an id.
 formSubmissionRoutes.get("/mine", async (c) => {
-  await lazyCleanup({ userId: c.get("user").id });
+  scheduleLazyCleanup({ userId: c.get("user").id });
   const rows = await db
     .select({ sub: formSubmissions, purpose: forms.purpose, version: formVersions.version, clubName: organization.name, clubSlug: organization.slug })
     .from(formSubmissions)

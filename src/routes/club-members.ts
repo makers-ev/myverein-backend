@@ -45,6 +45,7 @@ import { applicationPendingError } from "../lib/form-applications.js";
 import type { FormField } from "../lib/form-schema.js";
 import { ANSWERS_BODY_LIMIT, applicantCategories, assertMayApply, ensureFormBasics, findCurrentForm, submissionsPerHour } from "../lib/forms.js";
 import { applyWithForm } from "./form-submissions.js";
+import { closeExitSubmission } from "../lib/form-exit.js";
 import { canReadValue } from "../lib/custom-field-access.js";
 import { listDefinitions, MAX_CUSTOM_FIELDS_PER_CLUB } from "../lib/custom-fields.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
@@ -1342,10 +1343,13 @@ clubMemberRoutes.post("/:id/transition", zValidator("json", transitionSchema, va
     const done = await transitionMember(tx, clubId, target.id, { toStatus: body.toStatus, category, effectiveOn: body.effectiveOn, reason: body.reason, reopen: body.reopen }, actor.id, today);
     // A direct exit makes open exit requests of the member obsolete: close them instead of leaving them dangling.
     if (body.toStatus !== undefined && isLeftStatus(body.toStatus) && done.kind !== "cancel_exit") {
-      await tx
+      const closed = await tx
         .update(clubExitRequests)
         .set({ status: "rejected", decidedBy: actor.id, decidedAt: new Date(), decisionNote: "Ersetzt durch direkte Statusänderung" })
-        .where(and(eq(clubExitRequests.clubMemberId, target.id), eq(clubExitRequests.status, "pending")));
+        .where(and(eq(clubExitRequests.clubMemberId, target.id), eq(clubExitRequests.status, "pending")))
+        .returning({ formSubmissionId: clubExitRequests.formSubmissionId });
+      // The exit forms of those requests follow (lock order as in the exit routes: member row, request row, submission row).
+      for (const r of closed) await closeExitSubmission(tx, r.formSubmissionId, "rejected", actor.id);
     }
     await tx.insert(auditLog).values({
       eventType: "club_member.transition",

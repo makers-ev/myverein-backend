@@ -30,6 +30,13 @@ export interface RenderOptions {
   canReadSensitive: boolean;
 }
 
+/**
+ * Master data that identifies or locates a person (birth date, address, phone, emergency contact) is protected like a
+ * `sensitive` field in every review view, whatever the form says: without `members:read_sensitive` it is redacted.
+ */
+const PROTECTED_TARGETS = new Set(["birthDate", "street", "postalCode", "city", "phone", "emergencyContactName", "emergencyContactPhone"]);
+export const isProtectedField = (field: FormField): boolean => field.sensitive === true || (field.mapsTo !== undefined && PROTECTED_TARGETS.has(field.mapsTo));
+
 /** Fields that carry an answer in `answers` (files and photos live in `form_submission_files`, `info` is display only). */
 const ANSWER_TYPES = new Set<FormField["type"]>(["text", "textarea", "number", "date", "select", "multiselect", "checkbox", "consent"]);
 
@@ -39,7 +46,7 @@ export function renderAnswers(fields: readonly FormField[], answers: unknown, op
   const out: RenderedAnswer[] = [];
   for (const field of fields) {
     if (!ANSWER_TYPES.has(field.type) || !visible.has(field.key)) continue;
-    const sensitive = field.sensitive === true;
+    const sensitive = isProtectedField(field);
     const redacted = sensitive && !options.canReadSensitive;
     const raw = Object.hasOwn(source, field.key) ? source[field.key] : undefined;
     const answered = raw !== undefined && raw !== null && raw !== "" && !(Array.isArray(raw) && raw.length === 0);
