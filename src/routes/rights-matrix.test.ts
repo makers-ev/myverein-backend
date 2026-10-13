@@ -133,6 +133,7 @@ const SELF_SERVICE: Record<string, string> = {
   "PATCH /form-submissions/:id": "own draft (ownership checked, foreign ids are 404)",
   "POST /form-submissions/:id/files": "file upload into the own draft (central media layer; ownership checked)",
   "DELETE /form-submissions/:id/files/:fileId": "removing a file of the own draft (ownership checked)",
+  "DELETE /form-submissions/:id": "discarding the own draft (ownership checked, foreign ids are 404; only status draft)",
   "POST /form-submissions/:id/submit": "submitting the own draft (ownership checked)",
   "POST /form-submissions/:id/withdraw": "withdrawing the own application (ownership checked)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",

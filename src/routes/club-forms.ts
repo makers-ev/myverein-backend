@@ -27,6 +27,6 @@ clubFormRoutes.get("/:clubSlug/aufnahme", async (c) => {
 
   const current = await findCurrentForm(org.id, "aufnahme");
   if (!current) throw new NotFoundError("This club has no application form");
-  c.header("Cache-Control", "private, no-cache");
+  c.header("Cache-Control", "private, no-store");
   return c.json({ data: applicantDefinition(current.form, current.version, await applicantCategories(org.id)) });
 });

@@ -210,6 +210,7 @@ describe("application review API and hygiene (B10)", () => {
     expect(data.consent).toMatchObject({ consentedBy: who.userId, role: "self", onBehalfOf: "self", consentFieldKeys: ["privacy_consent"], consentedAt: sub.submittedAt!.toISOString(), givenBy: { userId: who.userId, name: "Anna Konto" }, privacyNoticeShown: true });
     expect(data.consent.fields).toEqual([{ key: "privacy_consent", label: "Ich willige ein.", given: true }]);
     expect(data.consent.textSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(data.consent.textHashScheme).toBe(2);
     expect(data.decision).toBeNull();
     expect(data.warnings).toEqual([]);
   });

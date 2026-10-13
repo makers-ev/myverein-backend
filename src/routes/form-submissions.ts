@@ -74,7 +74,8 @@ formSubmissionRoutes.use("*", rateLimit({ windowMs: 60_000, max: 120, key: (c) =
 const createLimiter = rateLimit({ windowMs: 60 * 60_000, max: submissionsPerHour(), key: (c) => `form-submission-create:${c.get("user").id}` });
 const uploadLimiter = rateLimit({ windowMs: 60 * 60_000, max: uploadsPerHour(), key: (c) => `form-submission-upload:${c.get("user").id}` });
 const deleteLimiter = rateLimit({ windowMs: 60 * 60_000, max: uploadsPerHour(), key: (c) => `form-submission-file-delete:${c.get("user").id}` });
-const submitLimiter = rateLimit({ windowMs: 60 * 60_000, max: submissionsPerHour(), key: (c) => `form-submission-submit:${c.get("user").id}` });
+const discardLimiter = rateLimit({ windowMs: 60 * 60_000, max: submissionsPerHour(), key: (c) => `form-submission-discard:${c.get("user").id}` });
+const submitLimiter =rateLimit({ windowMs: 60 * 60_000, max: submissionsPerHour(), key: (c) => `form-submission-submit:${c.get("user").id}` });
 
 const validationHook = (result: { success: boolean; error?: { issues: unknown } }) => {
   if (!result.success) throw new ValidationError("Invalid request body");
@@ -321,6 +322,8 @@ formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", crea
 
 // Registered before "/:id" so "mine" is not read as an id.
 formSubmissionRoutes.get("/mine", async (c) => {
+  // Drafts hold personal (child / health) data: never cached by browsers or proxies.
+  c.header("Cache-Control", "private, no-store");
   scheduleLazyCleanup({ userId: c.get("user").id });
   const rows = await db
     .select({ sub: formSubmissions, purpose: forms.purpose, version: formVersions.version, clubName: organization.name, clubSlug: organization.slug })
@@ -338,6 +341,7 @@ formSubmissionRoutes.get("/mine", async (c) => {
 });
 
 formSubmissionRoutes.get("/:id", async (c) => {
+  c.header("Cache-Control", "private, no-store");
   const sub = await loadOwn(db, c.req.param("id"), c.get("user").id);
   const pinned = await loadPinned(db, sub.formVersionId);
   const current = await findCurrentForm(sub.clubId, PURPOSE);
@@ -350,6 +354,27 @@ formSubmissionRoutes.get("/:id", async (c) => {
       outdated: sub.status === "draft" && current?.version.id !== pinned.version.id,
     },
   });
+});
+
+// --- discard ---------------------------------------------------------------------------------------------------
+
+/**
+ * The submitter discards an own DRAFT: the row, its answers and files are hard-deleted (registry entries tombstoned in
+ * the transaction, bytes purged after the commit). Drafts have no application row. Audit: ids and counts only.
+ */
+formSubmissionRoutes.delete("/:id", discardLimiter, async (c) => {
+  const userId = c.get("user").id;
+  const purge = await db.transaction(async (tx) => {
+    const sub = await loadOwn(tx, c.req.param("id"), userId, true);
+    if (sub.status !== "draft") throw new ConflictError("Only a draft can be deleted", { details: { code: "submission_not_deletable", status: sub.status } });
+    const files = await loadFiles(tx, [sub.id]);
+    const keys = await removeFiles(tx, files.map((f) => f.file));
+    await tx.delete(formSubmissions).where(eq(formSubmissions.id, sub.id));
+    await tx.insert(auditLog).values({ eventType: "form_submission.delete", subjectId: sub.id, payload: { clubId: sub.clubId, formId: sub.formId, formVersionId: sub.formVersionId, userId, fileCount: files.length } });
+    return keys;
+  });
+  await purgeAll(purge);
+  return c.body(null, 204);
 });
 
 // --- edit ------------------------------------------------------------------------------------------------------

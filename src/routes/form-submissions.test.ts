@@ -437,6 +437,66 @@ describe("form submissions (applicant side)", () => {
     expect(Object.keys(list[0].club).sort()).toEqual(["id", "name", "slug"]);
   });
 
+  it("sends Cache-Control private, no-store on drafts, the list, the definition and files", async () => {
+    const who = await newApplicant("nostore");
+    const id = await draftId(who, c, { answers: { category: "aktiv" } });
+    const file = (await body(await upload(who, id, "extra_doc", PDF_BYTES, "d.pdf", "application/pdf"))).data.file.id;
+    for (const url of [`/form-submissions/${id}`, "/form-submissions/mine", `/form-submissions/${id}/files/${file}`, `/club-forms/${c.slug}/aufnahme`]) {
+      const res = await call(who, url);
+      expect(res.status, url).toBe(200);
+      expect(res.headers.get("cache-control"), url).toBe("private, no-store");
+    }
+  });
+
+  // --- deleting a draft ----------------------------------------------------------------------------------
+
+  it("hard-deletes an own draft with answers and files, tombstones the media, audits ids only", async () => {
+    const who = await newApplicant("discard");
+    const id = await draftId(who, c, { answers: { category: "aktiv", sport: "a", sport_note: MARKER } });
+    const fileId = (await body(await upload(who, id, "extra_doc", PDF_BYTES, "d.pdf", "application/pdf"))).data.file.id as string;
+    const [fileRow] = await db.select().from(formSubmissionFiles).where(eq(formSubmissionFiles.id, fileId));
+
+    const res = await call(who, `/form-submissions/${id}`, { method: "DELETE" });
+    expect(res.status).toBe(204);
+    expect(await rowOf(id)).toBeUndefined();
+    expect(await db.select().from(formSubmissionFiles).where(eq(formSubmissionFiles.submissionId, id))).toHaveLength(0);
+    expect((await db.select().from(mediaFiles).where(eq(mediaFiles.storageKey, fileRow!.storageKey)))[0]!.deletedAt).not.toBeNull();
+    await expect(stat(path.join(UPLOADS_DIR, fileRow!.storageKey))).rejects.toThrow();
+    expect((await call(who, `/form-submissions/${id}`)).status).toBe(404);
+    expect((await call(who, `/form-submissions/${id}`, { method: "DELETE" })).status).toBe(404);
+
+    const entries = await db.select().from(auditLog).where(eq(auditLog.subjectId, id));
+    const entry = entries.find((e) => e.eventType === "form_submission.delete");
+    expect(entry?.payload).toMatchObject({ clubId: c.clubId, userId: who.userId, fileCount: 1 });
+    expect(JSON.stringify(entries)).not.toContain(MARKER);
+  });
+
+  it("refuses to delete submitted or withdrawn submissions (409 submission_not_deletable) and foreign or malformed ids", async () => {
+    const who = await newApplicant("discard-409");
+    const other = await newApplicant("discard-other");
+    const id = await draftId(who, c, { answers: { category: "aktiv", privacy_consent: true } });
+    expect((await call(other, `/form-submissions/${id}`, { method: "DELETE" })).status).toBe(404);
+    expect((await call(who, "/form-submissions/not-a-uuid", { method: "DELETE" })).status).toBe(404);
+    expect((await submit(who, id)).status).toBe(200);
+    const submitted = await call(who, `/form-submissions/${id}`, { method: "DELETE" });
+    expect(submitted.status).toBe(409);
+    expect((await body(submitted)).error.details).toMatchObject({ code: "submission_not_deletable", status: "submitted" });
+    expect(await rowOf(id)).toBeDefined();
+
+    expect((await call(who, `/form-submissions/${id}/withdraw`, { method: "POST" })).status).toBe(200);
+    expect((await call(who, `/form-submissions/${id}`, { method: "DELETE" })).status).toBe(409);
+    expect(await rowOf(id)).toBeDefined();
+    expect((await call(who, "/form-submissions/mine")).status).toBe(200);
+  });
+
+  it("rate-limits draft deletion like other submission writes", async () => {
+    const limited = await newApplicant("discard-limit");
+    const statuses: number[] = [];
+    for (let i = 0; i < 21; i++) statuses.push((await call(limited, `/form-submissions/${"00000000-0000-4000-8000-000000000002"}`, { method: "DELETE" })).status);
+    expect(statuses.slice(0, 20).every((s) => s === 404)).toBe(true);
+    expect(statuses[20]).toBe(429);
+  });
+
   // --- board access to files -----------------------------------------------------------------------------
 
   it("lets the board download files of SUBMITTED applications only, audited, nobody else", async () => {

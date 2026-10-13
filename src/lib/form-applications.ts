@@ -204,6 +204,8 @@ export interface ConsentEvidence {
   formVersionId: string;
   consentFieldKeys: string[];
   textSha256: string;
+  /** Hash scheme of `textSha256` (see `consentTextSha256`); absent in older audit entries = scheme 1. */
+  textHashScheme: number;
   /** User id of the person who gave the consent (the guardian for a child application). */
   consentedBy: string;
   onBehalfOf: string;
@@ -213,16 +215,40 @@ export interface ConsentEvidence {
   subjectClubMemberId?: string;
 }
 
+/** Current hash scheme of `textSha256`; entries without `textHashScheme` (written before the marker existed) use scheme 1. */
+export const CONSENT_HASH_SCHEME = 2;
+
+/**
+ * Scheme 2: SHA-256 over the canonical JSON (`JSON.stringify` of literal-ordered arrays/objects, no whitespace, UTF-8) of
+ * `[2, privacyNotice ?? "", blocks]`, `blocks` = every field of the pinned version in field order that is displayed in
+ * the consent/privacy area: `["consent", key, label, helpText ?? ""]` for consent fields and
+ * `["privacy_notice", key, label, text ?? ""]` for info fields with `infoKind: "privacy_notice"`.
+ */
+export function consentTextSha256(version: Pick<FormVersionRow, "privacyNotice" | "fields">): string {
+  const blocks: string[][] = [];
+  for (const f of version.fields as FormField[]) {
+    if (f.type === "consent") blocks.push(["consent", f.key, f.label, f.helpText ?? ""]);
+    else if (f.type === "info" && f.infoKind === "privacy_notice") blocks.push(["privacy_notice", f.key, f.label, f.text ?? ""]);
+  }
+  return createHash("sha256").update(JSON.stringify([CONSENT_HASH_SCHEME, version.privacyNotice ?? "", blocks])).digest("hex");
+}
+
+/** Scheme 1 (privacy notice + consent labels only); kept to re-verify audit entries that carry no `textHashScheme`. */
+export function legacyConsentTextSha256(version: Pick<FormVersionRow, "privacyNotice" | "fields">): string {
+  const consents = (version.fields as FormField[]).filter((f) => f.type === "consent");
+  return createHash("sha256").update([version.privacyNotice ?? "", ...consents.map((f) => f.label)].join("\n")).digest("hex");
+}
+
 export function consentEvidence(context: Pick<DecisionContext, "sub" | "version">, subjectClubMemberId?: string): ConsentEvidence {
   const fields = context.version.fields as FormField[];
   const answers = (context.sub.answers ?? {}) as Record<string, unknown>;
   const consents = fields.filter((f) => f.type === "consent");
   const given = consents.filter((f) => Object.hasOwn(answers, f.key) && answers[f.key] === true).map((f) => f.key);
-  const text = [context.version.privacyNotice ?? "", ...consents.map((f) => f.label)].join("\n");
   return {
     formVersionId: context.version.id,
     consentFieldKeys: given,
-    textSha256: createHash("sha256").update(text).digest("hex"),
+    textSha256: consentTextSha256(context.version),
+    textHashScheme: CONSENT_HASH_SCHEME,
     consentedBy: context.sub.submittedByUserId,
     onBehalfOf: context.sub.onBehalfOf,
     consentedAt: context.sub.submittedAt?.toISOString() ?? null,
