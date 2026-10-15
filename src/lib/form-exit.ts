@@ -18,6 +18,16 @@ import type { DbExecutor } from "./club-members.js";
  * Lock order in `routes/club-exit-requests.ts` stays: member row -> exit request row -> (this) submission row.
  */
 
+const isUpload = (f: { type: string }) => f.type === "file" || f.type === "image";
+
+/**
+ * Legacy tolerance: exit forms cannot take uploads. A published version that still holds `file`/`image` fields (from before
+ * `file_not_supported` was enforced) is treated as if those fields did not exist: never shown, never required, answers ignored.
+ */
+function withoutUploads<T extends { fields: unknown }>(def: T): T {
+  return { ...def, fields: (def.fields as FormField[]).filter((f) => !isUpload(f)) };
+}
+
 export interface PreparedExitAnswers {
   form: FormRow;
   version: FormVersionRow;
@@ -34,7 +44,7 @@ export async function currentExitDefinition(clubId: string) {
   await ensureExitForm(clubId);
   const current = await findCurrentForm(clubId, "austritt");
   if (!current) throw new NotFoundError("This club has no exit form");
-  return applicantDefinition(current.form, current.version, []);
+  return withoutUploads(applicantDefinition(current.form, current.version, []));
 }
 
 /**
@@ -46,8 +56,11 @@ export async function prepareExitAnswers(clubId: string, answers: unknown, formV
   await ensureExitForm(clubId);
   const current = await findCurrentForm(clubId, "austritt");
   if (!current) throw new NotFoundError("This club has no exit form");
-  if (formVersionId !== undefined && formVersionId !== current.version.id) throw outdatedError(applicantDefinition(current.form, current.version, []));
-  const result = validateAnswers(current.version.fields as FormField[], answers, { mode: "submit", categoryKeys: [] });
+  if (formVersionId !== undefined && formVersionId !== current.version.id) throw outdatedError(withoutUploads(applicantDefinition(current.form, current.version, [])));
+  const all = current.version.fields as FormField[];
+  const uploadKeys = new Set(all.filter(isUpload).map((f) => f.key));
+  const given = typeof answers === "object" && answers !== null && !Array.isArray(answers) ? Object.fromEntries(Object.entries(answers).filter(([k]) => !uploadKeys.has(k))) : answers;
+  const result = validateAnswers(all.filter((f) => !isUpload(f)), given, { mode: "submit", categoryKeys: [] });
   if (!result.ok) throw invalidAnswers(result.errors);
   return { form: current.form, version: current.version, answers: result.answers };
 }

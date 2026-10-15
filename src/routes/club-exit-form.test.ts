@@ -6,7 +6,7 @@ import { db, closeDatabase } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubExitRequests } from "../db/schema/club-exit-requests.js";
 import { clubMembers } from "../db/schema/club-members.js";
-import { forms, formSubmissions } from "../db/schema/forms.js";
+import { forms, formSubmissions, formVersions } from "../db/schema/forms.js";
 import { earliestExitDate } from "../lib/exit-notice.js";
 import { loadClubSettings } from "../lib/club-settings.js";
 import { logger } from "../lib/logger.js";
@@ -318,5 +318,52 @@ describe("exit form (B9)", () => {
     const dump = JSON.stringify(logged);
     expect(dump).not.toContain(SECRET);
     expect(dump).not.toContain("KRANKHEIT-4712");
+  });
+
+  it("refuses file/image fields on exit forms and tolerates them in a legacy published version", async () => {
+    const stranger = await signUpAndVerify(`exit-file-${suffix}@example.com`, "Exit File");
+    extra.push(stranger);
+    const { auth } = await import("../auth/auth.js");
+    await auth.api.addMember({ body: { userId: stranger.userId, organizationId: other.clubId, role: "member" } });
+
+    await exitForm(stranger, other); // seeds the standard forms
+    const row = (await db.select().from(forms).where(and(eq(forms.clubId, other.clubId), eq(forms.purpose, "austritt"))))[0]!;
+    const withFile = [
+      { key: "reason", type: "textarea", label: "Grund" },
+      { key: "proof", type: "file", label: "Nachweis", required: true },
+      { key: "photo", type: "image", label: "Foto" },
+      { key: "confirm", type: "checkbox", label: "Bestaetigung", required: true },
+    ];
+    const expected = [{ code: "file_not_supported", fieldKey: "proof" }, { code: "file_not_supported", fieldKey: "photo" }];
+
+    const saved = await call(other.founder, `/forms/${row.id}/draft`, { method: "PUT", clubId: other.clubId, body: { fields: withFile } });
+    expect(saved.status).toBe(422);
+    expect((await body(saved)).error.details.problems).toEqual(expected);
+
+    // Creation of a (second, e.g. archived-first) austritt form is checked as well, before any uniqueness conflict.
+    const created = await call(other.founder, "/forms", { method: "POST", clubId: other.clubId, body: { purpose: "austritt", name: "X", fields: withFile } });
+    expect(created.status).toBe(422);
+    expect((await body(created)).error.details.problems).toEqual(expected);
+
+    // The publish check itself (defence in depth): a draft that bypassed the save check cannot go live.
+    const [published] = await db.select().from(formVersions).where(and(eq(formVersions.formId, row.id), eq(formVersions.status, "published")));
+    await db.insert(formVersions).values({ formId: row.id, version: published!.version + 1, status: "draft", fields: withFile, privacyNotice: null });
+    const publish = await call(other.founder, `/forms/${row.id}/publish`, { method: "POST", clubId: other.clubId });
+    expect(publish.status).toBe(422);
+    expect((await body(publish)).error.details.problems).toEqual(expected);
+
+    // Legacy: the same definition as an already published version. Uploads are hidden, never required, answers ignored.
+    await db.delete(formVersions).where(and(eq(formVersions.formId, row.id), eq(formVersions.status, "draft")));
+    await db.update(formVersions).set({ status: "archived" }).where(eq(formVersions.id, published!.id));
+    const [legacy] = await db.insert(formVersions).values({ formId: row.id, version: published!.version + 1, status: "published", fields: withFile, privacyNotice: null, publishedAt: new Date() }).returning();
+    const def = (await body(await exitForm(stranger, other))).data;
+    expect(def.formVersionId).toBe(legacy!.id);
+    expect(def.fields.map((f: { key: string }) => f.key)).toEqual(["reason", "confirm"]);
+
+    const res = await post(stranger, { answers: { reason: "Umzug", confirm: true, proof: "x", photo: "y" }, formVersionId: legacy!.id }, other);
+    expect(res.status, await res.clone().text()).toBe(201);
+    const { submission } = await submissionOf((await body(res)).data.id);
+    expect(submission!.answers).toEqual({ reason: "Umzug", confirm: true });
+    expect(submission!.formVersionId).toBe(legacy!.id);
   });
 });

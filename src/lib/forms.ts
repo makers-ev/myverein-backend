@@ -209,17 +209,25 @@ export interface PublishProblem {
   fieldKey?: string;
 }
 
+/** Exit forms (`austritt`) cannot take uploads (`POST /club-exit-requests` accepts plain answers only). */
+export function fileFieldProblems(purpose: string, fields: readonly FormField[]): PublishProblem[] {
+  if (purpose !== "austritt") return [];
+  return fields.filter((f) => f.type === "file" || f.type === "image").map((f) => ({ code: "file_not_supported", fieldKey: f.key }));
+}
+
 const CUSTOM_FIELD_TYPE: Record<string, string> = { consent: "checkbox" };
 
 /**
  * Checks a draft must pass to be published (the shape itself was validated by `formFieldsSchema`):
  * - `aufnahme`: a privacy notice block with text and a mandatory, unconditional consent;
  * - mapping to club master data / custom fields only on `aufnahme` (only acceptance writes them);
+ * - `austritt` forms must not contain `file`/`image` fields (`file_not_supported`);
  * - every `customField` key refers to a non-archived definition of the club with a matching type.
  */
 export async function publishProblems(input: { clubId: string; purpose: string; fields: readonly FormField[]; privacyNotice: string | null }, executor: DbExecutor = db): Promise<PublishProblem[]> {
   const problems: PublishProblem[] = [];
   const { fields, purpose } = input;
+  problems.push(...fileFieldProblems(purpose, fields));
 
   if (purpose === "aufnahme") {
     const notice = fields.find((f) => f.type === "info" && f.infoKind === "privacy_notice");
