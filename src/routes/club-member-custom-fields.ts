@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, count, eq, inArray, isNotNull, isNull, type SQL, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { createMiddleware } from "hono/factory";
@@ -8,16 +8,19 @@ import { z } from "zod";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { memberFieldDefinitions, memberFieldValues } from "../db/schema/forms.js";
+import { clubMembers } from "../db/schema/club-members.js";
 import type { ClubMemberRow } from "../db/schema/club-members.js";
 import { ensureClubMember, resolveClubMember } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { canBoardWrite, canReadValue, canSelfWrite, isBoardLevel } from "../lib/custom-field-access.js";
 import { type FieldDefinition, listDefinitions, MAX_VALUES_PER_REQUEST, validateCustomValue, writeValues } from "../lib/custom-fields.js";
-import { ForbiddenError, ValidationError } from "../lib/errors.js";
+import { addDays, CREDENTIAL_STATUSES, credentialExpiry, DEFAULT_EXPIRING_DAYS, MAX_EXPIRING_DAYS, type CredentialStatus } from "../lib/credentials.js";
+import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import type { FieldErrorCode } from "../lib/form-schema.js";
 import { FIELD_KEY_RE } from "../lib/form-schema.js";
 import { invalidAnswers } from "../lib/forms.js";
-import { assertMemberReadable } from "../lib/member-read-scope.js";
+import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "../lib/member-read-scope.js";
+import { todayBerlin } from "../lib/member-lifecycle.js";
 import type { ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 
@@ -54,6 +57,7 @@ async function buildView(c: { get(k: "clubId"): string; get(k: "clubRoleTypes"):
   const [defs, values] = await Promise.all([listDefinitions(c.get("clubId")), db.select().from(memberFieldValues).where(eq(memberFieldValues.clubMemberId, row.id))]);
   const valueOf = new Map(values.map((v) => [v.fieldId, v]));
   const viewer = { roleTypes, isSelf };
+  const today = todayBerlin();
 
   const shown = defs.filter((d) => {
     if (d.archivedAt !== null && !includeArchived) return false;
@@ -80,6 +84,8 @@ async function buildView(c: { get(k: "clubId"): string; get(k: "clubRoleTypes"):
       editable: canBoardWrite(d, roleTypes) || (isSelf && canSelfWrite(d)),
       value: stored?.value ?? null,
       updatedAt: stored?.updatedAt ?? null,
+      // Credential fields only: `{ status: expired|expiring|valid|missing, daysLeft, validUntil }` (Berlin day, 90-day window).
+      expiry: d.fieldType === "credential" && canReadValue(d, viewer) ? credentialExpiry(stored?.value, today) : null,
     };
   });
 
@@ -153,6 +159,100 @@ async function writeView(
 const requireAccountMember = createMiddleware<ClubEnv>(async (c, next) => {
   if (c.get("membership").role === "guest") throw new ForbiddenError("External guests have no member profile fields");
   await next();
+});
+
+// --- credential overview (board / Funktionsträger) ----------------------------------------------------------------
+// Registered before the `/:id/...` routes so `credentials` is not taken for an id.
+
+const overviewQuery = z.object({
+  fieldKey: z.string().max(60).regex(FIELD_KEY_RE).optional(),
+  status: z.enum(CREDENTIAL_STATUSES as unknown as [CredentialStatus, ...CredentialStatus[]]).optional(),
+  withinDays: z.coerce.number().int().min(1).max(MAX_EXPIRING_DAYS).default(DEFAULT_EXPIRING_DAYS),
+  page: z.coerce.number().int().min(1).max(100_000).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+  /** Only honoured for callers who may see all members (members:write / members:read_sensitive). */
+  includeFormer: z.enum(["true", "false"]).optional(),
+});
+
+/**
+ * Members with their credential value and expiry status, for the credential fields the caller may see (`canReadValue`:
+ * visibility and `sensitive` rules of custom-field-access.ts) and only members the caller may read (the Wave 7 scoping:
+ * plain members only see probe/aktiv/ruhend members, former members only for the board with `includeFormer=true`).
+ * Without `fieldKey` every visible credential field is listed (held credentials only); `status=missing` needs `fieldKey`
+ * (members who do not hold that credential). An unknown, archived or invisible `fieldKey` is 404. Values never reach the
+ * logs; a page with values of `sensitive` fields leaves ONE audit entry with ids only.
+ */
+memberCustomFieldRoutes.get("/credentials", requireAccountMember, async (c) => {
+  const parsed = overviewQuery.safeParse(c.req.query());
+  if (!parsed.success) throw new ValidationError("Invalid query", { details: parsed.error.issues });
+  const q = parsed.data;
+  const clubId = c.get("clubId");
+  const roleTypes = c.get("clubRoleTypes");
+  const today = todayBerlin();
+  const until = addDays(today, q.withinDays);
+
+  if (q.status === "missing" && q.fieldKey === undefined) throw new ValidationError("status=missing needs a fieldKey", { details: { code: "field_key_required" } });
+
+  const readable = (await listDefinitions(clubId)).filter((d) => d.fieldType === "credential" && d.archivedAt === null && canReadValue(d, { roleTypes, isSelf: false }));
+  const selected = q.fieldKey === undefined ? readable : readable.filter((d) => d.key === q.fieldKey);
+  // Same answer for "does not exist", "is archived", "is not a credential" and "you may not see it".
+  if (q.fieldKey !== undefined && selected.length === 0) throw new NotFoundError("Custom field not found");
+  const fieldsMeta = selected.map((d) => ({ id: d.id, key: d.key, label: d.label, sensitive: d.sensitive, options: d.options ?? null }));
+  const empty = () => c.json({ data: [], page: q.page, pageSize: q.pageSize, total: 0, today, withinDays: q.withinDays, fields: fieldsMeta });
+  if (selected.length === 0) return empty();
+
+  const v = memberFieldValues;
+  const validUntil = sql<string | null>`(${v.value} ->> 'validUntil')`;
+  const statusCond: SQL | undefined =
+    q.status === undefined
+      ? undefined
+      : q.status === "missing"
+        ? isNull(v.id)
+        : q.status === "expired"
+          ? sql`${validUntil} < ${today}`
+          : q.status === "expiring"
+            ? sql`${validUntil} >= ${today} AND ${validUntil} <= ${until}`
+            : sql`${isNotNull(v.id)} AND (${validUntil} IS NULL OR ${validUntil} > ${until})`;
+  const scope = canSeeAllMembers(c) && q.includeFormer === "true" ? undefined : visibleStatusCondition(today);
+  const where = and(eq(clubMembers.clubId, clubId), scope, q.fieldKey === undefined ? isNotNull(v.id) : undefined, statusCond);
+  const join = and(eq(v.clubMemberId, clubMembers.id), inArray(v.fieldId, selected.map((d) => d.id)));
+
+  const [totalRow] = await db.select({ n: count() }).from(clubMembers).leftJoin(v, join).where(where);
+  const rows = await db
+    .select({ clubMemberId: clubMembers.id, displayName: clubMembers.displayName, firstName: clubMembers.firstName, lastName: clubMembers.lastName, status: clubMembers.status, fieldId: v.fieldId, value: v.value, updatedAt: v.updatedAt })
+    .from(clubMembers)
+    .leftJoin(v, join)
+    .where(where)
+    .orderBy(sql`${validUntil} ASC NULLS LAST`, sql`lower(${clubMembers.displayName})`, asc(clubMembers.id), asc(v.fieldId))
+    .limit(q.pageSize)
+    .offset((q.page - 1) * q.pageSize);
+
+  const byId = new Map(selected.map((d) => [d.id, d]));
+  const data = rows.map((r) => {
+    const def = byId.get(r.fieldId ?? selected[0]!.id)!;
+    return {
+      clubMemberId: r.clubMemberId,
+      displayName: r.displayName,
+      firstName: r.firstName,
+      lastName: r.lastName,
+      fieldKey: def.key,
+      fieldLabel: def.label,
+      sensitive: def.sensitive,
+      value: r.value ?? null,
+      updatedAt: r.updatedAt ?? null,
+      expiry: credentialExpiry(r.value, today, q.withinDays),
+    };
+  });
+
+  const sensitiveRows = rows.filter((r) => r.fieldId !== null && byId.get(r.fieldId)!.sensitive);
+  if (sensitiveRows.length > 0) {
+    await db.insert(auditLog).values({
+      eventType: "member_field.sensitive_read",
+      subjectId: clubId,
+      payload: { clubId, via: "credentials_overview", fieldIds: [...new Set(sensitiveRows.map((r) => r.fieldId!))], clubMemberIds: [...new Set(sensitiveRows.map((r) => r.clubMemberId))], readBy: c.get("membership").id },
+    });
+  }
+  return c.json({ data, page: q.page, pageSize: q.pageSize, total: totalRow?.n ?? 0, today, withinDays: q.withinDays, fields: fieldsMeta });
 });
 
 memberCustomFieldRoutes.get("/me/custom-fields", requireAccountMember, async (c) => {
