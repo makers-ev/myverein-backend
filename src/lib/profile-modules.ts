@@ -50,8 +50,8 @@ const range = (from: number, to: number, step = 1) => Array.from({ length: Math.
 
 type Seed = Omit<ProfileModule, "visibleTo" | "editableBy" | "sensitive" | "description"> & Partial<Pick<ProfileModule, "visibleTo" | "sensitive" | "description">>;
 
-/** Kinderschutz entries made by the person itself are claims, not checked by the club (the board sees `enteredBy`). */
-const SELF_DECLARED = "Eigene Angaben sind eine Selbstangabe und werden nicht geprüft; der Vorstand sieht, ob ein Eintrag vom Mitglied oder vom Vorstand stammt.";
+/** Kinderschutz entries made by the person itself or a guardian are claims, not checked by the club (the board sees `enteredBy`). */
+const SELF_DECLARED = "Angaben des Mitglieds selbst oder seiner Erziehungsberechtigten sind eine Selbstangabe und werden nicht geprüft; der Vorstand sieht, ob ein Eintrag vom Mitglied, von Erziehungsberechtigten oder vom Vorstand stammt.";
 
 const CRED_HELP = "Nur ankreuzen, wenn du diese Qualifikation hast. Das Ablaufdatum (gültig bis) sehen Vorstand und Funktionsträger.";
 

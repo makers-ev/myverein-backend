@@ -13,7 +13,7 @@ import { guardianLinks } from "../db/schema/guardian-links.js";
 import type { ClubMemberRow } from "../db/schema/club-members.js";
 import { ensureClubMember, resolveClubMember } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
-import { canBoardWrite, canReadValue, canSelfWrite, canViewCredentialOverview, isBoardLevel } from "../lib/custom-field-access.js";
+import { canBoardWrite, canGuardianRead, canGuardianWrite, canReadValue, canSelfWrite, canViewCredentialOverview, isBoardLevel } from "../lib/custom-field-access.js";
 import { type FieldDefinition, listDefinitions, MAX_VALUES_PER_REQUEST, validateCustomValue, writeValues } from "../lib/custom-fields.js";
 import { addDays, CREDENTIAL_STATUSES, credentialExpiry, DEFAULT_EXPIRING_DAYS, MAX_EXPIRING_DAYS, type CredentialStatus } from "../lib/credentials.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
@@ -22,7 +22,7 @@ import { FIELD_KEY_RE } from "../lib/form-schema.js";
 import { invalidAnswers } from "../lib/forms.js";
 import { definitionTranslations } from "../lib/profile-modules-i18n.js";
 import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "../lib/member-read-scope.js";
-import { todayBerlin } from "../lib/member-lifecycle.js";
+import { effectiveStatus, isLeftStatus, todayBerlin } from "../lib/member-lifecycle.js";
 import type { ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 
@@ -35,6 +35,7 @@ import { rateLimit } from "../middleware/rate-limit.js";
  */
 export const memberCustomFieldRoutes = new Hono<ClubEnv>();
 
+const readLimiter = rateLimit({ windowMs: 60_000, max: 120, key: (c) => `member-custom-fields-read:${c.get("user")?.id ?? "anonymous"}` });
 const writeLimiter = rateLimit({ windowMs: 60_000, max: 60, key: (c) => `member-custom-fields:${c.get("user")?.id ?? "anonymous"}` });
 const overviewLimiter = rateLimit({ windowMs: 60_000, max: 60, key: (c) => `credential-overview:${c.get("user")?.id ?? "anonymous"}` });
 const jsonLimit = bodyLimit({
@@ -56,6 +57,8 @@ type Mode = "board" | "self" | "guardian";
  * membership and this ward. The row is already scoped to the caller's club by `resolveClubMember`.
  */
 async function isGuardianOf(accountMemberId: string, ward: ClubMemberRow): Promise<boolean> {
+  // A ward who left the club (ausgetreten / ausgeschlossen / verstorben) is out of reach for guardians, like for plain members.
+  if (isLeftStatus(effectiveStatus(ward, todayBerlin()))) return false;
   const [link] = await db.select({ id: guardianLinks.id }).from(guardianLinks).where(and(eq(guardianLinks.guardianMemberId, accountMemberId), eq(guardianLinks.wardClubMemberId, ward.id))).limit(1);
   return link !== undefined;
 }
@@ -80,14 +83,14 @@ async function buildView(c: { get(k: "clubId"): string; get(k: "clubRoleTypes"):
   const valueOf = new Map(values.map((v) => [v.fieldId, v]));
   const viewer = { roleTypes, isSelf };
   const today = todayBerlin();
-  const guardianSees = (d: Pick<FieldDefinition, "sensitive">) => asGuardian && !d.sensitive;
+  const guardianSees = (d: Pick<FieldDefinition, "visibleTo" | "editableBy" | "sensitive" | "archivedAt">) => asGuardian && canGuardianRead(d);
 
   const shown = defs.filter((d) => {
     if (d.archivedAt !== null && !includeArchived) return false;
     if (canReadValue(d, { roleTypes, isSelf: false })) return true;
     // The person itself additionally sees what it may fill in and everything that was recorded about it.
     // A guardian sees the same for the child, but never `sensitive` fields (board only).
-    return (isSelf || guardianSees(d)) && (canSelfWrite(d) || valueOf.has(d.id));
+    return guardianSees(d) || (isSelf && (canSelfWrite(d) || valueOf.has(d.id)));
   });
   const items = shown.map((d) => {
     const stored = canReadValue(d, viewer) || guardianSees(d) ? valueOf.get(d.id) : undefined;
@@ -107,7 +110,7 @@ async function buildView(c: { get(k: "clubId"): string; get(k: "clubRoleTypes"):
       sortOrder: d.sortOrder,
       archived: d.archivedAt !== null,
       archivedAt: d.archivedAt,
-      editable: canBoardWrite(d, roleTypes) || (isSelf && canSelfWrite(d)) || (guardianSees(d) && canSelfWrite(d)),
+      editable: canBoardWrite(d, roleTypes) || (isSelf && canSelfWrite(d)) || (guardianSees(d) && canGuardianWrite(d)),
       value: stored?.value ?? null,
       updatedAt: stored?.updatedAt ?? null,
       // Who recorded the value: the person itself ("self": a declaration the club has not checked) or somebody else ("board").
@@ -147,6 +150,11 @@ async function writeView(
 
   await db.transaction(async (tx) => {
     // FOR SHARE (id order): a concurrent type change / archive / delete of a definition waits for this write.
+    // The guardianship is re-checked under a share lock: a link removed concurrently cannot land a write.
+    if (mode === "guardian") {
+      const [still] = await tx.select({ id: guardianLinks.id }).from(guardianLinks).where(and(eq(guardianLinks.guardianMemberId, c.get("membership").id), eq(guardianLinks.wardClubMemberId, row.id))).for("share");
+      if (!still) throw new ForbiddenError("Missing members:write permission");
+    }
     const defs: FieldDefinition[] = wellFormed.length === 0 ? [] : await tx.select().from(memberFieldDefinitions).where(and(eq(memberFieldDefinitions.clubId, c.get("clubId")), inArray(memberFieldDefinitions.key, wellFormed))).orderBy(memberFieldDefinitions.id).for("share");
     const byKey = new Map(defs.map((d) => [d.key, d]));
     const changes: Array<{ fieldId: string; value: unknown | undefined }> = [];
@@ -155,12 +163,13 @@ async function writeView(
     for (const key of wellFormed) {
       const def = byKey.get(key);
       // Same visibility as the read view, so a key the caller cannot see is indistinguishable from one that does not exist.
-      const visible = def !== undefined && (canReadValue(def, { roleTypes, isSelf: false }) || (mode === "self" && canSelfWrite(def)) || (mode === "guardian" && !def.sensitive && canSelfWrite(def)));
+      const visible = def !== undefined && (canReadValue(def, { roleTypes, isSelf: false }) || (mode === "self" && canSelfWrite(def)) || (mode === "guardian" && canGuardianRead(def)));
       if (!def || def.archivedAt !== null || !visible) {
         errors[key] = "unknown_field";
         continue;
       }
-      if (mode === "board" ? !canBoardWrite(def, roleTypes) : !canSelfWrite(def) || (mode === "guardian" && def.sensitive)) {
+      const allowed = mode === "board" ? canBoardWrite(def, roleTypes) : mode === "guardian" ? canGuardianWrite(def) : canSelfWrite(def);
+      if (!allowed) {
         forbidden = true;
         continue;
       }
@@ -302,7 +311,7 @@ memberCustomFieldRoutes.patch("/me/custom-fields", requireAccountMember, writeLi
 
 // --- a member's values (board / visibility rules) ---------------------------------------------------------------
 
-memberCustomFieldRoutes.get("/:id/custom-fields", async (c) => {
+memberCustomFieldRoutes.get("/:id/custom-fields", readLimiter, async (c) => {
   const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
   // An active guardian of this child (not the board) gets the guardian view: what the child sees, minus sensitive fields.
   const guardian = !canSeeAllMembers(c) && row.memberId !== c.get("membership").id && (await isGuardianOf(c.get("membership").id, row));
@@ -315,10 +324,10 @@ memberCustomFieldRoutes.get("/:id/custom-fields", async (c) => {
  * (`guardian_links`) writes, everybody else gets `403`. The resolved row and mode are handed to the handler.
  */
 type Resolved = { row: ClubMemberRow; mode: "board" | "guardian" };
-const RESOLVED_KEY = "customFieldWrite";
-const setResolved = (c: Context<ClubEnv>, v: Resolved) => (c as unknown as { set(k: string, v: Resolved): void }).set(RESOLVED_KEY, v);
-const getResolved = (c: Context<ClubEnv>) => (c as unknown as { get(k: string): Resolved }).get(RESOLVED_KEY);
-const authorizeWrite = createMiddleware<ClubEnv>(async (c, next) => {
+type WriteEnv = { Variables: ClubEnv["Variables"] & { customFieldWrite: Resolved } } & Omit<ClubEnv, "Variables">;
+const setResolved = (c: Context<WriteEnv>, v: Resolved) => c.set("customFieldWrite", v);
+const getResolved = (c: Context<WriteEnv>) => c.get("customFieldWrite");
+const authorizeWrite = createMiddleware<WriteEnv>(async (c, next) => {
   const clubId = c.get("clubId");
   const boardWrite = hasClubPermission(c.get("clubRoleTypes"), "members:write");
   const row = boardWrite ? await resolveClubMember(clubId, c.req.param("id") ?? "") : await resolveClubMember(clubId, c.req.param("id") ?? "").catch(() => null);
@@ -331,11 +340,11 @@ const authorizeWrite = createMiddleware<ClubEnv>(async (c, next) => {
   await next();
 });
 
-const writeMember = async (c: Context<ClubEnv>, values: Record<string, unknown>) => {
+const writeMember = async (c: Context<WriteEnv>, values: Record<string, unknown>) => {
   const { row, mode } = getResolved(c);
   await writeView(c, row, values, mode);
   return c.json({ data: { clubMemberId: row.id, fields: await buildView(c, row, false, mode === "guardian") } });
 };
 
-memberCustomFieldRoutes.put("/:id/custom-fields", authorizeWrite, writeLimiter, jsonLimit, zValidator("json", writeSchema, validationHook), (c) => writeMember(c, c.req.valid("json").values));
-memberCustomFieldRoutes.patch("/:id/custom-fields", authorizeWrite, writeLimiter, jsonLimit, zValidator("json", writeSchema, validationHook), (c) => writeMember(c, c.req.valid("json").values));
+memberCustomFieldRoutes.put("/:id/custom-fields", writeLimiter, authorizeWrite, jsonLimit, zValidator("json", writeSchema, validationHook), (c) => writeMember(c, c.req.valid("json").values));
+memberCustomFieldRoutes.patch("/:id/custom-fields", writeLimiter, authorizeWrite, jsonLimit, zValidator("json", writeSchema, validationHook), (c) => writeMember(c, c.req.valid("json").values));

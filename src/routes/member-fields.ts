@@ -154,6 +154,7 @@ const moduleDto = (m: ProfileModule, d: FieldDefinition | undefined, lang: Lang 
 
 memberFieldRoutes.get("/catalog", async (c) => {
   requireFormsWrite(c.get("clubRoleTypes"));
+  c.header("Vary", "Accept-Language", { append: true });
   const defs = await listDefinitions(c.get("clubId"));
   const byKey = new Map(defs.map((d) => [d.key, d]));
   const lang = resolveLang(c.req.query("lang"), c.req.header("accept-language"));
@@ -182,6 +183,7 @@ function moduleOr404(id: string): ProfileModule {
 // one is created from the template. An existing definition is NEVER overwritten. Serialised with the manual create route.
 memberFieldRoutes.post("/catalog/:moduleId/activate", async (c) => {
   requireFormsWrite(c.get("clubRoleTypes"));
+  c.header("Vary", "Accept-Language", { append: true });
   const clubId = c.get("clubId");
   const mod = moduleOr404(c.req.param("moduleId"));
   requireSensitiveFor(mod, c.get("clubRoleTypes"));
@@ -211,6 +213,7 @@ memberFieldRoutes.post("/catalog/:moduleId/activate", async (c) => {
 // Archives the definition (the values stay for the record, nobody can read or write them); idempotent.
 memberFieldRoutes.post("/catalog/:moduleId/deactivate", async (c) => {
   requireFormsWrite(c.get("clubRoleTypes"));
+  c.header("Vary", "Accept-Language", { append: true });
   const clubId = c.get("clubId");
   const mod = moduleOr404(c.req.param("moduleId"));
   requireSensitiveFor(mod, c.get("clubRoleTypes"));

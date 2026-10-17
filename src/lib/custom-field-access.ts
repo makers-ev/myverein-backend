@@ -71,3 +71,17 @@ export function canBoardWrite(def: Pick<Access, "sensitive" | "archivedAt">, rol
 export function canSelfWrite(def: Pick<Access, "editableBy" | "archivedAt">): boolean {
   return def.archivedAt === null && def.editableBy === "self";
 }
+
+/**
+ * A guardian (Erziehungsberechtigte) of a child reads what a plain member could see of that child plus what the child may
+ * fill in itself: `editable_by = self` fields and `visible_to = mitglied` fields, never `sensitive` ones and never fields
+ * that are board / Funktionsträger internal (not even their label).
+ */
+export function canGuardianRead(def: Pick<Access, "visibleTo" | "editableBy" | "sensitive" | "archivedAt">): boolean {
+  return def.archivedAt === null && !def.sensitive && (def.editableBy === "self" || def.visibleTo === "mitglied");
+}
+
+/** A guardian writes only what the child itself may write (`editable_by = self`), never `sensitive` fields. */
+export function canGuardianWrite(def: Pick<Access, "editableBy" | "sensitive" | "archivedAt">): boolean {
+  return canSelfWrite(def) && !def.sensitive;
+}

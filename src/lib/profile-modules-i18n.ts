@@ -29,7 +29,7 @@ export const GROUP_LABELS_EN: Record<ModuleGroup, string> = {
 };
 
 const CRED_HELP_EN = "Only tick this if you hold this qualification. The expiry date (valid until) is visible to the board and club officers.";
-const SELF_DECLARED_EN = "Entries made by the person themselves are self-declarations and are not verified; the board can see whether an entry was made by the member or by the board.";
+const SELF_DECLARED_EN = "Entries made by the member themselves or by their guardians are self-declarations and are not verified; the board can see whether an entry was made by the member, by a guardian or by the board.";
 
 type En = { label: string; description: string; helpText?: string };
 
