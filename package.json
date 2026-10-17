@@ -11,6 +11,7 @@
     "db:migrate:runtime": "tsx src/db/migrate.ts",
     "seed:admin": "tsx src/scripts/seed-admin.ts",
     "seed:club": "tsx src/scripts/seed-club.ts",
+    "db:verify-counts": "tsx src/scripts/verify-counts.ts",
     "auth:generate": "better-auth generate --config src/auth/auth.ts --output src/auth/auth-schema.ts -y",
     "lint": "eslint .",
     "test": "vitest run"
@@ -22,8 +23,8 @@
     "better-auth": "^1.6.23",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
-    "hono": "^4.12.27",
-    "nodemailer": "^7.0.13",
+    "hono": "^4.13.13",
+    "nodemailer": "^10.0.9",
     "pg": "^8.22.0",
     "pino": "^10.3.1",
     "resend": "^6.18.1",
@@ -41,6 +42,6 @@
     "tsx": "^4.7.1",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.65.0",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }
