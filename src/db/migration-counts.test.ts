@@ -356,7 +356,8 @@ describe("Wave 7 B12: migration count check on a realistic dataset (0014-0021)",
       if (prev !== null) expect(snap.prevId, e.tag).toBe(prev);
       prev = snap.id;
     }
-    expect(journal.entries.slice(-8).map((e) => e.tag.slice(0, 4))).toEqual(["0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021"]);
+    // Later migrations (Wave 8: 0022+) follow, so the B12 range is addressed by position, not as the tail of the journal.
+    expect(journal.entries.slice(14, 22).map((e) => e.tag.slice(0, 4))).toEqual(["0014", "0015", "0016", "0017", "0018", "0019", "0020", "0021"]);
     const applied = await q<{ n: string }>(`SELECT count(*) AS n FROM drizzle.__drizzle_migrations`);
     expect(Number(applied[0]!.n)).toBe(journal.entries.length);
   });
