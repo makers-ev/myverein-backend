@@ -5,6 +5,7 @@ import { auth } from "../auth/auth.js";
 import { user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { ensureDefaultCalendar } from "../lib/calendar-defaults.js";
 import { ensureClubMember } from "../lib/club-members.js";
 
 /**
@@ -76,6 +77,9 @@ async function main() {
     await db.insert(clubRoles).values({ memberId: membershipId, roleType: "vorsitz" });
     console.log("[seed-club] assigned role vorsitz");
   }
+
+  const calendar = await ensureDefaultCalendar(clubId, { createdBy: adminUser.id, source: "club_creation" });
+  console.log(`[seed-club] default calendar ${calendar?.id ?? "none"}`);
 
   console.log(`[seed-club] done. clubId=${clubId}`);
 }

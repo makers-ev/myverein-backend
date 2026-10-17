@@ -1,5 +1,5 @@
-import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, uuid, boolean, index } from "drizzle-orm/pg-core";
+import { relations, sql } from "drizzle-orm";
+import { pgTable, text, timestamp, uuid, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { user, organization } from "../../auth/auth-schema.js";
 import { departments } from "./departments.js";
@@ -19,12 +19,15 @@ export const calendars = pgTable(
     name: text("name").notNull(),
     isDefault: boolean("is_default").notNull().default(false),
     icalImportUrl: text("ical_import_url"),
-    createdBy: text("created_by")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
+    // NULL once the creating account was deleted (the calendar / event stays, it belongs to the club).
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("calendars_club_id_idx").on(table.clubId)],
+  (table) => [
+    index("calendars_club_id_idx").on(table.clubId),
+    // At most one default calendar per club (the routes unset the old default in the same transaction).
+    uniqueIndex("calendars_one_default_per_club_uidx").on(table.clubId).where(sql`${table.isDefault}`),
+  ],
 );
 
 export const calendarsRelations = relations(calendars, ({ one }) => ({

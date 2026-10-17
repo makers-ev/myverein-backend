@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { withConsent } from "./forms-test-support.js";
 
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -123,7 +124,7 @@ describe("club_members foundation (Wave 7 B2/B3)", () => {
       const apply = await app.request("/club-members/apply", {
         method: "POST",
         headers: { cookie: applicant.cookie, "content-type": "application/json", "x-forwarded-for": randomUUID() },
-        body: JSON.stringify({ clubId: clubA, category: "jugend", birthDate: "2012-04-05" }),
+        body: JSON.stringify(withConsent({ clubId: clubA, category: "jugend", birthDate: "2012-04-05" })),
       });
       expect(apply.status).toBe(201);
       const applicationId = ((await apply.json()) as { data: { application: { id: string } } }).data.application.id;

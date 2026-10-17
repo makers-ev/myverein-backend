@@ -1,0 +1,3 @@
+DROP INDEX "club_applications_pending_user_club_uidx";--> statement-breakpoint
+ALTER TABLE "club_applications" ADD COLUMN "on_behalf_of" text DEFAULT 'self' NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "club_applications_pending_user_club_uidx" ON "club_applications" USING btree ("user_id","club_id") WHERE "club_applications"."status" = 'pending' AND "club_applications"."on_behalf_of" = 'self';

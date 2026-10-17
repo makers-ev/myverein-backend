@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { withConsent } from "./forms-test-support.js";
 
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -386,7 +387,7 @@ describe("exit workflow (B6)", () => {
       const apply = await app.request("/club-members/apply", {
         method: "POST",
         headers: { cookie: m.cookie, "content-type": "application/json", "x-forwarded-for": randomUUID() },
-        body: JSON.stringify({ clubSlug, category: "passiv" }),
+        body: JSON.stringify(withConsent({ clubSlug, category: "passiv" })),
       });
       expect(apply.status).toBe(201);
       const application = (await data(apply)).application as Json;
@@ -403,7 +404,7 @@ describe("exit workflow (B6)", () => {
       const again = await app.request("/club-members/apply", {
         method: "POST",
         headers: { cookie: m.cookie, "content-type": "application/json", "x-forwarded-for": randomUUID() },
-        body: JSON.stringify({ clubSlug }),
+        body: JSON.stringify(withConsent({ clubSlug })),
       });
       expect(again.status).toBe(409);
     });
@@ -475,7 +476,7 @@ describe("exit workflow (B6)", () => {
       const apply = await app.request("/club-members/apply", {
         method: "POST",
         headers: { cookie: victim.cookie, "content-type": "application/json", "x-forwarded-for": randomUUID() },
-        body: JSON.stringify({ clubSlug }),
+        body: JSON.stringify(withConsent({ clubSlug })),
       });
       expect(apply.status).toBe(409);
       expect(((await body(apply)).error.details as Json).code).toBe("member_rejoin_blocked");

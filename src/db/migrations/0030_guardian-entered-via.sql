@@ -1,0 +1,1 @@
+ALTER TABLE "member_field_values" ADD COLUMN "entered_via" text;

@@ -9,6 +9,7 @@ import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrations, REGISTRATION_STATUSES, type ClubRegistrationRow } from "../db/schema/club-registrations.js";
+import { ensureDefaultCalendar } from "../lib/calendar-defaults.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import {
   inBackground,
@@ -302,6 +303,8 @@ adminClubRegistrationRoutes.post("/:id/approve", async (c) => {
       const founder = await ensureClubMember(tx, owner, { categoryKey: "aktiv", joinedAt: todayBerlin() });
       const memberNumber = founder.memberNumber;
       await tx.insert(clubRoles).values({ memberId: owner.id, roleType: reg.claimedRole });
+      // Every club starts with its club-wide standard calendar, so events can be created from day one.
+      await ensureDefaultCalendar(org.id, { createdBy: reg.userId, source: "club_creation", executor: tx });
 
       await tx.insert(auditLog).values({
         eventType: "club_registration.approve",

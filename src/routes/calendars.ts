@@ -9,9 +9,10 @@ import { auditLog } from "../db/schema/audit-log.js";
 import { calendarVisibility } from "../db/schema/calendar-visibility.js";
 import { calendars } from "../db/schema/calendars.js";
 import { departments } from "../db/schema/departments.js";
+import { ensureClubHasCalendar, lockClubCalendars } from "../lib/calendar-defaults.js";
 import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
-import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -34,6 +35,7 @@ calendarRoutes.get("/", async (c) => {
   const roleTypes = c.get("clubRoleTypes");
 
   if (hasClubPermission(roleTypes, "calendars:write")) {
+    await ensureClubHasCalendar(clubId, { createdBy: c.get("user").id });
     const rows = await db.query.calendars.findMany({ where: eq(calendars.clubId, clubId), orderBy: (cal, { asc }) => [asc(cal.name)] });
     return c.json({ data: rows });
   }
@@ -60,6 +62,12 @@ calendarRoutes.get("/:id", async (c) => {
 
   return c.json({ data: row });
 });
+
+function defaultRequired(): ConflictError {
+  return new ConflictError("The default club calendar cannot be deleted, unset or moved to a department; make another calendar the default first", {
+    details: { code: "default_calendar_required" },
+  });
+}
 
 const createCalendarSchema = z.object({
   name: z.string().min(1).max(200),
@@ -90,12 +98,15 @@ calendarRoutes.post(
     }
 
     const row = await db.transaction(async (tx) => {
+      await lockClubCalendars(tx, clubId);
+      // A club's first calendar is the standard calendar: make sure it exists before adding a custom one.
+      await ensureClubHasCalendar(clubId, { createdBy: currentUser.id, executor: tx });
       // Exactly one default per club -- unset every other calendar's flag first.
       if (body.isDefault) {
         await tx.update(calendars).set({ isDefault: false }).where(eq(calendars.clubId, clubId));
       }
       const [created] = await tx.insert(calendars).values({ clubId, createdBy: currentUser.id, ...body }).returning();
-      await tx.insert(auditLog).values({ eventType: "calendar.create", subjectId: created.id, payload: { clubId, name: created.name } });
+      await tx.insert(auditLog).values({ eventType: "calendar.create", subjectId: created.id, payload: { clubId, calendarId: created.id } });
       return created;
     });
 
@@ -135,6 +146,14 @@ calendarRoutes.patch(
     }
 
     const row = await db.transaction(async (tx) => {
+      await lockClubCalendars(tx, clubId);
+      const [current] = await tx.select().from(calendars).where(and(eq(calendars.id, id), eq(calendars.clubId, clubId)));
+      if (!current) throw new NotFoundError("Calendar not found");
+      // Every club has exactly one default: the default calendar stays the default (and club-wide) -- the board makes
+      // ANOTHER calendar the default instead, which then takes the status away from this one.
+      if (current.isDefault && (body.isDefault === false || body.departmentId)) {
+        throw defaultRequired();
+      }
       if (body.isDefault) {
         await tx.update(calendars).set({ isDefault: false }).where(and(eq(calendars.clubId, clubId), ne(calendars.id, id)));
       }
@@ -146,7 +165,7 @@ calendarRoutes.patch(
       return updated;
     });
 
-    await db.insert(auditLog).values({ eventType: "calendar.update", subjectId: id, payload: { clubId, changes: body } });
+    await db.insert(auditLog).values({ eventType: "calendar.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body) } });
 
     return c.json({ data: row });
   },
@@ -163,8 +182,14 @@ calendarRoutes.delete("/:id", async (c) => {
   const existing = await db.query.calendars.findFirst({ where: and(eq(calendars.id, id), eq(calendars.clubId, clubId)) });
   if (!existing) throw new NotFoundError("Calendar not found");
 
-  await db.delete(calendars).where(and(eq(calendars.id, id), eq(calendars.clubId, clubId)));
-  await db.insert(auditLog).values({ eventType: "calendar.delete", subjectId: id, payload: { clubId } });
+  await db.transaction(async (tx) => {
+    await lockClubCalendars(tx, clubId);
+    const [current] = await tx.select().from(calendars).where(and(eq(calendars.id, id), eq(calendars.clubId, clubId)));
+    if (!current) throw new NotFoundError("Calendar not found");
+    if (current.isDefault) throw defaultRequired();
+    await tx.delete(calendars).where(and(eq(calendars.id, id), eq(calendars.clubId, clubId)));
+    await tx.insert(auditLog).values({ eventType: "calendar.delete", subjectId: id, payload: { clubId } });
+  });
 
   return c.body(null, 204);
 });

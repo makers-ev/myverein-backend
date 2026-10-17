@@ -10,6 +10,8 @@ import { auth } from "../auth/auth.js";
 import { member, organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { calendarVisibility } from "../db/schema/calendar-visibility.js";
+import { calendars } from "../db/schema/calendars.js";
 import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrationDocuments, clubRegistrations } from "../db/schema/club-registrations.js";
@@ -648,6 +650,13 @@ describe("club registrations (Wave 6)", () => {
       const categories = await db.select().from(memberCategories).where(eq(memberCategories.clubId, data.club.id));
       expect(categories.map((c) => c.key).sort()).toEqual(["aktiv", "ehrenmitglied", "foerdernd", "jugend", "passiv"]);
       expect(categories.find((c) => c.id === clubMember?.categoryId)?.key).toBe("aktiv");
+
+      // The approval created the club-wide standard calendar (not lazily): default, no department, visible to `mitglied`.
+      const cals = await db.select().from(calendars).where(eq(calendars.clubId, data.club.id));
+      expect(cals).toHaveLength(1);
+      expect(cals[0]).toMatchObject({ name: "Vereinskalender", isDefault: true, departmentId: null, createdBy: founder.userId });
+      const grants = await db.select().from(calendarVisibility).where(eq(calendarVisibility.calendarId, cals[0]!.id));
+      expect(grants.map((g) => g.roleType)).toEqual(["mitglied"]);
 
       const row = await db.query.clubRegistrations.findFirst({ where: eq(clubRegistrations.id, reg.id) });
       expect(row?.reviewedBy).toBe(admin.userId);

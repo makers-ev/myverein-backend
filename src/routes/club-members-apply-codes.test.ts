@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { withConsent } from "./forms-test-support.js";
 
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -36,7 +37,7 @@ async function signUp(label: string): Promise<Actor> {
 }
 
 const apply = (who: Actor, body: object) =>
-  app.request("/club-members/apply", { method: "POST", headers: { cookie: who.cookie, "content-type": "application/json", "x-forwarded-for": randomUUID() }, body: JSON.stringify(body) });
+  app.request("/club-members/apply", { method: "POST", headers: { cookie: who.cookie, "content-type": "application/json", "x-forwarded-for": randomUUID() }, body: JSON.stringify(withConsent(body)) });
 const decide = (who: Actor, clubId: string, id: string, action: "approve" | "reject") =>
   app.request(`/club-applications/${id}/${action}?clubId=${clubId}`, { method: "POST", headers: { cookie: who.cookie, "content-type": "application/json", "x-forwarded-for": randomUUID() }, body: action === "reject" ? JSON.stringify({ note: "Nein" }) : "{}" });
 
@@ -134,7 +135,7 @@ describe("POST /club-members/apply error codes (B15)", () => {
     const who = await newApplicant("misc");
     expect((await apply(who, { clubSlug: `no-such-club-${suffix}` })).status).toBe(404);
     expect((await apply(who, {})).status).toBe(422);
-    const anon = await app.request("/club-members/apply", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clubId }) });
+    const anon = await app.request("/club-members/apply", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(withConsent({ clubId })) });
     expect(anon.status).toBe(401);
   });
 });

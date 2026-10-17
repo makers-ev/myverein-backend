@@ -25,9 +25,8 @@ export const events = pgTable(
     category: text("category"),
     capacity: integer("capacity"),
     locationId: uuid("location_id").references(() => locations.id, { onDelete: "set null" }),
-    createdBy: text("created_by")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
+    // NULL once the creating account was deleted (the calendar / event stays, it belongs to the club).
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

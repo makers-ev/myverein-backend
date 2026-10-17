@@ -51,7 +51,8 @@ export type ClubPermission =
   | "meetings:read_board" // read Vorstandssitzungen (incl. minutes, resolutions, attendance) without being invited
   | "locations:read_access" // read key holders, access notes and 'vorstand'-level wifi/links
   | "inventory:write" // manage inventory items/loans/damage reports
-  | "club_stats:read"; // association KPIs (GET /club-stats): counts only, board roles
+  | "club_stats:read" // association KPIs (GET /club-stats): counts only, board roles
+  | "forms:write"; // form builder (Wave 8): create/edit/publish/archive forms of the club
 
 /**
  * Which permissions each role_type grants. A membership can hold several
@@ -80,6 +81,7 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "meetings:read_board",
     "locations:read_access",
     "club_stats:read",
+    "forms:write",
   ],
   stellv_vorsitz: [
     "members:write",
@@ -94,11 +96,12 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "meetings:read_board",
     "locations:read_access",
     "club_stats:read",
+    "forms:write",
   ],
   kassenwart: ["members:read_sensitive", "club_stats:read"],
   // A schriftfuehrer's real-world job in a German Verein is literally running
   // meeting agendas/Protokolle, so meetings:write is a natural fit here.
-  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read"],
+  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write"],
   // Beisitzer sit on the board, so they may read Vorstandssitzungen and the club KPIs (but write nothing).
   beisitzer: ["meetings:read_board", "club_stats:read"],
   // Also calendars:write/locations:write/inventory:write, on top of

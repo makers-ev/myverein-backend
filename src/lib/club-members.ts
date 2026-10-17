@@ -14,11 +14,11 @@ type MemberAccountRow = Pick<typeof member.$inferSelect, "id" | "organizationId"
 
 /** The five categories every club gets (Wave 7 B2). Names are German UI labels; `key` is the stable identifier. */
 export const DEFAULT_CATEGORIES = [
-  { key: "aktiv", name: "Aktiv", votingRight: true, sortOrder: 0 },
-  { key: "passiv", name: "Passiv", votingRight: true, sortOrder: 1 },
-  { key: "foerdernd", name: "Fördernd", votingRight: false, sortOrder: 2 },
-  { key: "ehrenmitglied", name: "Ehrenmitglied", votingRight: true, sortOrder: 3 },
-  { key: "jugend", name: "Jugend", votingRight: false, sortOrder: 4 },
+  { key: "aktiv", name: "Aktiv", votingRight: true, applicantSelectable: true, sortOrder: 0 },
+  { key: "passiv", name: "Passiv", votingRight: true, applicantSelectable: true, sortOrder: 1 },
+  { key: "foerdernd", name: "Fördernd", votingRight: false, applicantSelectable: true, sortOrder: 2 },
+  { key: "ehrenmitglied", name: "Ehrenmitglied", votingRight: true, applicantSelectable: false, sortOrder: 3 },
+  { key: "jugend", name: "Jugend", votingRight: false, applicantSelectable: true, sortOrder: 4 },
 ] as const;
 
 export const DEFAULT_CATEGORY_KEY = "aktiv";
@@ -45,6 +45,17 @@ export async function findCategoryByKey(executor: DbExecutor, clubId: string, ke
   const row = await executor.query.memberCategories.findFirst({
     where: and(eq(memberCategories.clubId, clubId), eq(memberCategories.key, key.trim().toLowerCase())),
   });
+  return row ?? null;
+}
+
+/**
+ * Share-locks one category of a club (by id or key) for the rest of the transaction, so a concurrent archive (which
+ * locks all categories of the club first) cannot slip in between the check and the use. Lock order everywhere:
+ * categories -> member rows -> organization row. Returns the row (possibly archived) or null.
+ */
+export async function lockCategoryShared(tx: DbExecutor, clubId: string, ref: { id: string } | { key: string }): Promise<MemberCategoryRow | null> {
+  const where = "id" in ref ? and(eq(memberCategories.id, ref.id), eq(memberCategories.clubId, clubId)) : and(eq(memberCategories.clubId, clubId), eq(memberCategories.key, ref.key.trim().toLowerCase()));
+  const [row] = await tx.select().from(memberCategories).where(where).for("share");
   return row ?? null;
 }
 

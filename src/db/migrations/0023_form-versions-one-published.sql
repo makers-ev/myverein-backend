@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "form_versions_one_published_uidx" ON "form_versions" USING btree ("form_id") WHERE "form_versions"."status" = 'published';

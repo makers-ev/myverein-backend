@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { withConsent } from "./forms-test-support.js";
 
 import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
@@ -60,7 +61,7 @@ describe("club-applications decision queue", () => {
     return app.request("/club-members/apply", {
       method: "POST",
       headers: { cookie: applicant.cookie, ...json },
-      body: JSON.stringify({ clubId, ...body }),
+      body: JSON.stringify(withConsent({ clubId, ...body })),
     });
   }
 

@@ -2,11 +2,13 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 import { auth } from "./auth/auth.js";
 import { closeDatabase } from "./db/client.js";
 import { AppError, toAppError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
+import { startFormDraftSweeper } from "./lib/form-sweeper.js";
 import { startMediaSweeper } from "./lib/media.js";
 import { type LoggerEnv, requestId } from "./middleware/request-id.js";
 import { adminClubRegistrationRoutes } from "./routes/admin-club-registrations.js";
@@ -19,6 +21,7 @@ import { availabilityRoutes } from "./routes/availability.js";
 import { calendarRoutes } from "./routes/calendars.js";
 import { clubApplicationRoutes } from "./routes/club-applications.js";
 import { clubRegistrationRoutes } from "./routes/club-registrations.js";
+import { clubFormRoutes } from "./routes/club-forms.js";
 import { clubInfoRoutes } from "./routes/club-info.js";
 import { clubExitRequestRoutes } from "./routes/club-exit-requests.js";
 import { clubMemberRoutes } from "./routes/club-members.js";
@@ -26,10 +29,13 @@ import { clubSettingsRoutes } from "./routes/club-settings.js";
 import { clubStatsRoutes } from "./routes/club-stats.js";
 import { departmentRoutes } from "./routes/departments.js";
 import { eventRoutes, icsRoutes } from "./routes/events.js";
+import { formRoutes } from "./routes/forms.js";
+import { formSubmissionRoutes } from "./routes/form-submissions.js";
 import { healthRoutes } from "./routes/health.js";
 import { inventoryItemRoutes } from "./routes/inventory-items.js";
 import { locationRoutes } from "./routes/locations.js";
 import { mediaRoutes } from "./routes/media.js";
+import { memberFieldRoutes } from "./routes/member-fields.js";
 import { meetingRoutes } from "./routes/meetings.js";
 import { myClubRoutes } from "./routes/my-clubs.js";
 import { internalStatsRoutes } from "./routes/internal-stats.js";
@@ -71,7 +77,7 @@ app.onError((err, c) => {
   if (!(err instanceof AppError)) {
     c.get("logger").error({ err }, "unhandled error");
   }
-  return c.json(appError.toJSON(), appError.status as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 503);
+  return c.json(appError.toJSON(), appError.status as ContentfulStatusCode);
 });
 
 // Better Auth owns everything under /api/auth/* -- sign-up, sign-in,
@@ -96,6 +102,10 @@ app.route("/club-stats", clubStatsRoutes);
 app.route("/club-settings", clubSettingsRoutes);
 app.route("/club-exit-requests", clubExitRequestRoutes);
 app.route("/club-applications", clubApplicationRoutes);
+app.route("/forms", formRoutes);
+app.route("/member-fields", memberFieldRoutes);
+app.route("/club-forms", clubFormRoutes);
+app.route("/form-submissions", formSubmissionRoutes);
 app.route("/departments", departmentRoutes);
 app.route("/club-info", clubInfoRoutes);
 app.route("/calendars", calendarRoutes);
@@ -115,6 +125,8 @@ const hostname = process.env.BIND_HOST ?? "127.0.0.1";
 
 // Unused uploads (POST /media files no feature row claimed) are removed after MEDIA_UNATTACHED_TTL_HOURS.
 const stopMediaSweeper = startMediaSweeper();
+// Abandoned application drafts (and their files) are removed after FORM_DRAFT_TTL_DAYS of inactivity.
+const stopFormDraftSweeper = startFormDraftSweeper();
 
 const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
   logger.info(`Server is running on http://${hostname}:${info.port}`);
@@ -123,6 +135,7 @@ const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
 async function shutdown(signal: string) {
   logger.info(`[shutdown] received ${signal}, closing server`);
   stopMediaSweeper();
+  stopFormDraftSweeper();
   server.close(async () => {
     await closeDatabase();
     process.exit(0);

@@ -3,6 +3,7 @@ import { date, index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzl
 
 import { member } from "../../auth/auth-schema.js";
 import { clubMembers } from "./club-members.js";
+import { formSubmissions } from "./forms.js";
 
 export const EXIT_KINDS = ["cancellation", "exclusion"] as const;
 export const EXIT_STATUSES = ["pending", "approved", "rejected", "withdrawn"] as const;
@@ -27,6 +28,8 @@ export const clubExitRequests = pgTable(
     decidedBy: text("decided_by").references(() => member.id, { onDelete: "set null" }),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     decisionNote: text("decision_note"),
+    // Wave 8: the filled-in exit form (NULL for requests without a form). Notice periods stay in club_settings.
+    formSubmissionId: uuid("form_submission_id").references(() => formSubmissions.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

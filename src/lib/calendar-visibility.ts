@@ -4,6 +4,7 @@ import { db } from "../db/client.js";
 import { calendars } from "../db/schema/calendars.js";
 import { calendarVisibility, type CalendarVisibilityRow } from "../db/schema/calendar-visibility.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { ensureClubHasCalendar } from "./calendar-defaults.js";
 import { hasClubPermission } from "./club-permissions.js";
 
 /**
@@ -53,8 +54,13 @@ export async function isCalendarVisible(calendarId: string, memberId: string, cl
 
 /** All calendar ids in `clubId` visible to the caller. */
 export async function getVisibleCalendarIds(clubId: string, memberId: string, clubRoleTypes: readonly string[]): Promise<string[]> {
-  const clubCalendars = await db.query.calendars.findMany({ where: eq(calendars.clubId, clubId) });
-  if (clubCalendars.length === 0) return [];
+  let clubCalendars = await db.query.calendars.findMany({ where: eq(calendars.clubId, clubId) });
+  if (clubCalendars.length === 0) {
+    // A club that never got a calendar gets its default now (lazy path), instead of staying calendar-less.
+    await ensureClubHasCalendar(clubId);
+    clubCalendars = await db.query.calendars.findMany({ where: eq(calendars.clubId, clubId) });
+    if (clubCalendars.length === 0) return [];
+  }
   if (hasClubPermission(clubRoleTypes, "calendars:write")) return clubCalendars.map((cal) => cal.id);
 
   const grants = await db.query.calendarVisibility.findMany({

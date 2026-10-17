@@ -22,22 +22,34 @@ import {
   type MemberCategoryRow,
 } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { memberFieldValues } from "../db/schema/forms.js";
 import { departments } from "../db/schema/departments.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { ASSIGNABLE_ROLE_TYPES, IMPLICIT_ROLE_TYPE, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
 import { DEFAULT_CATEGORY_KEY, type DbExecutor, ensureClubMember, ensureDefaultCategories, isUuid, markDetachedMembersLeft, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
+import { cleanText, isCleanText } from "../lib/text-policy.js";
 import { createInvite, previewInvite, acceptInvite, unlinkAccount } from "../lib/member-invites.js";
 import { sendEmail } from "../lib/email.js";
 import { APP_NAME, buildMemberInviteEmail, LOGO_CID, LOGO_PATH, SITE_URL } from "../lib/emailTemplate.js";
 import { clubMemberInvites, type ClubMemberInviteRow } from "../db/schema/club-member-invites.js";
-import { COUNTED_STATUSES, effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
+import { effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
+import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "../lib/member-read-scope.js";
 import { findMemberPhotoMedia, canSeeMemberPhoto, isMinor, memberPhotoUrls, removeMemberPhoto, replaceMemberPhoto, type PhotoCaller } from "../lib/member-photos.js";
 import { MAX_PHOTO_BYTES, streamMedia } from "../lib/media.js";
 import { buildCsv, importMaxBytes } from "../lib/member-csv.js";
 import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADERS, importFingerprint, importTokenDuplicates, importTokenId, verifyImportToken } from "../lib/member-import.js";
 import { nextMemberNumber } from "../lib/member-number.js";
+import { memberCustomFieldRoutes } from "./club-member-custom-fields.js";
+import { applicationPendingError } from "../lib/form-applications.js";
+import type { FormField } from "../lib/form-schema.js";
+import { ANSWERS_BODY_LIMIT, applicantCategories, assertMayApply, ensureFormBasics, findCurrentForm, submissionsPerHour } from "../lib/forms.js";
+import { applyWithForm } from "./form-submissions.js";
+import { closeExitSubmission } from "../lib/form-exit.js";
+import { canReadValue } from "../lib/custom-field-access.js";
+import { formatCredential } from "../lib/credentials.js";
+import { listDefinitions, MAX_CUSTOM_FIELDS_PER_CLUB } from "../lib/custom-fields.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -132,6 +144,8 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: PhotoCaller, forc
             email: account?.email ?? null,
             contactEmail: row.contactEmail,
             memberNumber: row.memberNumber,
+            firstName: row.firstName,
+            lastName: row.lastName,
             birthDate: row.birthDate,
             street: row.street,
             postalCode: row.postalCode,
@@ -228,13 +242,16 @@ async function lockClubCategories(tx: DbExecutor, clubId: string, mode: "update"
 // --- Aufnahmeantrag ---------------------------------------------------
 // Session-only (no clubGuard -- the applicant isn't a member yet).
 //
-// Writes ONLY to club_applications (status "pending"); no member /
-// club_memberships row is created here. A board member with `members:write`
-// decides via /club-applications (approve creates the member + membership,
-// reject leaves no trace besides the decided application row). This replaces
-// the Wave 1 simplification of granting membership immediately. A user may
-// re-apply after a rejection, but never hold two pending applications for the
-// same club (partial unique index).
+// Writes ONLY to club_applications (status "pending") and, with the form builder (Wave 8 B6), to form_submissions; no
+// member / club_memberships row is created here. A board member with `members:write` decides via /club-applications
+// (approve creates the member + membership and applies the form mapping, reject leaves no trace besides the decided
+// application row). A user may re-apply after a rejection, but never hold two pending applications for the same club
+// (partial unique index).
+//
+// Three shapes of the body:
+//  - `submissionId` (+ optional `answers`): file an application form the client built up via /form-submissions;
+//  - `answers` (+ optional `formVersionId`): fill in and file the club's published application form in one request;
+//  - neither (old clients): the legacy `category` / `birthDate` application -- no answers, no consent record.
 const applySchema = z
   .object({
     // clubId (raw organization id) or clubSlug (human-shareable, e.g. a
@@ -244,12 +261,26 @@ const applySchema = z
     clubSlug: z.string().min(1).optional(),
     category: z.enum(["aktiv", "passiv", "foerdernd", "ehrenmitglied", "jugend"]).default("aktiv"),
     birthDate: z.string().date().optional(),
+    answers: z.unknown().optional(),
+    formVersionId: z.uuid().optional(),
+    submissionId: z.uuid().optional(),
+    // 'guardian': a parent applies for a child (Wave 8 B8); needs answers or a submissionId, never the legacy shape.
+    onBehalfOf: z.enum(["self", "guardian"]).optional(),
   })
   .refine((body) => body.clubId ?? body.clubSlug, { message: "clubId or clubSlug is required" });
+
+const applyBodyLimit = bodyLimit({
+  maxSize: ANSWERS_BODY_LIMIT,
+  onError: () => {
+    throw new ValidationError("Request body too large");
+  },
+});
+const formApplyLimiter = rateLimit({ windowMs: 60 * 60_000, max: submissionsPerHour(), key: (c) => `club-apply-form:${c.get("user")?.id ?? "anonymous"}` });
 
 clubMemberRoutes.post(
   "/apply",
   sessionGuard,
+  applyBodyLimit,
   zValidator("json", applySchema, (result) => {
     if (!result.success) throw new ValidationError("Invalid request body", { details: result.error.issues });
   }),
@@ -257,46 +288,61 @@ clubMemberRoutes.post(
     const currentUser = c.get("user");
     const body = c.req.valid("json");
 
-    const clubId = body.clubId ?? (await db.query.organization.findFirst({ where: eq(organization.slug, body.clubSlug!) }))?.id;
+    const clubId = (await db.query.organization.findFirst({ where: body.clubId ? eq(organization.id, body.clubId) : eq(organization.slug, body.clubSlug!), columns: { id: true } }))?.id;
     if (!clubId) throw new NotFoundError("Club not found");
 
-    const existing = await db.query.member.findFirst({
-      where: and(eq(member.organizationId, clubId), eq(member.userId, currentUser.id)),
-    });
-    if (existing) {
-      // A former member (cancelled: ausgetreten) keeps the account membership row but lost access (clubGuard); they may
-      // re-apply and the board decides. Excluded / deceased persons need a reopen by the board first.
-      const own = await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, existing.id) });
-      const state = own ? effectiveStatus(own, todayBerlin()) : null;
-      if (state === "ausgeschlossen" || state === "verstorben") {
-        throw new ConflictError("This person was excluded from the club or is marked deceased; the member must be reopened by the board before re-joining", {
-          details: { code: "member_rejoin_blocked", clubMemberId: own!.id, status: state },
+    // Hourly per-user limit for every shape (an application creates rows and, with answers, a submission).
+    await formApplyLimiter(c, async () => undefined);
+
+    if (body.submissionId !== undefined || body.answers !== undefined || body.formVersionId !== undefined || body.onBehalfOf === "guardian") {
+      if (body.submissionId === undefined && body.answers === undefined) throw new ValidationError("answers or submissionId is required together with formVersionId or onBehalfOf");
+      const filed = await applyWithForm({
+        userId: currentUser.id,
+        clubId,
+        formVersionId: body.formVersionId,
+        answers: body.answers,
+        submissionId: body.submissionId,
+        onBehalfOf: body.onBehalfOf,
+        emailVerified: currentUser.emailVerified === true,
+      });
+      if (filed.created) {
+        await db.insert(auditLog).values({
+          eventType: "club_member.apply",
+          subjectId: filed.application.id,
+          payload: { clubId, userId: currentUser.id, formSubmissionId: filed.submission.id, formVersionId: filed.submission.formVersionId, onBehalfOf: filed.submission.onBehalfOf },
         });
       }
-      if (state !== "ausgetreten") {
-        throw new ConflictError("Already a member of this club", { code: "ALREADY_MEMBER", details: { clubId, ...(own ? { clubMemberId: own.id } : {}) } });
-      }
+      return c.json(
+        { data: { application: filed.application, submission: { id: filed.submission.id, status: filed.submission.status, formVersionId: filed.submission.formVersionId, onBehalfOf: filed.submission.onBehalfOf }, warnings: filed.warnings } },
+        filed.created ? 201 : 200,
+      );
     }
 
-    // Distinguishable from ALREADY_MEMBER so clients can say "your application is being reviewed". Details only carry
-    // the caller's OWN application.
-    const pendingFor = () => db.query.clubApplications.findFirst({ where: and(eq(clubApplications.userId, currentUser.id), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending")) });
-    const pendingError = (pending: { id: string; createdAt: Date }) =>
-      new ConflictError("An application for this club is already pending", { code: "APPLICATION_PENDING", details: { clubId, applicationId: pending.id, submittedAt: pending.createdAt } });
-    const alreadyPending = await pendingFor();
-    if (alreadyPending) throw pendingError(alreadyPending);
-
+    // Legacy application (old clients). Same preconditions as the form path, under the same per-(user, club) lock so
+    // parallel applies, submits and withdrawals of one user serialize.
+    await ensureFormBasics(clubId);
+    // The club's published form asks for a consent (the standard form does, and a published application form must): the old
+    // category/birthDate request cannot carry it, so the client has to render the form. Legacy only for a club whose form
+    // explicitly has no mandatory consent.
+    const current = await findCurrentForm(clubId, "aufnahme");
+    if (current && (current.version.fields as FormField[]).some((f) => f.type === "consent" && f.required === true)) {
+      throw new ConflictError("This club's application needs the application form (with the privacy consent); update the app or website", { details: { code: "form_required", formVersionId: current.version.id } });
+    }
     let application;
     try {
-      [application] = await db
-        .insert(clubApplications)
-        .values({ userId: currentUser.id, clubId, category: body.category, birthDate: body.birthDate })
-        .returning();
+      application = await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`form-submission:${currentUser.id}:${clubId}`}, 0))`);
+        await assertMayApply(tx, clubId, currentUser.id);
+        // Only categories an applicant may choose (like in the form), so "ehrenmitglied" cannot be self-assigned.
+        if (!(await applicantCategories(clubId, tx)).some((k) => k.key === body.category)) throw new ValidationError("This category cannot be chosen when applying", { details: { fields: { category: "not_an_option" } } });
+        const [row] = await tx.insert(clubApplications).values({ userId: currentUser.id, clubId, category: body.category, birthDate: body.birthDate }).returning();
+        return row!;
+      });
     } catch (err) {
       if (isUniqueViolation(err)) {
         // Lost a race against a parallel apply of the same user.
-        const raced = await pendingFor();
-        throw raced ? pendingError(raced) : new ConflictError("An application for this club is already pending", { code: "APPLICATION_PENDING", details: { clubId } });
+        const raced = await db.query.clubApplications.findFirst({ where: and(eq(clubApplications.userId, currentUser.id), eq(clubApplications.clubId, clubId), eq(clubApplications.status, "pending")) });
+        throw applicationPendingError({ clubId, ...(raced ? { applicationId: raced.id, submittedAt: raced.createdAt } : {}) });
       }
       throw err;
     }
@@ -304,7 +350,7 @@ clubMemberRoutes.post(
     await db.insert(auditLog).values({
       eventType: "club_member.apply",
       subjectId: application.id,
-      payload: { clubId, userId: currentUser.id, category: body.category },
+      payload: { clubId, userId: currentUser.id, category: body.category, legacy: true },
     });
 
     return c.json({ data: { application } }, 201);
@@ -317,8 +363,16 @@ clubMemberRoutes.post(
 
 const inviteSessionLimit = rateLimit({ windowMs: 60_000, max: 20, key: (c) => `invite-token:${c.get("user")?.id ?? "anonymous"}` });
 
+// Preferred: the token travels in the JSON body (not in URLs, access logs or browser history).
+clubMemberRoutes.post("/invites/preview", sessionGuard, inviteSessionLimit, zValidator("json", z.object({ token: z.string().min(16).max(200) }), validationHook), async (c) => {
+  const preview = await previewInvite(c.req.valid("json").token, c.get("user").email);
+  return c.json({ data: preview });
+});
+
+/** @deprecated Token in the query string; use POST /invites/preview. Same response. */
 clubMemberRoutes.get("/invites/preview", sessionGuard, inviteSessionLimit, zValidator("query", z.object({ token: z.string().min(16).max(200) }), validationHook), async (c) => {
   const preview = await previewInvite(c.req.valid("query").token, c.get("user").email);
+  c.header("Deprecation", "true");
   return c.json({ data: preview });
 });
 
@@ -345,7 +399,21 @@ clubMemberRoutes.get("/me", async (c) => {
   return c.json({ data: { ...shaped, clubMemberId: row.id, permissions: clubPermissionsFor(c.get("clubRoleTypes")) } });
 });
 
+/** Name parts a person types about themself: same as `optText(100)` plus the shared clean-text policy (no control/bidi characters). */
+const optCleanName = z
+  .string()
+  .trim()
+  .max(100)
+  .refine((v) => isCleanText(v), { message: "contains characters that are not allowed (control or bidi characters)" })
+  .nullable()
+  .optional()
+  .transform((v) => (v === "" ? null : v));
+
 const updateSelfSchema = z.object({
+  firstName: optCleanName,
+  lastName: optCleanName,
+  // An explicit display name for a person without split names (or a different spelling); cannot be cleared.
+  displayName: cleanText(z.string().trim().min(1).max(200)).optional(),
   birthDate: optDate,
   emergencyContactName: optText(200),
   emergencyContactPhone: optText(50),
@@ -363,16 +431,40 @@ function definedOnly<T extends Record<string, unknown>>(body: T): Partial<T> {
 
 clubMemberRoutes.patch("/me", zValidator("json", updateSelfSchema, validationHook), async (c) => {
   const membership = c.get("membership");
+  const clubId = c.get("clubId");
   const changes = definedOnly(c.req.valid("json"));
 
   const current = await ensureClubMember(db, membership);
-  const [updated] = await db
-    .update(clubMembers)
-    .set({ ...changes, updatedAt: new Date() })
-    .where(eq(clubMembers.id, current.id))
-    .returning();
+  const updated = await db.transaction(async (tx) => {
+    const [locked] = await tx.select().from(clubMembers).where(eq(clubMembers.id, current.id)).for("update");
+    if (!locked) throw new NotFoundError("Member not found");
 
-  return c.json({ data: await shapeOne(updated!, callerOf(c), true) });
+    // Display name, same rule as the application mapping (lib/form-applications.ts): both names present -> "First Last";
+    // clearing a name or sending only one while the other is empty keeps the previous display name. An explicit
+    // displayName wins. (Key-holder history keeps its own name snapshots and is never rewritten.)
+    const set: Partial<typeof clubMembers.$inferInsert> = { ...changes };
+    if (changes.displayName === undefined && (changes.firstName !== undefined || changes.lastName !== undefined)) {
+      const first = changes.firstName !== undefined ? changes.firstName : locked.firstName;
+      const last = changes.lastName !== undefined ? changes.lastName : locked.lastName;
+      if (first && last) set.displayName = `${first} ${last}`.slice(0, 200);
+    }
+    const changedFields = Object.entries(set)
+      .filter(([key, value]) => (locked as Record<string, unknown>)[key] !== value)
+      .map(([key]) => key)
+      .sort();
+
+    const [row] = await tx
+      .update(clubMembers)
+      .set({ ...set, updatedAt: new Date() })
+      .where(eq(clubMembers.id, locked.id))
+      .returning();
+    if (changedFields.length > 0) {
+      await tx.insert(auditLog).values({ eventType: "club_member.update_self", subjectId: locked.id, payload: { clubId, changedFields } });
+    }
+    return row!;
+  });
+
+  return c.json({ data: await shapeOne(updated, callerOf(c), true) });
 });
 
 // --- Profile photo (B13) ----------------------------------------------------
@@ -439,6 +531,10 @@ clubMemberRoutes.get("/:id/photo", async (c) => {
   return streamMedia(c, media);
 });
 
+// --- Custom field values (Wave 8 B7): /me/custom-fields and /:id/custom-fields --------------------
+// Mounted before the generic `/:id` routes; sessionGuard + clubGuard (above) already ran.
+clubMemberRoutes.route("/", memberCustomFieldRoutes);
+
 // --- Member list / detail / create / update --------------------------------
 
 const csv = (v: string) => {
@@ -459,30 +555,6 @@ const listQuerySchema = z.object({
   page: z.coerce.number().int().min(1).max(100_000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(50),
 });
-
-/** Members whose effective status is probe, aktiv or ruhend (what a plain member may see of the others). */
-const VISIBLE_STATUSES: readonly string[] = COUNTED_STATUSES;
-
-function visibleStatusCondition(today: string): SQL {
-  return and(inArray(clubMembers.status, [...VISIBLE_STATUSES]), or(isNull(clubMembers.leftAt), gt(clubMembers.leftAt, today)))!;
-}
-
-/** Callers who manage members (members:write) or may read sensitive data also see former members and interessenten. */
-function canSeeAllMembers(c: { get(k: "clubRoleTypes"): string[] }): boolean {
-  return hasClubPermission(c.get("clubRoleTypes"), "members:write") || hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive");
-}
-
-/**
- * Read gate for ONE member row (detail and its sub-resources). 404 -- never 403 -- so existence is not leaked:
- * external guests only reach their own row; callers without members:write / members:read_sensitive only reach members
- * with an effective status probe|aktiv|ruhend and their own row.
- */
-function assertMemberReadable(c: { get(k: "membership"): { id: string; role: string }; get(k: "clubRoleTypes"): string[] }, row: ClubMemberRow, today = todayBerlin()): void {
-  const own = row.memberId !== null && row.memberId === c.get("membership").id;
-  if (own) return;
-  if (c.get("membership").role === "guest") throw new NotFoundError("Member not found");
-  if (!canSeeAllMembers(c) && !VISIBLE_STATUSES.includes(effectiveStatus(row, today))) throw new NotFoundError("Member not found");
-}
 
 /**
  * Natural ordering of member numbers ("DEMO-2" before "DEMO-10", zero padding ignored): text prefix, then the numeric
@@ -805,6 +877,14 @@ clubMemberRoutes.post("/import", csvWriteLimiter, requireMembersWriteMiddleware,
   return c.json({ data: { dryRun: false, created: result.created, skippedDuplicates: result.analysis.summary.duplicates, skippedSinceDryRun: Math.max(0, result.analysis.summary.duplicates - dryRunDuplicates), summary: result.analysis.summary, rows: result.analysis.rows } }, 201);
 });
 
+/** A stored custom field value as a CSV cell (lists joined, booleans in German). */
+function formatCustomValue(value: unknown): string {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) return formatCredential(value);
+  if (Array.isArray(value)) return value.map(String).join(", ");
+  if (typeof value === "boolean") return value ? "Ja" : "Nein";
+  return value === null || value === undefined ? "" : String(value);
+}
+
 type ExportRow = { row: ClubMemberRow; categoryKey: string | null; accountEmail: string | null; departments: string };
 interface ExportColumn {
   header: string;
@@ -837,7 +917,8 @@ const NON_SENSITIVE_EXPORT_COLUMNS = EXPORT_COLUMN_KEYS.filter((k) => !EXPORT_CO
 const MAX_EXPORT_ROWS = 50_000;
 
 const exportQuerySchema = z.object({
-  columns: z.string().transform(csv).pipe(z.array(z.string().max(50)).max(EXPORT_COLUMN_KEYS.length).optional()).optional(),
+  // Standard columns plus `cf:<key>` for custom fields (opt-in, never part of the default selection).
+  columns: z.string().transform(csv).pipe(z.array(z.string().max(64)).max(EXPORT_COLUMN_KEYS.length + MAX_CUSTOM_FIELDS_PER_CLUB).optional()).optional(),
   status: z.string().transform(csv).pipe(z.array(z.enum(MEMBER_STATUSES)).max(MEMBER_STATUSES.length).optional()).optional(),
   category: z.string().transform(csv).pipe(z.array(z.string().max(50)).max(20).optional()).optional(),
   departmentId: z.string().uuid().optional(),
@@ -869,12 +950,20 @@ async function exportMembers(c: Context<ClubEnv>) {
   const query = parsed.data;
 
   const columnKeys = query.columns && query.columns.length > 0 ? [...new Set(query.columns)] : caller.canReadSensitive ? EXPORT_COLUMN_KEYS : NON_SENSITIVE_EXPORT_COLUMNS;
-  const unknown = columnKeys.filter((k) => !EXPORT_COLUMNS[k]);
+  const CUSTOM_PREFIX = "cf:";
+  const standardKeys = columnKeys.filter((k) => !k.startsWith(CUSTOM_PREFIX));
+  const customKeys = columnKeys.filter((k) => k.startsWith(CUSTOM_PREFIX));
+  const unknown = standardKeys.filter((k) => !EXPORT_COLUMNS[k]);
   if (unknown.length > 0) throw new ValidationError("Unknown export column", { details: { code: "unknown_column", columns: unknown, allowed: EXPORT_COLUMN_KEYS } });
   if (!caller.canReadSensitive) {
-    const denied = columnKeys.filter((k) => EXPORT_COLUMNS[k]!.sensitive);
+    const denied = standardKeys.filter((k) => EXPORT_COLUMNS[k]!.sensitive);
     if (denied.length > 0) throw new ForbiddenError("Missing members:read_sensitive permission for the requested columns", { details: { columns: denied } });
   }
+  // Custom field columns: only live definitions the exporter may read values of (same rules as the member profile).
+  // Unknown, archived and unreadable fields give the same answer, so the export does not reveal which keys exist.
+  const customDefs = customKeys.length === 0 ? [] : (await listDefinitions(clubId)).filter((d) => d.archivedAt === null && customKeys.includes(`${CUSTOM_PREFIX}${d.key}`) && canReadValue(d, { roleTypes: c.get("clubRoleTypes"), isSelf: false }));
+  const unknownCustom = customKeys.filter((k) => !customDefs.some((d) => `${CUSTOM_PREFIX}${d.key}` === k));
+  if (unknownCustom.length > 0) throw new ValidationError("Unknown export column", { details: { code: "unknown_column", columns: unknownCustom, allowed: EXPORT_COLUMN_KEYS } });
 
   const today = todayBerlin();
   const conditions: Array<SQL | undefined> = [eq(clubMembers.clubId, clubId)];
@@ -919,7 +1008,25 @@ async function exportMembers(c: Context<ClubEnv>) {
     for (const d of deptRows) departmentsByMember.set(d.clubMemberId, [...(departmentsByMember.get(d.clubMemberId) ?? []), d.name]);
   }
 
-  const columns = columnKeys.map((k) => EXPORT_COLUMNS[k]!);
+  const customValues = new Map<string, string>();
+  if (customDefs.length > 0 && rows.length > 0) {
+    const stored: Array<{ clubMemberId: string; fieldId: string; value: unknown }> = [];
+    // Chunked: 50,000 rows must not become one 50,000-parameter IN list.
+    for (let i = 0; i < rows.length; i += 5000) {
+      stored.push(
+        ...(await db
+          .select({ clubMemberId: memberFieldValues.clubMemberId, fieldId: memberFieldValues.fieldId, value: memberFieldValues.value })
+          .from(memberFieldValues)
+          .where(and(inArray(memberFieldValues.fieldId, customDefs.map((d) => d.id)), inArray(memberFieldValues.clubMemberId, rows.slice(i, i + 5000).map((r) => r.row.id))))),
+      );
+    }
+    for (const v of stored) customValues.set(`${v.clubMemberId}:${v.fieldId}`, formatCustomValue(v.value));
+  }
+  const columns: ExportColumn[] = columnKeys.map((k) => {
+    if (!k.startsWith(CUSTOM_PREFIX)) return EXPORT_COLUMNS[k]!;
+    const def = customDefs.find((d) => `${CUSTOM_PREFIX}${d.key}` === k)!;
+    return { header: def.label, sensitive: def.sensitive, value: (r) => customValues.get(`${r.row.id}:${def.id}`) ?? null };
+  });
   const body = buildCsv(
     columns.map((col) => col.header),
     rows.map((r) => {
@@ -932,7 +1039,7 @@ async function exportMembers(c: Context<ClubEnv>) {
   await db.insert(auditLog).values({
     eventType: "club_member.export",
     subjectId: clubId,
-    payload: { clubId, exportedBy: c.get("membership").id, columns: columnKeys, rows: rows.length, filters: { status: query.status ?? null, category: query.category ?? null, departmentId: query.departmentId ?? null, includeFormer: query.includeFormer === "true" } },
+    payload: { clubId, exportedBy: c.get("membership").id, columns: columnKeys, ...(customDefs.length > 0 ? { customFieldIds: customDefs.map((d) => d.id), sensitiveCustomFieldIds: customDefs.filter((d) => d.sensitive).map((d) => d.id) } : {}), rows: rows.length, filters: { status: query.status ?? null, category: query.category ?? null, departmentId: query.departmentId ?? null, includeFormer: query.includeFormer === "true" } },
   });
 
   return csvResponse(c, body, `mitglieder-export-${today}.csv`);
@@ -952,6 +1059,7 @@ function shapeCategory(row: CategoryRow, memberCount?: number) {
     key: row.key,
     name: row.name,
     votingRight: row.votingRight,
+    applicantSelectable: row.applicantSelectable,
     minAge: row.minAge,
     maxAge: row.maxAge,
     autoTransitionToKey: row.autoTransitionToKey,
@@ -986,6 +1094,7 @@ const createCategorySchema = z.object({
   key: categoryKeySchema.optional(),
   name: z.string().trim().min(1).max(100),
   votingRight: z.boolean().optional(),
+  applicantSelectable: z.boolean().optional(),
   minAge: ageField,
   maxAge: ageField,
   autoTransitionToKey: autoTransitionKeySchema.nullable().optional(),
@@ -997,6 +1106,7 @@ const updateCategorySchema = z.object({
   key: z.never({ error: "key cannot be changed after creation" }).optional(),
   name: z.string().trim().min(1).max(100).optional(),
   votingRight: z.boolean().optional(),
+  applicantSelectable: z.boolean().optional(),
   minAge: ageField,
   maxAge: ageField,
   autoTransitionToKey: autoTransitionKeySchema.nullable().optional(),
@@ -1067,7 +1177,7 @@ clubMemberRoutes.post("/categories", zValidator("json", createCategorySchema, va
       const [last] = await tx.select({ n: sql<number>`coalesce(max(${memberCategories.sortOrder}), -1)` }).from(memberCategories).where(eq(memberCategories.clubId, clubId));
       const [row] = await tx
         .insert(memberCategories)
-        .values({ clubId, name: body.name, votingRight: body.votingRight ?? true, ...rules, sortOrder: body.sortOrder ?? Number(last?.n ?? -1) + 1 })
+        .values({ clubId, name: body.name, votingRight: body.votingRight ?? true, applicantSelectable: body.applicantSelectable ?? false, ...rules, sortOrder: body.sortOrder ?? Number(last?.n ?? -1) + 1 })
         .returning();
       await tx.insert(auditLog).values({ eventType: "member_category.create", subjectId: row!.id, payload: { clubId, key, createdBy: actor.id } });
       return row!;
@@ -1276,10 +1386,13 @@ clubMemberRoutes.post("/:id/transition", zValidator("json", transitionSchema, va
     const done = await transitionMember(tx, clubId, target.id, { toStatus: body.toStatus, category, effectiveOn: body.effectiveOn, reason: body.reason, reopen: body.reopen }, actor.id, today);
     // A direct exit makes open exit requests of the member obsolete: close them instead of leaving them dangling.
     if (body.toStatus !== undefined && isLeftStatus(body.toStatus) && done.kind !== "cancel_exit") {
-      await tx
+      const closed = await tx
         .update(clubExitRequests)
         .set({ status: "rejected", decidedBy: actor.id, decidedAt: new Date(), decisionNote: "Ersetzt durch direkte Statusänderung" })
-        .where(and(eq(clubExitRequests.clubMemberId, target.id), eq(clubExitRequests.status, "pending")));
+        .where(and(eq(clubExitRequests.clubMemberId, target.id), eq(clubExitRequests.status, "pending")))
+        .returning({ formSubmissionId: clubExitRequests.formSubmissionId });
+      // The exit forms of those requests follow (lock order as in the exit routes: member row, request row, submission row).
+      for (const r of closed) await closeExitSubmission(tx, r.formSubmissionId, "rejected", actor.id);
     }
     await tx.insert(auditLog).values({
       eventType: "club_member.transition",
@@ -1535,19 +1648,8 @@ function shapeInvite(invite: ClubMemberInviteRow) {
   return { id: invite.id, clubMemberId: invite.clubMemberId, email: invite.email, status, expiresAt: invite.expiresAt, acceptedAt: invite.acceptedAt, createdAt: invite.createdAt };
 }
 
-clubMemberRoutes.post("/:id/invite", inviteLimitPerUser, zValidator("json", inviteSchema, validationHook), async (c) => {
-  const clubId = c.get("clubId");
-  const actor = c.get("membership");
-  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
-
-  const target = await resolveClubMember(clubId, c.req.param("id"));
-  const { email } = c.req.valid("json");
-  if (target.memberId) throw new ConflictError("Member already has an account");
-
-  const { invite, token } = await createInvite(clubId, target.id, email, actor.id);
-
-  // Mail problems never block the invite (the board sees emailSent=false and can resend); the address is not logged.
-  let emailSent = false;
+/** Mail problems never block an invite (the board sees emailSent=false and can resend); the address is not logged. */
+async function sendInviteMail(clubId: string, target: { id: string; displayName: string }, invite: ClubMemberInviteRow, token: string, email: string): Promise<boolean> {
   try {
     const club = await db.query.organization.findFirst({ where: eq(organization.id, clubId) });
     const clubName = club?.name ?? "deinem Verein";
@@ -1562,11 +1664,43 @@ clubMemberRoutes.post("/:id/invite", inviteLimitPerUser, zValidator("json", invi
       }),
       attachments: [{ filename: "logo.png", path: LOGO_PATH, cid: LOGO_CID }],
     });
-    emailSent = true;
+    return true;
   } catch (err) {
     logger.error({ errorName: err instanceof Error ? err.name : "unknown", clubMemberId: target.id, inviteId: invite.id }, "[club-members] invite e-mail could not be sent");
+    return false;
   }
+}
 
+clubMemberRoutes.post("/:id/invite", inviteLimitPerUser, zValidator("json", inviteSchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  const actor = c.get("membership");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const target = await resolveClubMember(clubId, c.req.param("id"));
+  const { email } = c.req.valid("json");
+  if (target.memberId) throw new ConflictError("Member already has an account");
+
+  const { invite, token } = await createInvite(clubId, target.id, email, actor.id);
+
+  const emailSent = await sendInviteMail(clubId, target, invite, token, email);
+
+  return c.json({ data: { ...shapeInvite(invite), emailSent } }, 201);
+});
+
+// Resend: revokes the open invite (also an expired one) and issues a new token + mail to the same address. Shares the
+// 20/hour/user limit with the creation. 404 if there is no open invite.
+clubMemberRoutes.post("/:id/invite/resend", inviteLimitPerUser, async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+  const target = await resolveClubMember(clubId, c.req.param("id"));
+  const open = await db.query.clubMemberInvites.findFirst({
+    where: and(eq(clubMemberInvites.clubMemberId, target.id), isNull(clubMemberInvites.acceptedAt)),
+    orderBy: (t, { desc: latest }) => [latest(t.createdAt)],
+  });
+  if (!open || target.memberId) throw new NotFoundError("No open invitation");
+  const { invite, token } = await createInvite(clubId, target.id, open.email, c.get("membership").id);
+  await db.insert(auditLog).values({ eventType: "club_member.invite_resend", subjectId: target.id, payload: { clubId, inviteId: invite.id, previousInviteId: open.id, resentBy: c.get("membership").id } });
+  const emailSent = await sendInviteMail(clubId, target, invite, token, open.email);
   return c.json({ data: { ...shapeInvite(invite), emailSent } }, 201);
 });
 

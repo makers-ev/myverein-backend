@@ -2,6 +2,8 @@ import { relations, sql } from "drizzle-orm";
 import { pgTable, text, timestamp, date, uuid, uniqueIndex, index } from "drizzle-orm/pg-core";
 
 import { member, organization, user } from "../../auth/auth-schema.js";
+import { clubMembers } from "./club-members.js";
+import { formSubmissions } from "./forms.js";
 
 /**
  * Pending-approval queue for "digitaler Aufnahmeantrag". POST
@@ -27,14 +29,22 @@ export const clubApplications = pgTable(
     category: text("category").notNull().default("aktiv"),
     birthDate: date("birth_date", { mode: "string" }),
     status: text("status").notNull().default("pending"),
+    // Wave 8 B8: `self` (the applicant joins) or `guardian` (a parent applies for a child; `user_id` is the PARENT's account).
+    onBehalfOf: text("on_behalf_of").notNull().default("self"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     decidedBy: text("decided_by").references(() => member.id, { onDelete: "set null" }),
+    // Wave 8: the filled-in application form (NULL for legacy applications, which keep `category`/`birth_date`).
+    formSubmissionId: uuid("form_submission_id").references(() => formSubmissions.id, { onDelete: "set null" }),
+    // Set when the application is accepted: the club_members row that was created or reused.
+    clubMemberId: uuid("club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
   },
   (table) => [
     uniqueIndex("club_applications_pending_user_club_uidx")
       .on(table.userId, table.clubId)
-      .where(sql`${table.status} = 'pending'`),
+      // Only a person's OWN application is limited to one open one per club; a parent may have several children pending
+      // (capped at 5 open child applications per account in the routes).
+      .where(sql`${table.status} = 'pending' AND ${table.onBehalfOf} = 'self'`),
     index("club_applications_club_status_idx").on(table.clubId, table.status),
   ],
 );
