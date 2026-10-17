@@ -125,6 +125,16 @@ const listQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(50),
 });
 
+/**
+ * The canonical club member row as returned by an approval. The storage key of the photo (media layer) never leaves the
+ * server -- not even to the board: `hasPhoto` tells the client to read the member (`GET /club-members/:id`, signed URL
+ * after that route's permission check) instead.
+ */
+function publicClubMember<T extends { photoKey: string | null }>(row: T): Omit<T, "photoKey"> & { hasPhoto: boolean } {
+  const { photoKey, ...rest } = row;
+  return { ...rest, hasPhoto: photoKey !== null };
+}
+
 clubApplicationRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
   const parsed = listQuerySchema.safeParse({ page: c.req.query("page"), pageSize: c.req.query("pageSize") });
@@ -300,7 +310,7 @@ clubApplicationRoutes.post("/:id/approve", decisionBodyLimit, async (c) => {
       createdAt: clubMember.createdAt,
       updatedAt: clubMember.updatedAt,
     };
-    return c.json({ data: { application: result.application, member: createdMember, membership, clubMember, mapping: result.mapping } });
+    return c.json({ data: { application: result.application, member: createdMember, membership, clubMember: publicClubMember(clubMember), mapping: result.mapping } });
   } catch (err) {
     // The account membership (and the hook's club_members row) was created outside the transaction. Remove it again only
     // if it is provably still our untouched creation and nobody (e.g. an invitation merge) holds the account lock; after
@@ -392,7 +402,7 @@ async function approveChild(clubId: string, application: typeof clubApplications
       application: result.application,
       // The child has no account; the parent's account membership is reported under `guardian`.
       member: null,
-      clubMember: result.clubMember,
+      clubMember: publicClubMember(result.clubMember),
       guardian: { memberId: guardian.account.id, userId: application.userId, createdAsExternal: guardian.created, linked: true },
       mapping: result.mapping,
     };
@@ -509,7 +519,7 @@ async function readmit(
           createdAt: clubMember.createdAt,
           updatedAt: clubMember.updatedAt,
         },
-        clubMember,
+        clubMember: publicClubMember(clubMember),
         mapping: result.mapping,
       },
     };

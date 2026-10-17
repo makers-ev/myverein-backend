@@ -179,7 +179,8 @@ describe("child application by a parent (B8)", () => {
     expect(data.member).toBeNull();
     expect(data.guardian).toMatchObject({ userId: parent.userId, createdAsExternal: true, linked: true });
     expect(data.clubMember).toMatchObject({ displayName: `${CHILD_FIRST} ${CHILD_LAST}`, memberId: null, lastUserId: null, birthDate: "2016-03-04", status: "aktiv" });
-    expect(data.clubMember.photoKey).toBeTruthy();
+    expect(data.clubMember.hasPhoto).toBe(true);
+    expect(data.clubMember).not.toHaveProperty("photoKey");
     expect(data.clubMember.memberNumber).toMatch(/-\d{4}$/);
     expect(data.mapping.applied).toEqual(expect.arrayContaining(["firstName", "lastName", "birthDate", "photo"]));
 
