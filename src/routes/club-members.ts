@@ -29,6 +29,7 @@ import { ASSIGNABLE_ROLE_TYPES, IMPLICIT_ROLE_TYPE, clubPermissionsFor, hasClubP
 import { DEFAULT_CATEGORY_KEY, type DbExecutor, ensureClubMember, ensureDefaultCategories, isUuid, markDetachedMembersLeft, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
+import { cleanText, isCleanText } from "../lib/text-policy.js";
 import { createInvite, previewInvite, acceptInvite, unlinkAccount } from "../lib/member-invites.js";
 import { sendEmail } from "../lib/email.js";
 import { APP_NAME, buildMemberInviteEmail, LOGO_CID, LOGO_PATH, SITE_URL } from "../lib/emailTemplate.js";
@@ -142,6 +143,8 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: PhotoCaller, forc
             email: account?.email ?? null,
             contactEmail: row.contactEmail,
             memberNumber: row.memberNumber,
+            firstName: row.firstName,
+            lastName: row.lastName,
             birthDate: row.birthDate,
             street: row.street,
             postalCode: row.postalCode,
@@ -395,7 +398,21 @@ clubMemberRoutes.get("/me", async (c) => {
   return c.json({ data: { ...shaped, clubMemberId: row.id, permissions: clubPermissionsFor(c.get("clubRoleTypes")) } });
 });
 
+/** Name parts a person types about themself: same as `optText(100)` plus the shared clean-text policy (no control/bidi characters). */
+const optCleanName = z
+  .string()
+  .trim()
+  .max(100)
+  .refine((v) => isCleanText(v), { message: "contains characters that are not allowed (control or bidi characters)" })
+  .nullable()
+  .optional()
+  .transform((v) => (v === "" ? null : v));
+
 const updateSelfSchema = z.object({
+  firstName: optCleanName,
+  lastName: optCleanName,
+  // An explicit display name for a person without split names (or a different spelling); cannot be cleared.
+  displayName: cleanText(z.string().trim().min(1).max(200)).optional(),
   birthDate: optDate,
   emergencyContactName: optText(200),
   emergencyContactPhone: optText(50),
@@ -413,16 +430,40 @@ function definedOnly<T extends Record<string, unknown>>(body: T): Partial<T> {
 
 clubMemberRoutes.patch("/me", zValidator("json", updateSelfSchema, validationHook), async (c) => {
   const membership = c.get("membership");
+  const clubId = c.get("clubId");
   const changes = definedOnly(c.req.valid("json"));
 
   const current = await ensureClubMember(db, membership);
-  const [updated] = await db
-    .update(clubMembers)
-    .set({ ...changes, updatedAt: new Date() })
-    .where(eq(clubMembers.id, current.id))
-    .returning();
+  const updated = await db.transaction(async (tx) => {
+    const [locked] = await tx.select().from(clubMembers).where(eq(clubMembers.id, current.id)).for("update");
+    if (!locked) throw new NotFoundError("Member not found");
 
-  return c.json({ data: await shapeOne(updated!, callerOf(c), true) });
+    // Display name, same rule as the application mapping (lib/form-applications.ts): both names present -> "First Last";
+    // clearing a name or sending only one while the other is empty keeps the previous display name. An explicit
+    // displayName wins. (Key-holder history keeps its own name snapshots and is never rewritten.)
+    const set: Partial<typeof clubMembers.$inferInsert> = { ...changes };
+    if (changes.displayName === undefined && (changes.firstName !== undefined || changes.lastName !== undefined)) {
+      const first = changes.firstName !== undefined ? changes.firstName : locked.firstName;
+      const last = changes.lastName !== undefined ? changes.lastName : locked.lastName;
+      if (first && last) set.displayName = `${first} ${last}`.slice(0, 200);
+    }
+    const changedFields = Object.entries(set)
+      .filter(([key, value]) => (locked as Record<string, unknown>)[key] !== value)
+      .map(([key]) => key)
+      .sort();
+
+    const [row] = await tx
+      .update(clubMembers)
+      .set({ ...set, updatedAt: new Date() })
+      .where(eq(clubMembers.id, locked.id))
+      .returning();
+    if (changedFields.length > 0) {
+      await tx.insert(auditLog).values({ eventType: "club_member.update_self", subjectId: locked.id, payload: { clubId, changedFields } });
+    }
+    return row!;
+  });
+
+  return c.json({ data: await shapeOne(updated, callerOf(c), true) });
 });
 
 // --- Profile photo (B13) ----------------------------------------------------
