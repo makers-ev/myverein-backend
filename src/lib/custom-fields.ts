@@ -85,7 +85,7 @@ export async function lockDefinitions(tx: DbExecutor, clubId: string, ids: reado
 }
 
 /** Writes (or clears) values of ONE member. Validation happened before; `updatedBy` is the writer's `member.id`. */
-export async function writeValues(tx: DbExecutor, clubMemberId: string, updatedBy: string, changes: ReadonlyArray<{ fieldId: string; value: unknown | undefined }>): Promise<void> {
+export async function writeValues(tx: DbExecutor, clubMemberId: string, updatedBy: string, changes: ReadonlyArray<{ fieldId: string; value: unknown | undefined }>, enteredVia: "guardian" | null = null): Promise<void> {
   const now = new Date();
   for (const change of changes) {
     if (change.value === undefined) {
@@ -94,8 +94,8 @@ export async function writeValues(tx: DbExecutor, clubMemberId: string, updatedB
     }
     await tx
       .insert(memberFieldValues)
-      .values({ clubMemberId, fieldId: change.fieldId, value: change.value, updatedBy, updatedAt: now })
-      .onConflictDoUpdate({ target: [memberFieldValues.clubMemberId, memberFieldValues.fieldId], set: { value: change.value, updatedBy, updatedAt: now } });
+      .values({ clubMemberId, fieldId: change.fieldId, value: change.value, updatedBy, enteredVia, updatedAt: now })
+      .onConflictDoUpdate({ target: [memberFieldValues.clubMemberId, memberFieldValues.fieldId], set: { value: change.value, updatedBy, enteredVia, updatedAt: now } });
   }
 }
 

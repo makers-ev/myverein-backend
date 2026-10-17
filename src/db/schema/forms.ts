@@ -191,6 +191,8 @@ export const memberFieldValues = pgTable(
       .references(() => memberFieldDefinitions.id, { onDelete: "cascade" }),
     value: jsonb("value"),
     updatedBy: text("updated_by").references(() => member.id, { onDelete: "set null" }),
+    // `guardian` when a guardian (Erziehungsberechtigte) of the child recorded the value; null otherwise (self / board decided by updated_by).
+    enteredVia: text("entered_via"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
