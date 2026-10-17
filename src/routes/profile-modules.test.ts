@@ -137,6 +137,35 @@ describe("profile modules and credential fields", () => {
     expect(await rowCount(cid(), "mod_q_segelschein")).toBe(0);
   });
 
+  it("returns the catalog localized (?lang, Accept-Language) with translations for both languages", async () => {
+    const de = (await body(await catalog())).data;
+    expect(de.lang).toBe("de");
+    const juleicaDe = de.modules.find((x: { id: string }) => x.id === "mod_q_juleica");
+    expect(juleicaDe.label).toBe("JuLeiCa");
+    expect(juleicaDe.translations.en.label).toBe("JuLeiCa (youth leader card)");
+    expect(de.modules.every((x: { translations: { de: { label: string }; en: { label: string; description: string } } }) => x.translations.de.label.length > 0 && x.translations.en.label.length > 0 && x.translations.en.description.length > 0)).toBe(true);
+    expect(de.groups.find((g: { id: string }) => g.id === "kinderschutz")).toMatchObject({ label: "Kinderschutz", translations: { de: { label: "Kinderschutz" }, en: { label: "Child protection" } } });
+
+    const en = (await body(await call(board(), "/member-fields/catalog?lang=en", { clubId: cid() }))).data;
+    expect(en.lang).toBe("en");
+    expect(en.modules.find((x: { id: string }) => x.id === "mod_q_juleica")).toMatchObject({ label: "JuLeiCa (youth leader card)", helpText: expect.stringContaining("qualification") });
+    expect(en.groups.find((g: { id: string }) => g.id === "kinderschutz").label).toBe("Child protection");
+    const viaHeader = (await body(await call(board(), "/member-fields/catalog", { clubId: cid(), headers: { "accept-language": "en-GB,en;q=0.8" } }))).data;
+    expect(viaHeader.lang).toBe("en");
+    // An explicit ?lang beats the header; an unknown language falls back to German.
+    expect((await body(await call(board(), "/member-fields/catalog?lang=de", { clubId: cid(), headers: { "accept-language": "en" } }))).data.lang).toBe("de");
+    expect((await body(await call(board(), "/member-fields/catalog?lang=xx", { clubId: cid() }))).data.lang).toBe("de");
+
+    // Activated definitions keep the stored German text and carry both languages while the board has not renamed them.
+    const activated = (await body(await call(board(), "/member-fields/catalog/mod_q_juleica/activate?lang=en", { method: "POST", clubId: cid() }))).data;
+    expect(activated.module.label).toBe("JuLeiCa (youth leader card)");
+    expect(activated.field).toMatchObject({ label: "JuLeiCa (youth leader card)", translations: { de: { label: "JuLeiCa" }, en: { label: "JuLeiCa (youth leader card)" } } });
+    const listDe = (await body(await call(board(), "/member-fields", { clubId: cid() }))).data.find((f: { key: string }) => f.key === "mod_q_juleica");
+    expect(listDe).toMatchObject({ label: "JuLeiCa", translations: { en: { label: "JuLeiCa (youth leader card)" } } });
+    const manual = (await body(await call(board(), "/member-fields", { clubId: cid() }))).data.find((f: { key: string }) => !f.key.startsWith("mod_"));
+    if (manual) expect(manual.translations).toBeNull();
+  });
+
   it("creates exactly one definition under parallel activation", async () => {
     const results = await Promise.all(Array.from({ length: 8 }, () => activate("mod_q_erste_hilfe")));
     const statuses = results.map((r) => r.status).sort();

@@ -20,6 +20,7 @@ import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js
 import type { FieldErrorCode } from "../lib/form-schema.js";
 import { FIELD_KEY_RE } from "../lib/form-schema.js";
 import { invalidAnswers } from "../lib/forms.js";
+import { definitionTranslations } from "../lib/profile-modules-i18n.js";
 import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "../lib/member-read-scope.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
 import type { ClubEnv } from "../middleware/club-guard.js";
@@ -98,6 +99,8 @@ async function buildView(c: { get(k: "clubId"): string; get(k: "clubRoleTypes"):
       options: d.options ?? null,
       validation: d.validation ?? null,
       helpText: d.helpText ?? null,
+      // de/en texts of a module-derived definition the board has not renamed, else null (see README, profile modules).
+      translations: definitionTranslations(d),
       visibleTo: d.visibleTo,
       editableBy: d.editableBy,
       sensitive: d.sensitive,

@@ -12,8 +12,9 @@ import { canReadValue, canSelfWrite } from "../lib/custom-field-access.js";
 import { countValues, CUSTOM_FIELD_TYPES, type FieldDefinition, listDefinitions, MAX_CUSTOM_FIELDS_PER_CLUB, optionValues, valueUsesOtherOption } from "../lib/custom-fields.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { formFieldsSchema, type FormField } from "../lib/form-schema.js";
-import { MODULE_GROUPS, moduleSortOrder, NEVER_MANDATORY_GROUPS, PROFILE_MODULES, findModule, type ProfileModule } from "../lib/profile-modules.js";
+import { moduleSortOrder, NEVER_MANDATORY_GROUPS, PROFILE_MODULES, findModule, type ProfileModule } from "../lib/profile-modules.js";
 import { isUuid } from "../lib/forms.js";
+import { definitionTranslations, type Lang, localizedGroups, moduleText, moduleTranslations, resolveLang } from "../lib/profile-modules-i18n.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -56,22 +57,30 @@ function requireFormsWrite(roleTypes: string[]): void {
 /** The number of stored values of a sensitive definition is itself sensitive: only members:read_sensitive sees it. */
 const countFor = (d: Pick<FieldDefinition, "sensitive">, n: number, roleTypes: string[]): number | null => (d.sensitive && !hasClubPermission(roleTypes, "members:read_sensitive") ? null : n);
 
-const dto = (d: FieldDefinition, valueCount?: number | null) => ({
-  id: d.id,
-  key: d.key,
-  label: d.label,
-  type: d.fieldType,
-  options: d.options ?? null,
-  validation: d.validation ?? null,
-  helpText: d.helpText ?? null,
-  visibleTo: d.visibleTo,
-  editableBy: d.editableBy,
-  sensitive: d.sensitive,
-  sortOrder: d.sortOrder,
-  archived: d.archivedAt !== null,
-  archivedAt: d.archivedAt,
-  ...(valueCount !== undefined ? { valueCount } : {}),
-});
+/** Only an explicit `?lang=` localizes stored definition texts (and only while they are the module's untouched defaults). */
+const explicitLang = (c: { req: { query(k: string): string | undefined } }): Lang => resolveLang(c.req.query("lang"));
+
+const dto = (d: FieldDefinition, valueCount?: number | null, lang: Lang = "de") => {
+  const translations = definitionTranslations(d);
+  return {
+    id: d.id,
+    key: d.key,
+    label: translations ? translations[lang].label : d.label,
+    type: d.fieldType,
+    options: d.options ?? null,
+    validation: d.validation ?? null,
+    helpText: translations ? translations[lang].helpText : (d.helpText ?? null),
+    // `{ de: { label, helpText }, en: { label, helpText } }` for a module-derived definition whose texts the board has not changed, else null.
+    translations,
+    visibleTo: d.visibleTo,
+    editableBy: d.editableBy,
+    sensitive: d.sensitive,
+    sortOrder: d.sortOrder,
+    archived: d.archivedAt !== null,
+    archivedAt: d.archivedAt,
+    ...(valueCount !== undefined ? { valueCount } : {}),
+  };
+};
 
 /** The shape rules of a definition are the form engine's own (key format, reserved keys, clean text, option limits). */
 function checkDefinition(input: { key: string; type: string; label: string; options?: Array<{ value: string; label: string }> | null; validation?: unknown; helpText?: string | null }) {
@@ -100,11 +109,13 @@ memberFieldRoutes.get("/", async (c) => {
   const defs = (await listDefinitions(clubId)).filter((d) => includeArchived || d.archivedAt === null);
   if (manager) {
     const counts = new Map((await db.select({ fieldId: memberFieldValues.fieldId, n: count() }).from(memberFieldValues).innerJoin(memberFieldDefinitions, eq(memberFieldDefinitions.id, memberFieldValues.fieldId)).where(eq(memberFieldDefinitions.clubId, clubId)).groupBy(memberFieldValues.fieldId)).map((r) => [r.fieldId, r.n]));
-    return c.json({ data: defs.map((d) => dto(d, countFor(d, counts.get(d.id) ?? 0, roleTypes))) });
+    const lang = explicitLang(c);
+    return c.json({ data: defs.map((d) => dto(d, countFor(d, counts.get(d.id) ?? 0, roleTypes), lang)) });
   }
   // Everybody else: the definitions whose values they may see of others, plus those they may fill in for themselves.
   const visible = defs.filter((d) => d.archivedAt === null && (canReadValue(d, { roleTypes, isSelf: false }) || canSelfWrite(d)));
-  return c.json({ data: visible.map((d) => dto(d)) });
+  const lang = explicitLang(c);
+  return c.json({ data: visible.map((d) => dto(d, undefined, lang)) });
 });
 
 // --- Profile module catalog (Profil-Bausteine) -------------------------------------------------------------------
@@ -119,12 +130,14 @@ function isCustomized(m: ProfileModule, d: FieldDefinition): boolean {
   return d.label !== m.label || d.fieldType !== m.type || !sameJson(d.options, m.options) || !sameJson(d.validation, m.validation) || d.visibleTo !== m.visibleTo || d.editableBy !== m.editableBy || d.sensitive !== m.sensitive || (d.helpText ?? null) !== (m.helpText ?? null);
 }
 
-const moduleDto = (m: ProfileModule, d: FieldDefinition | undefined) => ({
+const moduleDto = (m: ProfileModule, d: FieldDefinition | undefined, lang: Lang = "de") => ({
   id: m.id,
   group: m.group,
-  label: m.label,
-  description: m.description,
-  helpText: m.helpText ?? null,
+  // Localized per `?lang=` / Accept-Language (default German); `translations` always carries both languages.
+  label: moduleText(m, lang).label,
+  description: moduleText(m, lang).description,
+  helpText: moduleText(m, lang).helpText,
+  translations: moduleTranslations(m),
   type: m.type,
   options: m.options ?? null,
   validation: m.validation ?? null,
@@ -143,10 +156,12 @@ memberFieldRoutes.get("/catalog", async (c) => {
   requireFormsWrite(c.get("clubRoleTypes"));
   const defs = await listDefinitions(c.get("clubId"));
   const byKey = new Map(defs.map((d) => [d.key, d]));
+  const lang = resolveLang(c.req.query("lang"), c.req.header("accept-language"));
   return c.json({
     data: {
-      groups: MODULE_GROUPS,
-      modules: PROFILE_MODULES.map((m) => moduleDto(m, byKey.get(m.id))),
+      lang,
+      groups: localizedGroups(lang),
+      modules: PROFILE_MODULES.map((m) => moduleDto(m, byKey.get(m.id), lang)),
       limit: { used: defs.length, max: MAX_CUSTOM_FIELDS_PER_CLUB },
     },
   });
@@ -189,7 +204,8 @@ memberFieldRoutes.post("/catalog/:moduleId/activate", async (c) => {
     await tx.insert(auditLog).values({ eventType: "profile_module.activate", subjectId: row!.id, payload: { clubId, moduleId: mod.id, reactivated: false, sensitive: mod.sensitive, by: c.get("membership").id } });
     return { row: row!, created: true, reactivated: false };
   });
-  return c.json({ data: { module: moduleDto(mod, outcome.row), created: outcome.created, reactivated: outcome.reactivated, field: dto(outcome.row, outcome.created ? 0 : undefined) } }, outcome.created ? 201 : 200);
+  const lang = resolveLang(c.req.query("lang"), c.req.header("accept-language"));
+  return c.json({ data: { module: moduleDto(mod, outcome.row, lang), created: outcome.created, reactivated: outcome.reactivated, field: dto(outcome.row, outcome.created ? 0 : undefined, lang) } }, outcome.created ? 201 : 200);
 });
 
 // Archives the definition (the values stay for the record, nobody can read or write them); idempotent.
@@ -207,7 +223,7 @@ memberFieldRoutes.post("/catalog/:moduleId/deactivate", async (c) => {
     await tx.insert(auditLog).values({ eventType: "profile_module.deactivate", subjectId: existing.id, payload: { clubId, moduleId: mod.id, by: c.get("membership").id } });
     return { row: row!, changed: true };
   });
-  return c.json({ data: { module: moduleDto(mod, result.row), changed: result.changed } });
+  return c.json({ data: { module: moduleDto(mod, result.row, resolveLang(c.req.query("lang"), c.req.header("accept-language"))), changed: result.changed } });
 });
 
 /** Who may read a field, narrow to wide (an unknown value counts as the narrowest). */
