@@ -227,4 +227,57 @@ describe("guardian access to the custom fields of a child", () => {
     expect((await list()).translations).toBeNull();
     expect((await fieldsOf(await view(board()))).find((f) => f.key === "mod_sp_trikot")).toMatchObject({ translations: null });
   });
+
+  describe("GET /club-members/me/children", () => {
+    const children = async (who: Account, clubId = cid()) => call(who, "/club-members/me/children", { clubId });
+    const ids = async (res: Response) => ((await body(res)).data as Array<{ clubMemberId: string }>).map((c) => c.clubMemberId);
+
+    it("lists only the caller's own active children with minimal data, private and uncached", async () => {
+      const mine = await db.insert(guardianLinks).values({ guardianMemberId: guardianAccountId, wardClubMemberId: childId }).returning();
+      try {
+        const res = await children(guardian);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("cache-control")).toBe("private, no-store");
+        const data = (await body(res)).data as Array<Record<string, unknown>>;
+        expect(data.map((d) => d.clubMemberId)).toContain(childId);
+        expect(data.map((d) => d.clubMemberId)).not.toContain(otherChildId);
+        expect(Object.keys(data.find((d) => d.clubMemberId === childId)!).sort()).toEqual(["clubMemberId", "displayName", "firstName", "lastName", "status"]);
+        // Another guardian does not see them.
+        expect(await ids(await children(club.members.gmember!))).not.toContain(childId);
+      } finally {
+        await db.delete(guardianLinks).where(eq(guardianLinks.id, mine[0]!.id));
+      }
+    });
+
+    it("answers 200 [] for a non-guardian and in a club where the caller guards nobody", async () => {
+      const res = await children(club.members.plain!);
+      expect(res.status).toBe(200);
+      expect((await body(res)).data).toEqual([]);
+      expect((await body(await children(board()))).data).toEqual([]);
+    });
+
+    it("does not leak across clubs", async () => {
+      const foreign = await createClub("gcfc", suffix);
+      try {
+        const foreignAccount = (await db.query.member.findFirst({ where: (m, { and: both, eq: same }) => both(same(m.organizationId, foreign.clubId), same(m.userId, foreign.founder.userId)) }))!.id;
+        const link = await db.insert(guardianLinks).values({ guardianMemberId: foreignAccount, wardClubMemberId: childId }).returning();
+        expect(await ids(await children(foreign.founder, foreign.clubId))).toEqual([]);
+        await db.delete(guardianLinks).where(eq(guardianLinks.id, link[0]!.id));
+      } finally {
+        await dropClubs([foreign.clubId], foreign.userIds);
+      }
+    });
+
+    it("hides a ward who left the club", async () => {
+      const gone = (await body(await call(board(), "/club-members", { method: "POST", clubId: cid(), body: { displayName: "Mia", firstName: "Mia", lastName: "Kind", categoryKey: "jugend" } }))).data.id as string;
+      await db.insert(guardianLinks).values({ guardianMemberId: guardianAccountId, wardClubMemberId: gone });
+      try {
+        expect(await ids(await children(guardian))).toContain(gone);
+        await db.update(clubMembers).set({ status: "ausgetreten", leftAt: "2020-01-01" }).where(eq(clubMembers.id, gone));
+        expect(await ids(await children(guardian))).not.toContain(gone);
+      } finally {
+        await db.delete(guardianLinks).where(eq(guardianLinks.wardClubMemberId, gone));
+      }
+    });
+  });
 });

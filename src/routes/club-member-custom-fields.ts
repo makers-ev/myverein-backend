@@ -303,6 +303,27 @@ memberCustomFieldRoutes.get("/me/custom-fields", requireAccountMember, async (c)
   return c.json({ data: { clubMemberId: row.id, fields: await buildView(c, row, false) } });
 });
 
+/**
+ * The children the caller is an active guardian of in this club (`guardian_links`), minimal data only, so apps can offer
+ * "my children" and then use `/club-members/:id/custom-fields`. Wards who left the club (ausgetreten / ausgeschlossen /
+ * verstorben) are not listed. Non-guardians get `200 { data: [] }`, never a 403 (no oracle).
+ */
+memberCustomFieldRoutes.get("/me/children", readLimiter, async (c) => {
+  const today = todayBerlin();
+  const rows = await db
+    .select({ row: clubMembers })
+    .from(guardianLinks)
+    .innerJoin(clubMembers, eq(clubMembers.id, guardianLinks.wardClubMemberId))
+    .where(and(eq(guardianLinks.guardianMemberId, c.get("membership").id), eq(clubMembers.clubId, c.get("clubId"))))
+    .orderBy(sql`lower(${clubMembers.displayName})`, asc(clubMembers.id));
+  const data = rows
+    .map((r) => r.row)
+    .filter((r) => !isLeftStatus(effectiveStatus(r, today)))
+    .map((r) => ({ clubMemberId: r.id, displayName: r.displayName, firstName: r.firstName, lastName: r.lastName, status: effectiveStatus(r, today) }));
+  c.header("Cache-Control", "private, no-store");
+  return c.json({ data });
+});
+
 memberCustomFieldRoutes.patch("/me/custom-fields", requireAccountMember, writeLimiter, jsonLimit, zValidator("json", writeSchema, validationHook), async (c) => {
   const row = await ensureClubMember(db, c.get("membership"));
   await writeView(c, row, c.req.valid("json").values, "self");
