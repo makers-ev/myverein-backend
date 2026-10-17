@@ -10,7 +10,7 @@ import { MAPPING_TARGET_KEYS, mappingAcceptsType, type MappingTarget } from "./f
  * a submission may contain (client validation is convenience only). Both are pure functions without I/O.
  */
 
-export const FIELD_TYPES = ["text", "textarea", "number", "date", "select", "multiselect", "checkbox", "consent", "file", "image", "info"] as const;
+export const FIELD_TYPES = ["text", "textarea", "number", "date", "select", "multiselect", "checkbox", "consent", "credential", "file", "image", "info"] as const;
 export type FieldType = (typeof FIELD_TYPES)[number];
 
 export const MAX_FIELDS = 60;
@@ -21,6 +21,11 @@ const RESERVED_KEYS = new Set(["constructor", "prototype", "hasownproperty", "to
 const TEXT_MAX = 200;
 const TEXTAREA_MAX = 5000;
 const SELECT_ONLY_TYPES: readonly FieldType[] = ["select", "multiselect"];
+/** Longest free-text level ("Stufe") of a credential. */
+export const CREDENTIAL_LEVEL_MAX = 80;
+/** Credential dates must lie in this range (typos like year 0202 or 20260 are refused). */
+export const CREDENTIAL_MIN_DATE = "1900-01-01";
+export const CREDENTIAL_MAX_DATE = "2100-12-31";
 const FILE_TYPES: readonly FieldType[] = ["file", "image"];
 const CONDITION_SOURCE_TYPES: readonly FieldType[] = ["text", "select", "multiselect", "checkbox", "consent"];
 
@@ -94,7 +99,9 @@ export const formFieldsSchema = z
 
       const isSelect = SELECT_ONLY_TYPES.includes(field.type);
       if (isSelect && (field.options === undefined) === (field.optionsSource === undefined)) issue("select needs exactly one of options and optionsSource", ["options"]);
-      if (!isSelect && (field.options !== undefined || field.optionsSource !== undefined)) issue("options only for select/multiselect", ["options"]);
+      // A credential may list its levels ("Stufe"), but never takes an options source.
+      const levelOptions = field.type === "credential" && field.options !== undefined && field.optionsSource === undefined;
+      if (!isSelect && !levelOptions && (field.options !== undefined || field.optionsSource !== undefined)) issue("options only for select/multiselect (and the levels of a credential)", ["options"]);
       if (field.options && new Set(field.options.map((o) => o.value)).size !== field.options.length) issue("duplicate option value", ["options"]);
 
       if (field.type === "info") {
@@ -119,7 +126,10 @@ export const formFieldsSchema = z
       const v = field.validation;
       if (v) {
         const textual = field.type === "text" || field.type === "textarea";
-        if ((v.minLength !== undefined || v.maxLength !== undefined) && !textual) issue("length limits only for text", ["validation"]);
+        // A credential's maxLength is the length of its free-text level (exclusive with a list of levels).
+        const levelText = field.type === "credential" && v.minLength === undefined && field.options === undefined;
+        if ((v.minLength !== undefined || v.maxLength !== undefined) && !textual && !levelText) issue("length limits only for text", ["validation"]);
+        if (field.type === "credential" && v.maxLength !== undefined && v.maxLength > CREDENTIAL_LEVEL_MAX) issue(`maxLength of a credential level is at most ${CREDENTIAL_LEVEL_MAX}`, ["validation"]);
         if (v.pattern !== undefined && field.type !== "text") issue("pattern only for text", ["validation"]);
         if ((v.min !== undefined || v.max !== undefined) && field.type !== "number") issue("min/max only for number", ["validation"]);
         if ((v.minDate !== undefined || v.maxDate !== undefined) && field.type !== "date") issue("date limits only for date", ["validation"]);
@@ -213,6 +223,53 @@ export function visibleFieldKeys(fields: readonly FormField[], answers: unknown)
   return visible;
 }
 
+export interface CredentialValue {
+  valid: true;
+  level?: string;
+  obtainedOn?: string;
+  validUntil?: string;
+}
+
+const CREDENTIAL_KEYS = new Set(["valid", "level", "obtainedOn", "validUntil"]);
+
+/**
+ * A credential ("holds it") is `{ valid: true, level?, obtainedOn?, validUntil? }`. `valid` must be `true` (not held = no
+ * value at all, clear with null); `level` only when the definition has levels (`options`) or a free-text level
+ * (`validation.maxLength`); dates are strict `YYYY-MM-DD`, `validUntil >= obtainedOn`. The result has exactly these keys.
+ */
+function cleanCredential(field: FormField, value: unknown, optionValues: readonly string[]): { value: unknown } | { error: FieldErrorCode } {
+  if (!isPlainObject(value)) return { error: "invalid_type" };
+  if (Object.keys(value).some((k) => !CREDENTIAL_KEYS.has(k))) return { error: "invalid_value" };
+  if (value.valid !== true) return { error: "invalid_value" };
+  const out: CredentialValue = { valid: true };
+  const level = Object.hasOwn(value, "level") ? value.level : undefined;
+  if (level !== undefined && level !== null && level !== "") {
+    if (typeof level !== "string") return { error: "invalid_type" };
+    if (field.options) {
+      if (!optionValues.includes(level)) return { error: "not_an_option" };
+      out.level = level;
+    } else if (field.validation?.maxLength !== undefined) {
+      const text = level.trim();
+      if (text.length > field.validation.maxLength) return { error: "too_long" };
+      if (!isCleanText(text)) return { error: "invalid_value" };
+      if (text !== "") out.level = text;
+    } else {
+      return { error: "invalid_value" };
+    }
+  }
+  for (const key of ["obtainedOn", "validUntil"] as const) {
+    const raw = Object.hasOwn(value, key) ? value[key] : undefined;
+    if (raw === undefined || raw === null || raw === "") continue;
+    if (typeof raw !== "string") return { error: "invalid_type" };
+    if (!isIsoDate(raw)) return { error: "invalid_value" };
+    if (raw < CREDENTIAL_MIN_DATE) return { error: "too_small" };
+    if (raw > CREDENTIAL_MAX_DATE) return { error: "too_large" };
+    out[key] = raw;
+  }
+  if (out.obtainedOn !== undefined && out.validUntil !== undefined && out.validUntil < out.obtainedOn) return { error: "invalid_value" };
+  return { value: out };
+}
+
 /** Validates one non-empty answer against its field. Returns the cleaned value or an error code. */
 function cleanValue(field: FormField, value: unknown, optionValues: readonly string[]): { value: unknown } | { error: FieldErrorCode } {
   const v = field.validation;
@@ -254,6 +311,8 @@ function cleanValue(field: FormField, value: unknown, optionValues: readonly str
     case "checkbox":
     case "consent":
       return typeof value === "boolean" ? { value } : { error: "invalid_type" };
+    case "credential":
+      return cleanCredential(field, value, optionValues);
     default:
       return { error: "invalid_value" };
   }

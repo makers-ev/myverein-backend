@@ -11,7 +11,8 @@ import { hasClubPermission } from "../lib/club-permissions.js";
 import { canReadValue, canSelfWrite } from "../lib/custom-field-access.js";
 import { countValues, CUSTOM_FIELD_TYPES, type FieldDefinition, listDefinitions, MAX_CUSTOM_FIELDS_PER_CLUB, optionValues, valueUsesOtherOption } from "../lib/custom-fields.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
-import { formFieldsSchema } from "../lib/form-schema.js";
+import { formFieldsSchema, type FormField } from "../lib/form-schema.js";
+import { MODULE_GROUPS, moduleSortOrder, NEVER_MANDATORY_GROUPS, PROFILE_MODULES, findModule, type ProfileModule } from "../lib/profile-modules.js";
 import { isUuid } from "../lib/forms.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -58,6 +59,8 @@ const dto = (d: FieldDefinition, valueCount?: number) => ({
   label: d.label,
   type: d.fieldType,
   options: d.options ?? null,
+  validation: d.validation ?? null,
+  helpText: d.helpText ?? null,
   visibleTo: d.visibleTo,
   editableBy: d.editableBy,
   sensitive: d.sensitive,
@@ -68,8 +71,10 @@ const dto = (d: FieldDefinition, valueCount?: number) => ({
 });
 
 /** The shape rules of a definition are the form engine's own (key format, reserved keys, clean text, option limits). */
-function checkDefinition(input: { key: string; type: string; label: string; options?: Array<{ value: string; label: string }> | null }) {
-  const parsed = formFieldsSchema.safeParse([{ key: input.key, type: input.type, label: input.label, ...(input.options ? { options: input.options } : {}) }]);
+function checkDefinition(input: { key: string; type: string; label: string; options?: Array<{ value: string; label: string }> | null; validation?: unknown; helpText?: string | null }) {
+  const parsed = formFieldsSchema.safeParse([
+    { key: input.key, type: input.type, label: input.label, ...(input.options ? { options: input.options } : {}), ...(input.validation ? { validation: input.validation } : {}), ...(input.helpText ? { helpText: input.helpText } : {}) },
+  ]);
   if (!parsed.success) throw new ValidationError("Invalid field definition", { details: { issues: parsed.error.issues.map((i) => ({ path: i.path.slice(1), message: i.message })) } });
   return parsed.data[0]!;
 }
@@ -99,6 +104,102 @@ memberFieldRoutes.get("/", async (c) => {
   return c.json({ data: visible.map((d) => dto(d)) });
 });
 
+// --- Profile module catalog (Profil-Bausteine) -------------------------------------------------------------------
+// Registered before the `/:id` routes. Optional ready-made fields the board switches on per club (src/lib/profile-modules.ts).
+
+type ModuleState = "active" | "archived" | "inactive";
+
+const sameJson = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+/** The board changed the definition after activation (label, type, options, limits, visibility, flags). */
+function isCustomized(m: ProfileModule, d: FieldDefinition): boolean {
+  return d.label !== m.label || d.fieldType !== m.type || !sameJson(d.options, m.options) || !sameJson(d.validation, m.validation) || d.visibleTo !== m.visibleTo || d.editableBy !== m.editableBy || d.sensitive !== m.sensitive || (d.helpText ?? null) !== (m.helpText ?? null);
+}
+
+const moduleDto = (m: ProfileModule, d: FieldDefinition | undefined) => ({
+  id: m.id,
+  group: m.group,
+  label: m.label,
+  description: m.description,
+  helpText: m.helpText ?? null,
+  type: m.type,
+  options: m.options ?? null,
+  validation: m.validation ?? null,
+  visibleTo: m.visibleTo,
+  editableBy: m.editableBy,
+  sensitive: m.sensitive,
+  // Never mandatory for members: custom fields have no `required` flag and forms cannot require these (see README).
+  mandatory: false,
+  neverMandatoryGroup: NEVER_MANDATORY_GROUPS.includes(m.group),
+  state: (d === undefined ? "inactive" : d.archivedAt === null ? "active" : "archived") as ModuleState,
+  fieldId: d?.id ?? null,
+  customized: d === undefined ? false : isCustomized(m, d),
+});
+
+memberFieldRoutes.get("/catalog", async (c) => {
+  requireFormsWrite(c.get("clubRoleTypes"));
+  const defs = await listDefinitions(c.get("clubId"));
+  const byKey = new Map(defs.map((d) => [d.key, d]));
+  return c.json({
+    data: {
+      groups: MODULE_GROUPS,
+      modules: PROFILE_MODULES.map((m) => moduleDto(m, byKey.get(m.id))),
+      limit: { used: defs.length, max: MAX_CUSTOM_FIELDS_PER_CLUB },
+    },
+  });
+});
+
+function moduleOr404(id: string): ProfileModule {
+  const m = findModule(id);
+  if (!m) throw new NotFoundError("Profile module not found");
+  return m;
+}
+
+// Idempotent: an active module is returned as is, an archived one is restored (with the board's customisations), a missing
+// one is created from the template. An existing definition is NEVER overwritten. Serialised with the manual create route.
+memberFieldRoutes.post("/catalog/:moduleId/activate", async (c) => {
+  requireFormsWrite(c.get("clubRoleTypes"));
+  const clubId = c.get("clubId");
+  const mod = moduleOr404(c.req.param("moduleId"));
+
+  const outcome = await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`custom-field-create:${clubId}`}, 0))`);
+    const [existing] = await tx.select().from(memberFieldDefinitions).where(and(eq(memberFieldDefinitions.clubId, clubId), eq(memberFieldDefinitions.key, mod.id))).for("update");
+    if (existing && existing.archivedAt === null) return { row: existing, created: false, reactivated: false };
+    if (existing) {
+      const [row] = await tx.update(memberFieldDefinitions).set({ archivedAt: null }).where(eq(memberFieldDefinitions.id, existing.id)).returning();
+      await tx.insert(auditLog).values({ eventType: "profile_module.activate", subjectId: existing.id, payload: { clubId, moduleId: mod.id, reactivated: true, by: c.get("membership").id } });
+      return { row: row!, created: false, reactivated: true };
+    }
+    const [{ n }] = await tx.select({ n: count() }).from(memberFieldDefinitions).where(eq(memberFieldDefinitions.clubId, clubId));
+    if (n >= MAX_CUSTOM_FIELDS_PER_CLUB) throw new ConflictError("Too many custom fields", { details: { code: "custom_field_limit", limit: MAX_CUSTOM_FIELDS_PER_CLUB } });
+    const [row] = await tx
+      .insert(memberFieldDefinitions)
+      .values({ clubId, key: mod.id, label: mod.label, helpText: mod.helpText ?? null, fieldType: mod.type, options: mod.options ?? null, validation: (mod.validation as FormField["validation"] | undefined) ?? null, visibleTo: mod.visibleTo, editableBy: mod.editableBy, sensitive: mod.sensitive, sortOrder: moduleSortOrder(mod.id) })
+      .returning();
+    await tx.insert(auditLog).values({ eventType: "profile_module.activate", subjectId: row!.id, payload: { clubId, moduleId: mod.id, reactivated: false, sensitive: mod.sensitive, by: c.get("membership").id } });
+    return { row: row!, created: true, reactivated: false };
+  });
+  return c.json({ data: { module: moduleDto(mod, outcome.row), created: outcome.created, reactivated: outcome.reactivated, field: dto(outcome.row, 0) } }, outcome.created ? 201 : 200);
+});
+
+// Archives the definition (the values stay for the record, nobody can read or write them); idempotent.
+memberFieldRoutes.post("/catalog/:moduleId/deactivate", async (c) => {
+  requireFormsWrite(c.get("clubRoleTypes"));
+  const clubId = c.get("clubId");
+  const mod = moduleOr404(c.req.param("moduleId"));
+
+  const result = await db.transaction(async (tx) => {
+    const [existing] = await tx.select().from(memberFieldDefinitions).where(and(eq(memberFieldDefinitions.clubId, clubId), eq(memberFieldDefinitions.key, mod.id))).for("update");
+    if (!existing) return { row: undefined, changed: false };
+    if (existing.archivedAt !== null) return { row: existing, changed: false };
+    const [row] = await tx.update(memberFieldDefinitions).set({ archivedAt: new Date() }).where(eq(memberFieldDefinitions.id, existing.id)).returning();
+    await tx.insert(auditLog).values({ eventType: "profile_module.deactivate", subjectId: existing.id, payload: { clubId, moduleId: mod.id, by: c.get("membership").id } });
+    return { row: row!, changed: true };
+  });
+  return c.json({ data: { module: moduleDto(mod, result.row), changed: result.changed } });
+});
+
 /** Who may read a field, narrow to wide (an unknown value counts as the narrowest). */
 const VISIBILITY_RANK: Record<string, number> = { vorstand: 0, funktionstraeger: 1, mitglied: 2 };
 
@@ -108,6 +209,7 @@ const createSchema = z
   .object({
     key: z.string().max(60),
     label: z.string().max(300),
+    helpText: z.string().max(500).optional(),
     type: z.enum(CUSTOM_FIELD_TYPES),
     options: optionsSchema.optional(),
     visibleTo: z.enum(FIELD_VISIBLE_TO).default("vorstand"),
@@ -130,7 +232,7 @@ memberFieldRoutes.post("/", jsonLimit, zValidator("json", createSchema, validati
       if (n >= MAX_CUSTOM_FIELDS_PER_CLUB) throw new ConflictError("Too many custom fields", { details: { code: "custom_field_limit", limit: MAX_CUSTOM_FIELDS_PER_CLUB } });
       const [row] = await tx
         .insert(memberFieldDefinitions)
-        .values({ clubId, key: checked.key, label: checked.label, fieldType: checked.type, options: checked.options ?? null, visibleTo: body.visibleTo, editableBy: body.editableBy, sensitive: body.sensitive, sortOrder: body.sortOrder })
+        .values({ clubId, key: checked.key, label: checked.label, helpText: checked.helpText ?? null, fieldType: checked.type, options: checked.options ?? null, visibleTo: body.visibleTo, editableBy: body.editableBy, sensitive: body.sensitive, sortOrder: body.sortOrder })
         .returning();
       await tx.insert(auditLog).values({ eventType: "member_field.create", subjectId: row!.id, payload: { clubId, key: row!.key, sensitive: row!.sensitive, createdBy: c.get("membership").id } });
       return row!;
@@ -145,6 +247,7 @@ memberFieldRoutes.post("/", jsonLimit, zValidator("json", createSchema, validati
 const updateSchema = z
   .object({
     label: z.string().max(300).optional(),
+    helpText: z.string().max(500).nullable().optional(),
     type: z.enum(CUSTOM_FIELD_TYPES).optional(),
     options: optionsSchema.nullable().optional(),
     visibleTo: z.enum(FIELD_VISIBLE_TO).optional(),
@@ -164,12 +267,16 @@ memberFieldRoutes.patch("/:id", jsonLimit, zValidator("json", updateSchema, vali
     if (current.archivedAt !== null) throw new ConflictError("An archived custom field cannot be changed; restore it first", { details: { code: "custom_field_archived" } });
 
     const type = body.type ?? current.fieldType;
-    const isChoice = type === "select" || type === "multiselect";
+    // select/multiselect need options; a credential may carry its levels as options.
+    const isChoice = type === "select" || type === "multiselect" || type === "credential";
     // Changing the type to/from a choice type without saying what the options are would leave a broken definition.
     let options = current.options as Array<{ value: string; label: string }> | null;
     if (body.options !== undefined) options = body.options;
     else if (body.type !== undefined && !isChoice) options = null;
-    const checked = checkDefinition({ key: current.key, type, label: body.label ?? current.label, options });
+    const helpText = body.helpText !== undefined ? body.helpText : current.helpText;
+    // Limits of a definition stay with it (they only fit the type they were made for).
+    const validation = type === current.fieldType ? current.validation : null;
+    const checked = checkDefinition({ key: current.key, type, label: body.label ?? current.label, options, validation, helpText });
 
     const values = await countValues(tx, current.id);
 
@@ -195,8 +302,10 @@ memberFieldRoutes.patch("/:id", jsonLimit, zValidator("json", updateSchema, vali
       .update(memberFieldDefinitions)
       .set({
         label: checked.label,
+        helpText: checked.helpText ?? null,
         fieldType: checked.type,
         options: checked.options ?? null,
+        validation: checked.validation ?? null,
         ...(body.visibleTo !== undefined ? { visibleTo: body.visibleTo } : {}),
         ...(body.editableBy !== undefined ? { editableBy: body.editableBy } : {}),
         ...(body.sensitive !== undefined ? { sensitive: body.sensitive } : {}),

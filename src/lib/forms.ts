@@ -11,6 +11,7 @@ import type { DbExecutor } from "./club-members.js";
 import { ConflictError, ValidationError, type AppErrorOptions } from "./errors.js";
 import { ensureClubFormDefaults } from "./form-defaults.js";
 import { supportsChildApplication } from "./form-children.js";
+import { isNeverMandatoryKey } from "./profile-modules.js";
 import { FIELD_KEY_RE, type FieldErrorCode, type FormField, resolveFieldOptions } from "./form-schema.js";
 import { markMediaDeleted } from "./media.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "./member-lifecycle.js";
@@ -215,6 +216,14 @@ export function fileFieldProblems(purpose: string, fields: readonly FormField[])
   return fields.filter((f) => f.type === "file" || f.type === "image").map((f) => ({ code: "file_not_supported", fieldKey: f.key }));
 }
 
+/**
+ * `credential` (holds it + level + valid until) is a member custom field type only; forms have no renderer contract for it
+ * (clients render the profile modules from `/club-members/:id/custom-fields`). Refused when saving and publishing.
+ */
+export function credentialFieldProblems(fields: readonly FormField[]): PublishProblem[] {
+  return fields.filter((f) => f.type === "credential").map((f) => ({ code: "credential_not_supported", fieldKey: f.key }));
+}
+
 const CUSTOM_FIELD_TYPE: Record<string, string> = { consent: "checkbox" };
 
 /**
@@ -227,7 +236,7 @@ const CUSTOM_FIELD_TYPE: Record<string, string> = { consent: "checkbox" };
 export async function publishProblems(input: { clubId: string; purpose: string; fields: readonly FormField[]; privacyNotice: string | null }, executor: DbExecutor = db): Promise<PublishProblem[]> {
   const problems: PublishProblem[] = [];
   const { fields, purpose } = input;
-  problems.push(...fileFieldProblems(purpose, fields));
+  problems.push(...fileFieldProblems(purpose, fields), ...credentialFieldProblems(fields));
 
   if (purpose === "aufnahme") {
     const notice = fields.find((f) => f.type === "info" && f.infoKind === "privacy_notice");
@@ -256,6 +265,8 @@ export async function publishProblems(input: { clubId: string; purpose: string; 
     const byKey = new Map(defs.map((d) => [d.key, d]));
     for (const f of wanted) {
       const def = byKey.get(f.customField!);
+      // Driving licence / qualification / Kinderschutz modules are never mandatory, not even through an application form.
+      if (f.required === true && isNeverMandatoryKey(f.customField!)) problems.push({ code: "module_never_mandatory", fieldKey: f.key });
       if (!def || def.archivedAt) problems.push({ code: "custom_field_unknown", fieldKey: f.key });
       else if (def.fieldType !== (CUSTOM_FIELD_TYPE[f.type] ?? f.type)) problems.push({ code: "custom_field_type_mismatch", fieldKey: f.key });
       // Sensitive answers may only flow into custom fields that are protected (members:read_sensitive + audit) as well.

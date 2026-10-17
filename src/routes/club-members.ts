@@ -48,6 +48,7 @@ import { ANSWERS_BODY_LIMIT, applicantCategories, assertMayApply, ensureFormBasi
 import { applyWithForm } from "./form-submissions.js";
 import { closeExitSubmission } from "../lib/form-exit.js";
 import { canReadValue } from "../lib/custom-field-access.js";
+import { formatCredential } from "../lib/credentials.js";
 import { listDefinitions, MAX_CUSTOM_FIELDS_PER_CLUB } from "../lib/custom-fields.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -878,6 +879,7 @@ clubMemberRoutes.post("/import", csvWriteLimiter, requireMembersWriteMiddleware,
 
 /** A stored custom field value as a CSV cell (lists joined, booleans in German). */
 function formatCustomValue(value: unknown): string {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) return formatCredential(value);
   if (Array.isArray(value)) return value.map(String).join(", ");
   if (typeof value === "boolean") return value ? "Ja" : "Nein";
   return value === null || value === undefined ? "" : String(value);

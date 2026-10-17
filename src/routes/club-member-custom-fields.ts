@@ -69,6 +69,8 @@ async function buildView(c: { get(k: "clubId"): string; get(k: "clubRoleTypes"):
       label: d.label,
       type: d.fieldType,
       options: d.options ?? null,
+      validation: d.validation ?? null,
+      helpText: d.helpText ?? null,
       visibleTo: d.visibleTo,
       editableBy: d.editableBy,
       sensitive: d.sensitive,

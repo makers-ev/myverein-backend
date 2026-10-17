@@ -159,9 +159,14 @@ export const memberFieldDefinitions = pgTable(
       .references(() => organization.id, { onDelete: "cascade" }),
     key: text("key").notNull(),
     label: text("label").notNull(),
-    // text | textarea | number | date | select | multiselect | checkbox (validated in `src/lib/form-schema.ts`).
+    // text | textarea | number | date | select | multiselect | checkbox | credential (validated in `src/lib/form-schema.ts`).
     fieldType: text("field_type").notNull(),
+    // select/multiselect: the choices; credential: the optional levels ("Stufe").
     options: jsonb("options"),
+    // Form-engine limits of the definition (text length, number range, free-text level length of a credential); NULL = defaults.
+    validation: jsonb("validation"),
+    // Short explanation shown next to the field (profile modules carry one; NULL = none).
+    helpText: text("help_text"),
     // One of FIELD_VISIBLE_TO / FIELD_EDITABLE_BY.
     visibleTo: text("visible_to").notNull().default("vorstand"),
     editableBy: text("editable_by").notNull().default("vorstand"),

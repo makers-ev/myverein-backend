@@ -12,7 +12,7 @@ import type { DbExecutor } from "../lib/club-members.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { ensureClubFormDefaults } from "../lib/form-defaults.js";
 import { formFieldsSchema, type FormField } from "../lib/form-schema.js";
-import { DEFINITION_BODY_LIMIT, formDto, isUuid, MAX_ACTIVE_FORMS_PER_CLUB, MAX_VERSIONS_PER_FORM, fileFieldProblems, keyTypeProblems, publishProblems, versionDto, versionSummaryDto, type PublishProblem } from "../lib/forms.js";
+import { DEFINITION_BODY_LIMIT, formDto, isUuid, MAX_ACTIVE_FORMS_PER_CLUB, MAX_VERSIONS_PER_FORM, credentialFieldProblems, fileFieldProblems, keyTypeProblems, publishProblems, versionDto, versionSummaryDto, type PublishProblem } from "../lib/forms.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { cleanText } from "../lib/text-policy.js";
@@ -124,8 +124,8 @@ formRoutes.post("/", jsonLimit, zValidator("json", createSchema, validationHook)
   const clubId = c.get("clubId");
   const body = c.req.valid("json");
   const fields = body.fields === undefined ? [] : parseFields(body.fields);
-  const unsupported = fileFieldProblems(body.purpose, fields);
-  if (unsupported.length > 0) throw problemsError("This form type cannot contain file fields", unsupported);
+  const unsupported = [...fileFieldProblems(body.purpose, fields), ...credentialFieldProblems(fields)];
+  if (unsupported.length > 0) throw problemsError("This form cannot contain these fields", unsupported);
   // aufnahme/austritt exist from the start (standard forms); creating them first makes a duplicate a clean 409 and
   // keeps the lazy default seeding from racing the new form.
   await ensureClubFormDefaults(clubId);
@@ -171,8 +171,8 @@ async function saveDraft(clubId: string, formId: string, savedBy: string, body: 
   return db.transaction(async (tx) => {
     const form = await loadForm(tx, formId, clubId, true);
     if (form.archivedAt) throw new ConflictError("The form is archived", { details: { code: "form_archived" } });
-    const unsupported = fileFieldProblems(form.purpose, fields);
-    if (unsupported.length > 0) throw problemsError("This form type cannot contain file fields", unsupported);
+    const unsupported = [...fileFieldProblems(form.purpose, fields), ...credentialFieldProblems(fields)];
+    if (unsupported.length > 0) throw problemsError("This form cannot contain these fields", unsupported);
     const history = await keyTypeProblems(form.id, fields, tx);
     if (history.length > 0) throw problemsError("A key of a published field keeps its type", history);
 

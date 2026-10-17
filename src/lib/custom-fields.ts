@@ -10,7 +10,7 @@ import { type FieldErrorCode, type FormField, validateAnswers } from "./form-sch
  * with the SAME engine as form answers (`validateAnswers`), so a value that is stored always fits the definition.
  */
 
-export const CUSTOM_FIELD_TYPES = ["text", "textarea", "number", "date", "select", "multiselect", "checkbox"] as const;
+export const CUSTOM_FIELD_TYPES = ["text", "textarea", "number", "date", "select", "multiselect", "checkbox", "credential"] as const;
 export type CustomFieldType = (typeof CUSTOM_FIELD_TYPES)[number];
 
 /** Definitions per club (a cap against abuse, far above any real club). */
@@ -18,12 +18,14 @@ export const MAX_CUSTOM_FIELDS_PER_CLUB = 100;
 /** Keys per value write request. */
 export const MAX_VALUES_PER_REQUEST = 100;
 
-export type FieldDefinition = Pick<MemberFieldDefinitionRow, "id" | "key" | "label" | "fieldType" | "options" | "visibleTo" | "editableBy" | "sensitive" | "sortOrder" | "archivedAt">;
+export type FieldDefinition = Pick<MemberFieldDefinitionRow, "id" | "key" | "label" | "fieldType" | "options" | "validation" | "helpText" | "visibleTo" | "editableBy" | "sensitive" | "sortOrder" | "archivedAt">;
 
 /** The form-engine view of a definition (`select`/`multiselect` carry their options, the rest has no extra rules). */
-export function definitionToFormField(def: Pick<MemberFieldDefinitionRow, "key" | "label" | "fieldType" | "options">): FormField {
+export function definitionToFormField(def: Pick<MemberFieldDefinitionRow, "key" | "label" | "fieldType"> & Partial<Pick<MemberFieldDefinitionRow, "options" | "validation">>): FormField {
   const options = Array.isArray(def.options) ? (def.options as Array<{ value: string; label: string }>) : undefined;
-  return { key: def.key, label: def.label, type: def.fieldType as FormField["type"], ...(def.fieldType === "select" || def.fieldType === "multiselect" ? { options } : {}) };
+  const hasOptions = def.fieldType === "select" || def.fieldType === "multiselect" || (def.fieldType === "credential" && options !== undefined);
+  const validation = def.validation && typeof def.validation === "object" ? (def.validation as FormField["validation"]) : undefined;
+  return { key: def.key, label: def.label, type: def.fieldType as FormField["type"], ...(hasOptions ? { options } : {}), ...(validation ? { validation } : {}) };
 }
 
 export type CustomValueResult = { ok: true; value: unknown | undefined } | { ok: false; code: FieldErrorCode };
@@ -32,7 +34,7 @@ export type CustomValueResult = { ok: true; value: unknown | undefined } | { ok:
  * Validates one value against its definition. `value: undefined` in the result means "cleared" (null, empty text, empty
  * list, unchecked checkbox are all the same: no value stored).
  */
-export function validateCustomValue(def: Pick<MemberFieldDefinitionRow, "key" | "label" | "fieldType" | "options">, value: unknown): CustomValueResult {
+export function validateCustomValue(def: Pick<MemberFieldDefinitionRow, "key" | "label" | "fieldType"> & Partial<Pick<MemberFieldDefinitionRow, "options" | "validation">>, value: unknown): CustomValueResult {
   const result = validateAnswers([definitionToFormField(def)], { [def.key]: value }, { mode: "submit" });
   if (!result.ok) return { ok: false, code: result.errors[def.key] ?? "invalid_value" };
   return { ok: true, value: Object.hasOwn(result.answers, def.key) ? result.answers[def.key] : undefined };
@@ -63,6 +65,8 @@ export function optionValues(options: unknown): string[] {
 export function valueUsesOtherOption(value: unknown, allowed: ReadonlySet<string>): boolean {
   if (typeof value === "string") return !allowed.has(value);
   if (Array.isArray(value)) return value.some((v) => typeof v !== "string" || !allowed.has(v));
+  // credential: only its level refers to an option
+  if (value !== null && typeof value === "object" && "level" in value && typeof (value as { level: unknown }).level === "string") return !allowed.has((value as { level: string }).level);
   return false;
 }
 
