@@ -1,5 +1,5 @@
-import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, uuid, boolean, index } from "drizzle-orm/pg-core";
+import { relations, sql } from "drizzle-orm";
+import { pgTable, text, timestamp, uuid, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { user, organization } from "../../auth/auth-schema.js";
 import { departments } from "./departments.js";
@@ -24,7 +24,11 @@ export const calendars = pgTable(
       .references(() => user.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("calendars_club_id_idx").on(table.clubId)],
+  (table) => [
+    index("calendars_club_id_idx").on(table.clubId),
+    // At most one default calendar per club (the routes unset the old default in the same transaction).
+    uniqueIndex("calendars_one_default_per_club_uidx").on(table.clubId).where(sql`${table.isDefault}`),
+  ],
 );
 
 export const calendarsRelations = relations(calendars, ({ one }) => ({

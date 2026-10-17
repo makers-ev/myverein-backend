@@ -190,6 +190,13 @@
       "when": 1791832369237,
       "tag": "0026_child-applications",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1792226106997,
+      "tag": "0027_default-calendars",
+      "breakpoints": true
     }
   ]
 }
