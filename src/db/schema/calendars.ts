@@ -19,9 +19,8 @@ export const calendars = pgTable(
     name: text("name").notNull(),
     isDefault: boolean("is_default").notNull().default(false),
     icalImportUrl: text("ical_import_url"),
-    createdBy: text("created_by")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
+    // NULL once the creating account was deleted (the calendar / event stays, it belongs to the club).
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

@@ -53,6 +53,7 @@ describe("profile modules and credential fields", () => {
     const res = await call(who, `/club-members/${memberId}/custom-fields`, { clubId: cid() });
     return { status: res.status, fields: res.status === 200 ? ((await body(res)).data.fields as Array<{ key: string; value: unknown; editable: boolean }>) : [] };
   };
+  const viewFull = async (who: Account) => ((await body(await call(who, `/club-members/${targetRowId}/custom-fields`, { clubId: cid() }))).data.fields as Array<{ key: string; enteredBy: unknown }>);
   const rowCount = async (clubId: string, key: string) => (await db.select({ n: count() }).from(memberFieldDefinitions).where(and(eq(memberFieldDefinitions.clubId, clubId), eq(memberFieldDefinitions.key, key))))[0]!.n;
 
   beforeAll(async () => {
@@ -92,6 +93,12 @@ describe("profile modules and credential fields", () => {
     expect(data.modules.every((x: { state: string; mandatory: boolean }) => x.state === "inactive" && x.mandatory === false)).toBe(true);
     expect(data.groups.map((g: { id: string }) => g.id)).toEqual(["fuehrerschein", "qualifikationen", "kinderschutz", "mitarbeit", "sport", "persoenlich"]);
     expect(data.limit).toEqual({ used: 0, max: MAX_CUSTOM_FIELDS_PER_CLUB });
+    // Kinderschutz (sensitive) additionally needs members:read_sensitive: the schriftfuehrer (forms:write only) is refused.
+    expect((await activate("mod_ks_fuehrungszeugnis", m("sf"))).status).toBe(403);
+    expect((await deactivate("mod_ks_fuehrungszeugnis", m("sf"))).status).toBe(403);
+    expect(await rowCount(cid(), "mod_ks_fuehrungszeugnis")).toBe(0);
+    expect((await activate("mod_q_sanitaeter", m("sf"))).status).toBe(201);
+    expect((await deactivate("mod_q_sanitaeter", m("sf"))).status).toBe(200);
     expect((await activate("mod_does_not_exist")).status).toBe(404);
     expect((await activate("custom_thing")).status).toBe(404);
     expect((await deactivate("mod_does_not_exist")).status).toBe(404);
@@ -113,20 +120,21 @@ describe("profile modules and credential fields", () => {
     const ks = (await body(await activate("mod_ks_fuehrungszeugnis"))).data.field;
     expect(ks).toMatchObject({ visibleTo: "vorstand", sensitive: true, editableBy: "self", type: "credential" });
     expect(ks.helpText).toContain("Inhalt");
+    expect(ks.helpText).toContain("Selbstangabe");
     const stapler = (await body(await activate("mod_fs_stapler"))).data.field;
     expect(stapler).toMatchObject({ visibleTo: "funktionstraeger", sensitive: false });
     const sitze = (await body(await activate("mod_mw_sitzplaetze"))).data.field;
     expect(sitze).toMatchObject({ type: "number", validation: { min: 0, max: 9 } });
     const cat = (await body(await catalog())).data;
     expect(cat.modules.find((x: { id: string }) => x.id === "mod_q_juleica")).toMatchObject({ state: "active", fieldId: created.field.id });
-    expect(cat.limit.used).toBe(4);
+    expect(cat.limit.used).toBe(5); // incl. the archived sanitaeter from the permission test
 
     // Other club untouched (IDOR): its catalog is still empty, and its board cannot reach this club's definition.
     expect((await body(await catalog(other.founder, other.clubId))).data.modules.every((x: { state: string }) => x.state === "inactive")).toBe(true);
     expect(await rowCount(other.clubId, "mod_q_juleica")).toBe(0);
     // A club's board cannot activate in a club it does not belong to (clubGuard answers 404, no existence leak).
-    expect((await activate("mod_q_sanitaeter", other.founder, cid())).status).toBe(404);
-    expect(await rowCount(cid(), "mod_q_sanitaeter")).toBe(0);
+    expect((await activate("mod_q_segelschein", other.founder, cid())).status).toBe(404);
+    expect(await rowCount(cid(), "mod_q_segelschein")).toBe(0);
   });
 
   it("creates exactly one definition under parallel activation", async () => {
@@ -291,5 +299,48 @@ describe("profile modules and credential fields", () => {
     expect(refused.status).toBe(422);
     expect((await body(refused)).error.details.problems).toEqual([{ code: "module_never_mandatory", fieldKey: "ks95" }]);
     expect((await publishWith(false)).status).toBe(200);
+  });
+
+  it("hides the value count of sensitive definitions from callers without members:read_sensitive", async () => {
+    await activate("mod_ks_fuehrungszeugnis");
+    expect((await put(board(), { mod_ks_fuehrungszeugnis: { valid: true, validUntil: "2031-01-01" } })).status).toBe(200);
+    const countsFor = async (who: Account) => Object.fromEntries(((await body(await call(who, "/member-fields", { clubId: cid() }))).data as Array<{ key: string; valueCount: number | null }>).map((d) => [d.key, d.valueCount]));
+    expect((await countsFor(board())).mod_ks_fuehrungszeugnis).toBe(1);
+    expect((await countsFor(m("sf"))).mod_ks_fuehrungszeugnis).toBeNull();
+    const id = (await db.query.memberFieldDefinitions.findFirst({ where: and(eq(memberFieldDefinitions.clubId, cid()), eq(memberFieldDefinitions.key, "mod_ks_fuehrungszeugnis")) }))!.id;
+    expect((await call(m("sf"), `/member-fields/${id}`, { method: "DELETE", clubId: cid() })).status).toBe(403);
+    const unarch = (await body(await call(board(), `/member-fields/${id}`, { method: "PATCH", clubId: cid(), body: { sortOrder: 5 } }))).data;
+    expect(unarch.valueCount).toBe(1);
+    expect((await body(await call(m("sf"), `/member-fields/${id}`, { method: "PATCH", clubId: cid(), body: { sortOrder: 6 } }))).data?.valueCount ?? null).toBeNull();
+  });
+
+  it("lets the board set a credential's free-text level limit and rejects empty level lists", async () => {
+    const mk = (extra: Record<string, unknown>, key: string) => call(board(), "/member-fields", { method: "POST", clubId: cid(), body: { key, label: "Lizenz", type: "credential", ...extra } });
+    const created = await mk({ validation: { maxLength: 20 } }, "lic_free");
+    expect(created.status).toBe(201);
+    const createdBody = await body(created);
+    expect(createdBody.data.validation).toEqual({ maxLength: 20 });
+    for (const [extra, key] of [[{ validation: { maxLength: 0 } }, "lic_a"], [{ validation: { maxLength: 81 } }, "lic_b"], [{ validation: { maxLength: 5, minLength: 1 } }, "lic_c"], [{ options: [] }, "lic_d"], [{ validation: { maxLength: 5 }, options: [{ value: "a", label: "A" }] }, "lic_e"]] as const) {
+      expect((await mk(extra, key)).status, key).toBe(422);
+    }
+    expect((await call(board(), "/member-fields", { method: "POST", clubId: cid(), body: { key: "lic_f", label: "x", type: "text", validation: { maxLength: 5 } } })).status).toBe(422);
+    const id = createdBody.data.id;
+    expect((await put(board(), { lic_free: { valid: true, level: "Landesliga A" } })).status).toBe(200);
+    expect((await put(board(), { lic_free: { valid: true, level: "x".repeat(21) } })).status).toBe(422);
+    const shrink = await call(board(), `/member-fields/${id}`, { method: "PATCH", clubId: cid(), body: { validation: { maxLength: 5 } } });
+    expect(shrink.status).toBe(409);
+    expect((await call(board(), `/member-fields/${id}`, { method: "PATCH", clubId: cid(), body: { validation: { maxLength: 30 } } })).status).toBe(200);
+    expect((await call(board(), `/member-fields/${id}`, { method: "PATCH", clubId: cid(), body: { options: [] } })).status).toBe(422);
+  });
+
+  it("records who entered a value (enteredBy) in the member view", async () => {
+    expect((await patchMe(m("target"), { mod_q_erste_hilfe: { valid: true } })).status).toBe(200);
+    const by = async (who: Account) => Object.fromEntries((await viewFull(who)).map((f) => [f.key, f.enteredBy]));
+    expect((await by(board())).mod_q_erste_hilfe).toBe("self");
+    expect((await by(board())).mod_ks_fuehrungszeugnis).toBe("board");
+    expect((await by(board())).mod_q_segelschein).toBeUndefined();
+    expect((await put(board(), { mod_q_erste_hilfe: { valid: true } })).status).toBe(200);
+    expect((await by(board())).mod_q_erste_hilfe).toBe("board");
+    expect(JSON.stringify(await viewFull(board()))).not.toContain(m("target").userId);
   });
 });

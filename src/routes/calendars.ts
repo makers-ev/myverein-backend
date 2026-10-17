@@ -63,15 +63,8 @@ calendarRoutes.get("/:id", async (c) => {
   return c.json({ data: row });
 });
 
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
-
-async function onlyCalendarOfClub(tx: Tx, clubId: string): Promise<boolean> {
-  const rows = await tx.select({ id: calendars.id }).from(calendars).where(eq(calendars.clubId, clubId)).limit(2);
-  return rows.length === 1;
-}
-
 function defaultRequired(): ConflictError {
-  return new ConflictError("The default club calendar cannot be removed or unset while it is the only calendar; make another calendar the default first", {
+  return new ConflictError("The default club calendar cannot be deleted, unset or moved to a department; make another calendar the default first", {
     details: { code: "default_calendar_required" },
   });
 }
@@ -156,9 +149,9 @@ calendarRoutes.patch(
       await lockClubCalendars(tx, clubId);
       const [current] = await tx.select().from(calendars).where(and(eq(calendars.id, id), eq(calendars.clubId, clubId)));
       if (!current) throw new NotFoundError("Calendar not found");
-      // The club-wide standard calendar is what events live on: it stays the default (and club-wide) while it is the
-      // only calendar -- the board makes ANOTHER calendar the default instead.
-      if (current.isDefault && (body.isDefault === false || body.departmentId) && (await onlyCalendarOfClub(tx, clubId))) {
+      // Every club has exactly one default: the default calendar stays the default (and club-wide) -- the board makes
+      // ANOTHER calendar the default instead, which then takes the status away from this one.
+      if (current.isDefault && (body.isDefault === false || body.departmentId)) {
         throw defaultRequired();
       }
       if (body.isDefault) {
@@ -193,7 +186,7 @@ calendarRoutes.delete("/:id", async (c) => {
     await lockClubCalendars(tx, clubId);
     const [current] = await tx.select().from(calendars).where(and(eq(calendars.id, id), eq(calendars.clubId, clubId)));
     if (!current) throw new NotFoundError("Calendar not found");
-    if (current.isDefault && (await onlyCalendarOfClub(tx, clubId))) throw defaultRequired();
+    if (current.isDefault) throw defaultRequired();
     await tx.delete(calendars).where(and(eq(calendars.id, id), eq(calendars.clubId, clubId)));
     await tx.insert(auditLog).values({ eventType: "calendar.delete", subjectId: id, payload: { clubId } });
   });

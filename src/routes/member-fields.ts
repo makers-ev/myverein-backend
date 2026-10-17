@@ -53,7 +53,10 @@ function requireFormsWrite(roleTypes: string[]): void {
   if (!hasClubPermission(roleTypes, "forms:write")) throw new ForbiddenError("Missing forms:write permission");
 }
 
-const dto = (d: FieldDefinition, valueCount?: number) => ({
+/** The number of stored values of a sensitive definition is itself sensitive: only members:read_sensitive sees it. */
+const countFor = (d: Pick<FieldDefinition, "sensitive">, n: number, roleTypes: string[]): number | null => (d.sensitive && !hasClubPermission(roleTypes, "members:read_sensitive") ? null : n);
+
+const dto = (d: FieldDefinition, valueCount?: number | null) => ({
   id: d.id,
   key: d.key,
   label: d.label,
@@ -97,7 +100,7 @@ memberFieldRoutes.get("/", async (c) => {
   const defs = (await listDefinitions(clubId)).filter((d) => includeArchived || d.archivedAt === null);
   if (manager) {
     const counts = new Map((await db.select({ fieldId: memberFieldValues.fieldId, n: count() }).from(memberFieldValues).innerJoin(memberFieldDefinitions, eq(memberFieldDefinitions.id, memberFieldValues.fieldId)).where(eq(memberFieldDefinitions.clubId, clubId)).groupBy(memberFieldValues.fieldId)).map((r) => [r.fieldId, r.n]));
-    return c.json({ data: defs.map((d) => dto(d, counts.get(d.id) ?? 0)) });
+    return c.json({ data: defs.map((d) => dto(d, countFor(d, counts.get(d.id) ?? 0, roleTypes))) });
   }
   // Everybody else: the definitions whose values they may see of others, plus those they may fill in for themselves.
   const visible = defs.filter((d) => d.archivedAt === null && (canReadValue(d, { roleTypes, isSelf: false }) || canSelfWrite(d)));
@@ -149,6 +152,11 @@ memberFieldRoutes.get("/catalog", async (c) => {
   });
 });
 
+/** Switching a sensitive module (Kinderschutz) on or off is a decision about protected data: members:read_sensitive as well. */
+function requireSensitiveFor(m: ProfileModule, roleTypes: string[]): void {
+  if (m.sensitive && !hasClubPermission(roleTypes, "members:read_sensitive")) throw new ForbiddenError("Missing members:read_sensitive permission for a module with sensitive data");
+}
+
 function moduleOr404(id: string): ProfileModule {
   const m = findModule(id);
   if (!m) throw new NotFoundError("Profile module not found");
@@ -161,6 +169,7 @@ memberFieldRoutes.post("/catalog/:moduleId/activate", async (c) => {
   requireFormsWrite(c.get("clubRoleTypes"));
   const clubId = c.get("clubId");
   const mod = moduleOr404(c.req.param("moduleId"));
+  requireSensitiveFor(mod, c.get("clubRoleTypes"));
 
   const outcome = await db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`custom-field-create:${clubId}`}, 0))`);
@@ -180,7 +189,7 @@ memberFieldRoutes.post("/catalog/:moduleId/activate", async (c) => {
     await tx.insert(auditLog).values({ eventType: "profile_module.activate", subjectId: row!.id, payload: { clubId, moduleId: mod.id, reactivated: false, sensitive: mod.sensitive, by: c.get("membership").id } });
     return { row: row!, created: true, reactivated: false };
   });
-  return c.json({ data: { module: moduleDto(mod, outcome.row), created: outcome.created, reactivated: outcome.reactivated, field: dto(outcome.row, 0) } }, outcome.created ? 201 : 200);
+  return c.json({ data: { module: moduleDto(mod, outcome.row), created: outcome.created, reactivated: outcome.reactivated, field: dto(outcome.row, outcome.created ? 0 : undefined) } }, outcome.created ? 201 : 200);
 });
 
 // Archives the definition (the values stay for the record, nobody can read or write them); idempotent.
@@ -188,6 +197,7 @@ memberFieldRoutes.post("/catalog/:moduleId/deactivate", async (c) => {
   requireFormsWrite(c.get("clubRoleTypes"));
   const clubId = c.get("clubId");
   const mod = moduleOr404(c.req.param("moduleId"));
+  requireSensitiveFor(mod, c.get("clubRoleTypes"));
 
   const result = await db.transaction(async (tx) => {
     const [existing] = await tx.select().from(memberFieldDefinitions).where(and(eq(memberFieldDefinitions.clubId, clubId), eq(memberFieldDefinitions.key, mod.id))).for("update");
@@ -205,6 +215,9 @@ const VISIBILITY_RANK: Record<string, number> = { vorstand: 0, funktionstraeger:
 
 const optionsSchema = z.array(z.object({ value: z.string(), label: z.string() }).strict()).max(100);
 
+/** The only limit a board can set by hand: the length of a credential's free-text level (1-80). */
+const levelLimitSchema = z.object({ maxLength: z.number().int().min(1).max(80) }).strict();
+
 const createSchema = z
   .object({
     key: z.string().max(60),
@@ -212,6 +225,7 @@ const createSchema = z
     helpText: z.string().max(500).optional(),
     type: z.enum(CUSTOM_FIELD_TYPES),
     options: optionsSchema.optional(),
+    validation: levelLimitSchema.optional(),
     visibleTo: z.enum(FIELD_VISIBLE_TO).default("vorstand"),
     editableBy: z.enum(FIELD_EDITABLE_BY).default("vorstand"),
     sensitive: z.boolean().default(false),
@@ -223,6 +237,7 @@ memberFieldRoutes.post("/", jsonLimit, zValidator("json", createSchema, validati
   requireFormsWrite(c.get("clubRoleTypes"));
   const clubId = c.get("clubId");
   const body = c.req.valid("json");
+  if (body.validation !== undefined && body.type !== "credential") throw new ValidationError("validation is only available for credential fields");
   const checked = checkDefinition(body);
 
   try {
@@ -232,7 +247,7 @@ memberFieldRoutes.post("/", jsonLimit, zValidator("json", createSchema, validati
       if (n >= MAX_CUSTOM_FIELDS_PER_CLUB) throw new ConflictError("Too many custom fields", { details: { code: "custom_field_limit", limit: MAX_CUSTOM_FIELDS_PER_CLUB } });
       const [row] = await tx
         .insert(memberFieldDefinitions)
-        .values({ clubId, key: checked.key, label: checked.label, helpText: checked.helpText ?? null, fieldType: checked.type, options: checked.options ?? null, visibleTo: body.visibleTo, editableBy: body.editableBy, sensitive: body.sensitive, sortOrder: body.sortOrder })
+        .values({ clubId, key: checked.key, label: checked.label, helpText: checked.helpText ?? null, fieldType: checked.type, options: checked.options ?? null, validation: checked.validation ?? null, visibleTo: body.visibleTo, editableBy: body.editableBy, sensitive: body.sensitive, sortOrder: body.sortOrder })
         .returning();
       await tx.insert(auditLog).values({ eventType: "member_field.create", subjectId: row!.id, payload: { clubId, key: row!.key, sensitive: row!.sensitive, createdBy: c.get("membership").id } });
       return row!;
@@ -250,6 +265,7 @@ const updateSchema = z
     helpText: z.string().max(500).nullable().optional(),
     type: z.enum(CUSTOM_FIELD_TYPES).optional(),
     options: optionsSchema.nullable().optional(),
+    validation: levelLimitSchema.nullable().optional(),
     visibleTo: z.enum(FIELD_VISIBLE_TO).optional(),
     editableBy: z.enum(FIELD_EDITABLE_BY).optional(),
     sensitive: z.boolean().optional(),
@@ -275,7 +291,8 @@ memberFieldRoutes.patch("/:id", jsonLimit, zValidator("json", updateSchema, vali
     else if (body.type !== undefined && !isChoice) options = null;
     const helpText = body.helpText !== undefined ? body.helpText : current.helpText;
     // Limits of a definition stay with it (they only fit the type they were made for).
-    const validation = type === current.fieldType ? current.validation : null;
+    if (body.validation && type !== "credential") throw new ValidationError("validation is only available for credential fields");
+    const validation = body.validation !== undefined ? body.validation : type === current.fieldType ? current.validation : null;
     const checked = checkDefinition({ key: current.key, type, label: body.label ?? current.label, options, validation, helpText });
 
     const values = await countValues(tx, current.id);
@@ -292,6 +309,11 @@ memberFieldRoutes.patch("/:id", jsonLimit, zValidator("json", updateSchema, vali
     if (lowersSensitive && values > 0) throw new ConflictError("A sensitive custom field with values stays sensitive", { details: { code: "sensitive_locked" } });
 
     if (type !== current.fieldType && values > 0) throw new ConflictError("The type of a custom field cannot change once it has values", { details: { code: "custom_field_has_values" } });
+    const newMax = (checked.validation as { maxLength?: number } | undefined)?.maxLength;
+    if (body.validation !== undefined && newMax !== undefined && values > 0) {
+      const stored = await tx.select({ value: memberFieldValues.value }).from(memberFieldValues).where(eq(memberFieldValues.fieldId, current.id));
+      if (stored.some((s) => typeof (s.value as { level?: unknown } | null)?.level === "string" && ((s.value as { level: string }).level.length > newMax))) throw new ConflictError("A level that is in use is longer than the new limit", { details: { code: "option_in_use" } });
+    }
     if (isChoice && body.options !== undefined && values > 0) {
       const allowed = new Set(optionValues(checked.options));
       const stored = await tx.select({ value: memberFieldValues.value }).from(memberFieldValues).where(eq(memberFieldValues.fieldId, current.id));
@@ -327,7 +349,7 @@ memberFieldRoutes.patch("/:id", jsonLimit, zValidator("json", updateSchema, vali
     });
     return { row: row!, values };
   });
-  return c.json({ data: dto(updated.row, updated.values) });
+  return c.json({ data: dto(updated.row, countFor(updated.row, updated.values, c.get("clubRoleTypes"))) });
 });
 
 // Delete when nothing refers to the field, archive when values exist (they stay for the record, nobody can read or write them).
@@ -336,6 +358,8 @@ memberFieldRoutes.delete("/:id", async (c) => {
   const clubId = c.get("clubId");
   const outcome = await db.transaction(async (tx) => {
     const current = await loadLocked(tx, clubId, c.req.param("id"));
+    // The answer (deleted vs archived) tells whether values exist: for sensitive definitions only members:read_sensitive may ask.
+    if (current.sensitive && !hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive")) throw new ForbiddenError("Missing members:read_sensitive permission for a sensitive custom field");
     const values = await countValues(tx, current.id);
     if (values > 0) {
       if (current.archivedAt === null) await tx.update(memberFieldDefinitions).set({ archivedAt: new Date() }).where(eq(memberFieldDefinitions.id, current.id));
@@ -359,5 +383,5 @@ memberFieldRoutes.post("/:id/unarchive", async (c) => {
     await tx.insert(auditLog).values({ eventType: "member_field.unarchive", subjectId: current.id, payload: { clubId, key: current.key, restoredBy: c.get("membership").id } });
     return { row: row!, values: await countValues(tx, current.id) };
   });
-  return c.json({ data: dto(restored.row, restored.values) });
+  return c.json({ data: dto(restored.row, countFor(restored.row, restored.values, c.get("clubRoleTypes"))) });
 });

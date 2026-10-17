@@ -12,7 +12,7 @@ import { clubMembers } from "../db/schema/club-members.js";
 import type { ClubMemberRow } from "../db/schema/club-members.js";
 import { ensureClubMember, resolveClubMember } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
-import { canBoardWrite, canReadValue, canSelfWrite, isBoardLevel } from "../lib/custom-field-access.js";
+import { canBoardWrite, canReadValue, canSelfWrite, canViewCredentialOverview, isBoardLevel } from "../lib/custom-field-access.js";
 import { type FieldDefinition, listDefinitions, MAX_VALUES_PER_REQUEST, validateCustomValue, writeValues } from "../lib/custom-fields.js";
 import { addDays, CREDENTIAL_STATUSES, credentialExpiry, DEFAULT_EXPIRING_DAYS, MAX_EXPIRING_DAYS, type CredentialStatus } from "../lib/credentials.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
@@ -34,6 +34,7 @@ import { rateLimit } from "../middleware/rate-limit.js";
 export const memberCustomFieldRoutes = new Hono<ClubEnv>();
 
 const writeLimiter = rateLimit({ windowMs: 60_000, max: 60, key: (c) => `member-custom-fields:${c.get("user")?.id ?? "anonymous"}` });
+const overviewLimiter = rateLimit({ windowMs: 60_000, max: 60, key: (c) => `credential-overview:${c.get("user")?.id ?? "anonymous"}` });
 const jsonLimit = bodyLimit({
   maxSize: 64 * 1024,
   onError: () => {
@@ -47,6 +48,12 @@ const validationHook = (result: { success: boolean; error?: { issues: unknown } 
 const writeSchema = z.object({ values: z.record(z.string().max(60), z.unknown()).refine((v) => Object.keys(v).length >= 1 && Object.keys(v).length <= MAX_VALUES_PER_REQUEST, { message: `1 to ${MAX_VALUES_PER_REQUEST} values` }) });
 
 type Mode = "board" | "self";
+
+/** `self` when the writer is the account of the member the value belongs to, `board` otherwise, null without a value. No person ids. */
+function enteredBy(updatedBy: string | null | undefined, ownerAccountId: string | null): "self" | "board" | null {
+  if (updatedBy === undefined) return null;
+  return updatedBy !== null && ownerAccountId !== null && updatedBy === ownerAccountId ? "self" : "board";
+}
 
 /** The fields of `row` the caller may see, with their values (see the module comment for the rules). */
 async function buildView(c: { get(k: "clubId"): string; get(k: "clubRoleTypes"): string[]; get(k: "membership"): { id: string } }, row: ClubMemberRow, includeArchived: boolean) {
@@ -84,6 +91,8 @@ async function buildView(c: { get(k: "clubId"): string; get(k: "clubRoleTypes"):
       editable: canBoardWrite(d, roleTypes) || (isSelf && canSelfWrite(d)),
       value: stored?.value ?? null,
       updatedAt: stored?.updatedAt ?? null,
+      // Who recorded the value: the person itself ("self": a declaration the club has not checked) or somebody else ("board").
+      enteredBy: enteredBy(stored?.updatedBy, row.memberId),
       // Credential fields only: `{ status: expired|expiring|valid|missing, daysLeft, validUntil }` (Berlin day, 90-day window).
       expiry: d.fieldType === "credential" && canReadValue(d, viewer) ? credentialExpiry(stored?.value, today) : null,
     };
@@ -168,7 +177,7 @@ const overviewQuery = z.object({
   fieldKey: z.string().max(60).regex(FIELD_KEY_RE).optional(),
   status: z.enum(CREDENTIAL_STATUSES as unknown as [CredentialStatus, ...CredentialStatus[]]).optional(),
   withinDays: z.coerce.number().int().min(1).max(MAX_EXPIRING_DAYS).default(DEFAULT_EXPIRING_DAYS),
-  page: z.coerce.number().int().min(1).max(100_000).default(1),
+  page: z.coerce.number().int().min(1).max(1000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(50),
   /** Only honoured for callers who may see all members (members:write / members:read_sensitive). */
   includeFormer: z.enum(["true", "false"]).optional(),
@@ -182,7 +191,9 @@ const overviewQuery = z.object({
  * (members who do not hold that credential). An unknown, archived or invisible `fieldKey` is 404. Values never reach the
  * logs; a page with values of `sensitive` fields leaves ONE audit entry with ids only.
  */
-memberCustomFieldRoutes.get("/credentials", requireAccountMember, async (c) => {
+memberCustomFieldRoutes.get("/credentials", requireAccountMember, overviewLimiter, async (c) => {
+  // A club-wide list: board-level and Funktionsträger only, never plain members (even for fields visible to "mitglied").
+  if (!canViewCredentialOverview(c.get("clubRoleTypes"))) throw new ForbiddenError("The credential overview is for the board and Funktionsträger");
   const parsed = overviewQuery.safeParse(c.req.query());
   if (!parsed.success) throw new ValidationError("Invalid query", { details: parsed.error.issues });
   const q = parsed.data;
@@ -219,7 +230,7 @@ memberCustomFieldRoutes.get("/credentials", requireAccountMember, async (c) => {
 
   const [totalRow] = await db.select({ n: count() }).from(clubMembers).leftJoin(v, join).where(where);
   const rows = await db
-    .select({ clubMemberId: clubMembers.id, displayName: clubMembers.displayName, firstName: clubMembers.firstName, lastName: clubMembers.lastName, status: clubMembers.status, fieldId: v.fieldId, value: v.value, updatedAt: v.updatedAt })
+    .select({ clubMemberId: clubMembers.id, accountId: clubMembers.memberId, updatedBy: v.updatedBy, displayName: clubMembers.displayName, firstName: clubMembers.firstName, lastName: clubMembers.lastName, status: clubMembers.status, fieldId: v.fieldId, value: v.value, updatedAt: v.updatedAt })
     .from(clubMembers)
     .leftJoin(v, join)
     .where(where)
@@ -240,16 +251,20 @@ memberCustomFieldRoutes.get("/credentials", requireAccountMember, async (c) => {
       sensitive: def.sensitive,
       value: r.value ?? null,
       updatedAt: r.updatedAt ?? null,
+      enteredBy: r.fieldId === null ? null : enteredBy(r.updatedBy, r.accountId),
       expiry: credentialExpiry(r.value, today, q.withinDays),
     };
   });
 
-  const sensitiveRows = rows.filter((r) => r.fieldId !== null && byId.get(r.fieldId)!.sensitive);
-  if (sensitiveRows.length > 0) {
+  // Every query that touched a sensitive field is audited -- also an empty page or status=missing, because total and
+  // the missing list disclose who holds the credential. Field ids always, member ids only of the rows with a value.
+  const sensitiveSelected = selected.filter((d) => d.sensitive);
+  if (sensitiveSelected.length > 0) {
+    const sensitiveRows = rows.filter((r) => r.fieldId !== null && byId.get(r.fieldId)!.sensitive);
     await db.insert(auditLog).values({
       eventType: "member_field.sensitive_read",
       subjectId: clubId,
-      payload: { clubId, via: "credentials_overview", fieldIds: [...new Set(sensitiveRows.map((r) => r.fieldId!))], clubMemberIds: [...new Set(sensitiveRows.map((r) => r.clubMemberId))], readBy: c.get("membership").id },
+      payload: { clubId, via: "credentials_overview", fieldIds: sensitiveSelected.map((d) => d.id), clubMemberIds: [...new Set(sensitiveRows.map((r) => r.clubMemberId))], readBy: c.get("membership").id },
     });
   }
   return c.json({ data, page: q.page, pageSize: q.pageSize, total: totalRow?.n ?? 0, today, withinDays: q.withinDays, fields: fieldsMeta });

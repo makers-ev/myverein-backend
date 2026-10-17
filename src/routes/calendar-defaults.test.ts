@@ -17,7 +17,7 @@ import { eventRoutes } from "./events.js";
 
 /**
  * The standard club calendar: lazy creation for calendar-less clubs, visibility (member yes, guest no, former member
- * no), idempotency under parallel ensure, one default per club, and protection of the only calendar.
+ * no), idempotency under parallel ensure, one default per club, and protection of the default calendar.
  */
 
 const app = new Hono();
@@ -138,7 +138,7 @@ describe("default club calendar", () => {
     expect(guestEvents.data).toHaveLength(0);
   });
 
-  it("protects the default calendar while it is the only one, and 'make another default' still works", async () => {
+  it("always protects the default calendar, and 'make another default' still works", async () => {
     const [def] = await clubCalendars();
     const del = await call(board, `/calendars/${def!.id}`, { method: "DELETE" });
     expect(del.status).toBe(409);
@@ -151,6 +151,13 @@ describe("default club calendar", () => {
 
     const second = (await (await call(board, "/calendars", { method: "POST", body: { name: "Jugend" } })).json()) as { data: { id: string; isDefault: boolean } };
     expect(second.data.isDefault).toBe(false);
+    // The invariant "exactly one default" holds with several calendars too: the default can only be handed over.
+    for (const attempt of [call(board, `/calendars/${def!.id}`, { method: "DELETE" }), call(board, `/calendars/${def!.id}`, { method: "PATCH", body: { isDefault: false } })]) {
+      const res = await attempt;
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as { error: { details: { code: string } } }).error.details.code).toBe("default_calendar_required");
+    }
+    expect((await clubCalendars()).filter((c) => c.isDefault).map((c) => c.id)).toEqual([def!.id]);
     const promote = await call(board, `/calendars/${second.data.id}`, { method: "PATCH", body: { isDefault: true } });
     expect(promote.status).toBe(200);
     const after = await clubCalendars();
@@ -197,6 +204,31 @@ describe("default club calendar", () => {
       expect(await db.select().from(calendars).where(eq(calendars.clubId, club!.id))).toHaveLength(1);
     } finally {
       await db.delete(organization).where(eq(organization.id, club!.id));
+    }
+  });
+
+  it("deleting the creating account keeps the calendar and its events (created_by becomes NULL)", async () => {
+    const founder = await signUp("founder-del");
+    const club = await auth.api.createOrganization({ body: { name: `Cal Del ${suffix}`, slug: `cal-del-${suffix}`, userId: founder.userId } });
+    try {
+      const m = await db.query.member.findFirst({ where: (mm, { and, eq: same }) => and(same(mm.organizationId, club!.id), same(mm.userId, founder.userId)) });
+      await db.insert(clubRoles).values({ memberId: m!.id, roleType: "vorsitz" });
+      const def = (await ensureDefaultCalendar(club!.id))!;
+      expect(def.createdBy).toBe(founder.userId);
+      const ev = await app.request(`/events?clubId=${club!.id}`, {
+        method: "POST",
+        headers: { cookie: founder.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ calendarId: def.id, title: "Bleibt", startsAt: "2030-06-01T10:00:00+02:00" }),
+      });
+      expect(ev.status).toBe(201);
+      await db.delete(user).where(eq(user.id, founder.userId));
+      const [cal] = await db.select().from(calendars).where(eq(calendars.id, def.id));
+      expect(cal).toMatchObject({ isDefault: true, createdBy: null });
+      const events = await db.query.events.findMany({ where: (e, { eq: same }) => same(e.calendarId, def.id) });
+      expect(events.map((e) => [e.title, e.createdBy])).toEqual([["Bleibt", null]]);
+    } finally {
+      await db.delete(organization).where(eq(organization.id, club!.id));
+      await db.delete(user).where(eq(user.id, founder.userId));
     }
   });
 });

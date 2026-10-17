@@ -1,4 +1,4 @@
-import { and, asc, count, eq, ilike, isNull, sql } from "drizzle-orm";
+import { and, asc, count, eq, ilike, isNull, ne, sql } from "drizzle-orm";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
@@ -27,12 +27,12 @@ export async function lockClubCalendars(executor: DbExecutor, clubId: string): P
   await executor.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`calendar-defaults:${clubId}`}, 0))`);
 }
 
-/** The account that is recorded as creator of a system-created calendar: the club's owner, else its earliest member. */
+/** The account that is recorded as creator of a system-created calendar: the club's owner, else its earliest real member (never an external guest). */
 async function founderUserId(executor: DbExecutor, clubId: string): Promise<string | null> {
   const rows = await executor
     .select({ userId: member.userId, role: member.role })
     .from(member)
-    .where(eq(member.organizationId, clubId))
+    .where(and(eq(member.organizationId, clubId), ne(member.role, "guest")))
     .orderBy(asc(member.createdAt), asc(member.id));
   return (rows.find((r) => r.role === "owner") ?? rows[0])?.userId ?? null;
 }

@@ -37,6 +37,14 @@ export function isBoardLevel(roleTypes: readonly string[]): boolean {
   return hasClubPermission(roleTypes, "members:write") || hasClubPermission(roleTypes, "members:read_sensitive");
 }
 
+/**
+ * The credential overview (`GET /club-members/credentials`) is a club-wide list: board-level callers and the Funktionsträger
+ * roles only, NEVER plain members, even if a credential field is visible to `mitglied` on a single member's profile.
+ */
+export function canViewCredentialOverview(roleTypes: readonly string[]): boolean {
+  return isBoardLevel(roleTypes) || roleTypes.some((r) => (FUNKTIONSTRAEGER_ROLES as readonly string[]).includes(r));
+}
+
 export function canReadValue(def: Pick<Access, "visibleTo" | "sensitive">, viewer: Viewer): boolean {
   if (viewer.isSelf) return true;
   if (def.sensitive) return hasClubPermission(viewer.roleTypes, "members:read_sensitive");

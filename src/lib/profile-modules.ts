@@ -50,6 +50,9 @@ const range = (from: number, to: number, step = 1) => Array.from({ length: Math.
 
 type Seed = Omit<ProfileModule, "visibleTo" | "editableBy" | "sensitive" | "description"> & Partial<Pick<ProfileModule, "visibleTo" | "sensitive" | "description">>;
 
+/** Kinderschutz entries made by the person itself are claims, not checked by the club (the board sees `enteredBy`). */
+const SELF_DECLARED = "Eigene Angaben sind eine Selbstangabe und werden nicht geprüft; der Vorstand sieht, ob ein Eintrag vom Mitglied oder vom Vorstand stammt.";
+
 const CRED_HELP = "Nur ankreuzen, wenn du diese Qualifikation hast. Das Ablaufdatum (gültig bis) sehen Vorstand und Funktionsträger.";
 
 function build(seeds: Seed[]): ProfileModule[] {
@@ -88,13 +91,13 @@ export const PROFILE_MODULES: readonly ProfileModule[] = build([
     group: "kinderschutz",
     label: "Erweitertes Führungszeugnis",
     description: "Vermerk, dass ein erweitertes Führungszeugnis vorgelegt wurde (nie der Inhalt).",
-    helpText: "Hier wird nur festgehalten, DASS ein erweitertes Führungszeugnis vorliegt, wann es vorgelegt wurde und bis wann es gilt. Der Inhalt des Zeugnisses wird nicht erfasst und nicht gespeichert.",
+    helpText: `Hier wird nur festgehalten, DASS ein erweitertes Führungszeugnis vorliegt, wann es vorgelegt wurde und bis wann es gilt. Der Inhalt des Zeugnisses wird nicht erfasst und nicht gespeichert. ${SELF_DECLARED}`,
     type: "credential",
     visibleTo: "vorstand",
     sensitive: true,
   },
-  { id: "mod_ks_selbstverpflichtung", group: "kinderschutz", label: "Selbstverpflichtungserklärung", description: "Selbstverpflichtungserklärung zum Kinderschutz abgegeben (mit Datum).", helpText: "Nur Vermerk, dass die Erklärung abgegeben wurde, und das Datum.", type: "credential", visibleTo: "vorstand", sensitive: true },
-  { id: "mod_ks_praevention", group: "kinderschutz", label: "Präventionsschulung", description: "Schulung zur Prävention sexualisierter Gewalt mit Gültigkeit.", helpText: "Nur Vermerk, dass die Schulung besucht wurde, und bis wann sie gilt.", type: "credential", visibleTo: "vorstand", sensitive: true },
+  { id: "mod_ks_selbstverpflichtung", group: "kinderschutz", label: "Selbstverpflichtungserklärung", description: "Selbstverpflichtungserklärung zum Kinderschutz abgegeben (mit Datum).", helpText: `Nur Vermerk, dass die Erklärung abgegeben wurde, und das Datum. ${SELF_DECLARED}`, type: "credential", visibleTo: "vorstand", sensitive: true },
+  { id: "mod_ks_praevention", group: "kinderschutz", label: "Präventionsschulung", description: "Schulung zur Prävention sexualisierter Gewalt mit Gültigkeit.", helpText: `Nur Vermerk, dass die Schulung besucht wurde, und bis wann sie gilt. ${SELF_DECLARED}`, type: "credential", visibleTo: "vorstand", sensitive: true },
   // --- Mitarbeit ---
   { id: "mod_mw_einsatz", group: "mitarbeit", label: "Einsatzbereitschaft", description: "Wobei die Person im Verein mithelfen würde.", type: "multiselect", options: opts("Helfer bei Festen", "Fahrdienst", "Kuchen", "Trainer", "Schiedsrichter", "Aufbau", "Jugendleitung") },
   { id: "mod_mw_fahrzeug", group: "mitarbeit", label: "Fahrzeug/Anhänger vorhanden", description: "Fahrzeug, das für den Verein genutzt werden kann.", type: "select", options: opts("Auto", "Bus/Transporter", "Anhänger") },

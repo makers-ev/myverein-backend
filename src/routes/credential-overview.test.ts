@@ -140,10 +140,8 @@ describe("credential overview", () => {
 
   it("scopes fields by role: plain member, trainer, schriftfuehrer, kassenwart, vorsitz, guest", async () => {
     const keys = async (who: Account) => [...new Set((await listed(who, "")).items.map((i) => i.fieldKey))].sort();
-    // Plain member: only what is visible to members (open_cred), never funktionstraeger / vorstand fields.
-    expect(await keys(m("none"))).toEqual(["open_cred"]);
-    expect((await overview(m("none"), "fieldKey=mod_q_erste_hilfe")).status).toBe(404);
-    expect((await overview(m("none"), "fieldKey=mod_ks_praevention")).status).toBe(404);
+    // Plain member: never, although open_cred is visible to members on a profile.
+    for (const q of ["", "fieldKey=open_cred", "fieldKey=mod_q_erste_hilfe", "fieldKey=mod_ks_praevention", "status=expired"]) expect((await overview(m("none"), q)).status, q).toBe(403);
     // Trainer (Funktionstraeger): licences yes, Kinderschutz no.
     expect(await keys(m("trainer"))).toEqual(["mod_q_erste_hilfe", "open_cred"]);
     expect((await overview(m("trainer"), "fieldKey=mod_ks_praevention")).status).toBe(404);
@@ -165,16 +163,16 @@ describe("credential overview", () => {
     const board_ = whoIs((await listed(board(), "fieldKey=mod_q_erste_hilfe")).items);
     expect(board_).not.toContain("gone");
     expect(board_).not.toContain("lead");
-    // Plain member: members with effective status probe/aktiv/ruhend only.
-    const plain = await listed(m("none"), "fieldKey=open_cred");
-    expect(whoIs(plain.items)).not.toContain("lead");
-    expect(plain.items.some((i) => i.displayName.startsWith("soon "))).toBe(true);
+    // Trainer: club-wide scope (every probe/aktiv/ruhend member, not only his own department), no prospects.
+    const trainer = await listed(m("trainer"), "fieldKey=open_cred");
+    expect(whoIs(trainer.items)).not.toContain("lead");
+    expect(trainer.items.some((i) => i.displayName.startsWith("soon "))).toBe(true);
     // The board may widen it, everybody else cannot (the parameter is ignored for them).
     const wide = whoIs((await listed(board(), "fieldKey=mod_q_erste_hilfe&includeFormer=true")).items);
     expect(wide).toContain("gone");
     expect(wide).toContain("lead");
     expect(whoIs((await listed(m("trainer"), "fieldKey=mod_q_erste_hilfe&includeFormer=true")).items)).not.toContain("gone");
-    expect(whoIs((await listed(m("none"), "fieldKey=open_cred&includeFormer=true")).items)).not.toContain("lead");
+    expect(whoIs((await listed(m("trainer"), "fieldKey=open_cred&includeFormer=true")).items)).not.toContain("lead");
 
     // Foreign club: the foreign board cannot see this club's field, and its own overview holds none of these members.
     expect((await overview(other.founder, "fieldKey=mod_q_erste_hilfe", cid())).status).toBe(404); // not a member here (clubGuard)
@@ -197,13 +195,20 @@ describe("credential overview", () => {
     const n = await count();
     await listed(board(), "fieldKey=mod_q_erste_hilfe");
     expect(await count()).toBe(n);
+    // A sensitive field is audited whenever the query ran, also for status=missing and an empty page (total / missing list
+    // disclose who holds it): field ids only.
     await listed(board(), "fieldKey=mod_ks_praevention&status=missing");
-    expect(await count()).toBe(n);
+    expect(await count()).toBe(n + 1);
+    await listed(board(), "fieldKey=mod_ks_praevention&page=900");
+    expect(await count()).toBe(n + 2);
+    const last = (await db.select().from(auditLog).where(eq(auditLog.eventType, "member_field.sensitive_read"))).filter((e) => !before.some((b) => b.id === e.id) && e.id !== after[0]!.id).at(-1)!;
+    expect(last.payload).toMatchObject({ via: "credentials_overview", clubMemberIds: [] });
+    expect((last.payload as { fieldIds: string[] }).fieldIds).toHaveLength(1);
     expect(JSON.stringify(logged)).not.toContain("validUntil");
   });
 
   it("validates the query", async () => {
-    for (const q of ["status=bogus", "withinDays=0", "withinDays=731", "withinDays=x", "pageSize=101", "pageSize=0", "page=0", "includeFormer=maybe"]) {
+    for (const q of ["page=1001", "status=bogus", "withinDays=0", "withinDays=731", "withinDays=x", "pageSize=101", "pageSize=0", "page=0", "includeFormer=maybe"]) {
       expect((await overview(board(), q)).status, q).toBe(422);
     }
   });
@@ -222,5 +227,24 @@ describe("credential overview", () => {
     // The person sees the status of its own sensitive credential.
     const own = await view(m("soon"), rows.soon!);
     expect(own.find((f) => f.key === "mod_ks_praevention")!.expiry).toMatchObject({ status: "expiring", daysLeft: 30 });
+  });
+
+  it("shows who recorded a value (enteredBy) without exposing ids", async () => {
+    // "soon" entered open_cred through the board (PUT), then the person itself maintains its own entry.
+    const view = async (who: Account, memberId: string) => ((await body(await call(who, `/club-members/${memberId}/custom-fields`, { clubId: cid() }))).data.fields as Array<{ key: string; enteredBy: unknown }>);
+    expect((await view(board(), rows.soon!)).find((f) => f.key === "mod_ks_praevention")!.enteredBy).toBe("board");
+    expect((await view(board(), rows.soon!)).find((f) => f.key === "mod_q_juleica")!.enteredBy).toBeNull();
+    expect((await call(m("soon"), "/club-members/me/custom-fields", { method: "PATCH", clubId: cid(), body: { values: { mod_q_juleica: { valid: true, validUntil: addDays(today, 400) } } } })).status).toBe(200);
+    expect((await view(board(), rows.soon!)).find((f) => f.key === "mod_q_juleica")!.enteredBy).toBe("self");
+    const items = (await listed(board(), "")).items as Array<{ displayName: string; fieldKey: string; enteredBy: unknown }>;
+    expect(items.find((i) => i.displayName.startsWith("soon ") && i.fieldKey === "mod_q_juleica")!.enteredBy).toBe("self");
+    expect(items.find((i) => i.displayName.startsWith("soon ") && i.fieldKey === "mod_ks_praevention")!.enteredBy).toBe("board");
+    expect(JSON.stringify(items)).not.toContain(m("soon").userId);
+  });
+
+  it("rate-limits the overview per user", async () => {
+    let limited = 0;
+    for (let i = 0; i < 65; i++) if ((await overview(m("expired"), "")).status === 429) limited++;
+    expect(limited).toBeGreaterThan(0);
   });
 });
