@@ -239,6 +239,13 @@
       "when": 1792321248143,
       "tag": "0033_rate-limit-events",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1792321746983,
+      "tag": "0034_club-settings-text-blocks",
+      "breakpoints": true
     }
   ]
 }

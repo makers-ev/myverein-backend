@@ -1,8 +1,15 @@
-import { boolean, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 import { organization } from "../../auth/auth-schema.js";
 
 export const NOTICE_MODES = ["month_end", "quarter_end", "year_end", "immediate"] as const;
+/** Reusable text snippet of a club (e.g. the default cancellation text); plain text, inserted by the client into the editor. */
+export interface ClubTextBlock {
+  key: string;
+  title: string;
+  text: string;
+}
+
 export type NoticeMode = (typeof NOTICE_MODES)[number];
 
 /** Club-wide parameters (1:1 with `organization`). A missing row means "all defaults". */
@@ -19,6 +26,8 @@ export const clubSettings = pgTable("club_settings", {
   senderName: text("sender_name"),
   signature: text("signature"),
   replyTo: text("reply_to"),
+  // Optional text blocks (Wave 9 B15): array of ClubTextBlock, validated by the route; NULL = none.
+  textBlocks: jsonb("text_blocks").$type<ClubTextBlock[]>(),
   // IANA zone the club's time-based logic (reminders, sweeps) is computed in; instants are stored as UTC.
   timezone: text("timezone").notNull().default("Europe/Berlin"),
   reminderEventEnabled: boolean("reminder_event_enabled").notNull().default(true),

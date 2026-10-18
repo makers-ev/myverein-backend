@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 
-import { clubSettings } from "../db/schema/club-settings.js";
+import { clubSettings, type ClubTextBlock } from "../db/schema/club-settings.js";
 import type { DbExecutor } from "./club-members.js";
 
 export interface EffectiveClubSettings {
@@ -8,6 +8,12 @@ export interface EffectiveClubSettings {
   noticeMode: string | null;
   memberNumberPrefix: string | null;
   allowSelfLoans: boolean;
+  /** Club mail template (B15): display name of the sender; the sender ADDRESS stays `EMAIL_FROM`. */
+  senderName: string | null;
+  /** Plain-text signature / footer appended to club mails. */
+  signature: string | null;
+  replyTo: string | null;
+  textBlocks: ClubTextBlock[];
   /** IANA zone of the club's time-based logic (reminders, sweeps). */
   timezone: string;
   reminderEventEnabled: boolean;
@@ -32,6 +38,10 @@ export async function loadClubSettings(executor: DbExecutor, clubId: string): Pr
     noticeMode: row?.noticeMode ?? null,
     memberNumberPrefix: row?.memberNumberPrefix ?? null,
     allowSelfLoans: row?.allowSelfLoans ?? true,
+    senderName: row?.senderName ?? null,
+    signature: row?.signature ?? null,
+    replyTo: row?.replyTo ?? null,
+    textBlocks: row?.textBlocks ?? [],
     timezone: row?.timezone ?? DEFAULT_CLUB_TIMEZONE,
     reminderEventEnabled: row?.reminderEventEnabled ?? true,
     reminderEventLeadHours: row?.reminderEventLeadHours ?? 24,
