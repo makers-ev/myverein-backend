@@ -7,6 +7,7 @@ import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { ANNOUNCEMENT_STATUSES, clubAnnouncements, messageDeliveries, type ClubAnnouncementRow } from "../db/schema/communication.js";
+import { assertWithinSendLimits } from "../lib/announcement-limits.js";
 import { AudienceLimitError, resolveClubAudience, summarizeAudience } from "../lib/audience.js";
 import {
   assertMayAddress,
@@ -266,7 +267,8 @@ clubAnnouncementRoutes.delete("/:id", async (c) => {
 
 // --- Send / cancel ----------------------------------------------------------------------------------------
 
-const sendSchema = z.object({ publishAt: z.coerce.date().nullable().optional() }).default({});
+// `confirmRecipients`: the recipient count the author saw in the preview; required above ANNOUNCEMENT_CONFIRM_THRESHOLD (B14).
+const sendSchema = z.object({ publishAt: z.coerce.date().nullable().optional(), confirmRecipients: z.number().int().min(0).max(1_000_000).nullable().optional() }).default({});
 
 clubAnnouncementRoutes.post("/:id/send", sendLimit, zValidator("json", sendSchema, validationHook), async (c) => {
   const body = c.req.valid("json");
@@ -279,6 +281,7 @@ clubAnnouncementRoutes.post("/:id/send", sendLimit, zValidator("json", sendSchem
   const requested = body.publishAt === undefined ? current.publishAt : body.publishAt;
   if (body.publishAt) assertPublishAt(body.publishAt);
   if (requested && requested.getTime() > Date.now() + 5_000) {
+    await assertWithinSendLimits(current, { actorUserId: c.get("user").id, confirmRecipients: body.confirmRecipients ?? null, mode: "schedule" });
     const scheduled = await db.transaction(async (tx) => {
       const [row] = await tx.select().from(clubAnnouncements).where(and(eq(clubAnnouncements.id, id), eq(clubAnnouncements.clubId, clubId))).for("update");
       if (!row || !isEditable(row)) throw new ConflictError("Only a draft or scheduled announcement can be sent", { code: "CONFLICT" });
@@ -290,7 +293,7 @@ clubAnnouncementRoutes.post("/:id/send", sendLimit, zValidator("json", sendSchem
     return c.json({ data: { status: scheduled.status, publishAt: scheduled.publishAt, delivery: null } });
   }
 
-  const result = await sendAnnouncement(clubId, id, { actorUserId: c.get("user").id });
+  const result = await sendAnnouncement(clubId, id, { actorUserId: c.get("user").id, confirmRecipients: body.confirmRecipients ?? null });
   if (!result.sent) {
     if (result.reason === "audience_too_large") throw new ValidationError("The audience is too large", { details: { limit: "AUDIENCE_MAX_RECIPIENTS" } });
     throw new ConflictError("Only a draft or scheduled announcement can be sent", { code: "CONFLICT" });

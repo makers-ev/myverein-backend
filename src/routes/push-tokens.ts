@@ -1,11 +1,12 @@
 import { zValidator } from "@hono/zod-validator";
 import { and, count, eq, lt, or } from "drizzle-orm";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
 import { pushTokens } from "../db/schema/communication.js";
 import { TooManyRequestsError, ValidationError } from "../lib/errors.js";
+import { dbRateLimit, envInt, HOUR_MS } from "../lib/rate-limits.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard, type SessionEnv } from "../middleware/session-guard.js";
 
@@ -18,6 +19,11 @@ export const pushTokenRoutes = new Hono<SessionEnv>();
 
 pushTokenRoutes.use("*", rateLimit({ windowMs: 60_000, max: 60 }));
 pushTokenRoutes.use("*", sessionGuard);
+
+// DB-backed (B14): per account and per client IP, shared by all instances and surviving restarts.
+const perUserLimit = dbRateLimit({ bucket: "push_token.user", windowMs: HOUR_MS, max: () => envInt("PUSH_TOKEN_REGISTRATIONS_PER_HOUR", 30), subject: (c) => (c as Context<SessionEnv>).get("user").id, message: "Too many push token registrations, try again later" });
+const perIpLimit = dbRateLimit({ bucket: "push_token.ip", windowMs: HOUR_MS, max: () => envInt("PUSH_TOKEN_IP_LIMIT_PER_HOUR", 120), message: "Too many push token requests from this address, try again later" });
+pushTokenRoutes.use("*", perIpLimit);
 
 const EXPO_TOKEN = /^(?:Expo|Exponent)PushToken\[[A-Za-z0-9_-]{8,200}\]$/;
 
@@ -39,7 +45,7 @@ export function maxTokensPerUser(): number {
 
 const STALE_TOKEN_MS = 90 * 24 * 60 * 60 * 1000;
 
-pushTokenRoutes.post("/", zValidator("json", registerSchema, validationHook), async (c) => {
+pushTokenRoutes.post("/", perUserLimit, zValidator("json", registerSchema, validationHook), async (c) => {
   const userId = c.get("user").id;
   const body = c.req.valid("json");
   const now = new Date();

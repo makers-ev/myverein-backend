@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/client.js";
 import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
+import { purgeRateLimitEvents } from "./rate-limits.js";
 
 /**
  * Retention jobs (Wave 9 B13). One recurring job `retention_sweep` (daily) runs every registered retention task, each in
@@ -109,5 +110,10 @@ export function registerRetentionTasks(): void {
     key: "delivery-retention",
     description: "Wipe e-mail delivery addresses and content snapshots after DELIVERY_RETENTION_DAYS",
     run: async ({ now }) => ({ affected: await scrubOldEmailDeliveries(now) }),
+  });
+  registerRetentionTask({
+    key: "rate-limit-events",
+    description: "Delete DB rate limit hits older than two days",
+    run: async ({ now }) => ({ affected: await purgeRateLimitEvents(now) }),
   });
 }

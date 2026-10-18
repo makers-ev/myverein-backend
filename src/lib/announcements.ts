@@ -8,9 +8,10 @@ import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubAnnouncements, COMMUNICATION_CHANNELS, type AnnouncementAudience, type ClubAnnouncementRow } from "../db/schema/communication.js";
 import { departments } from "../db/schema/departments.js";
+import { assertWithinSendLimits } from "./announcement-limits.js";
 import { AudienceLimitError } from "./audience.js";
 import { CLUB_ROLE_TYPES, hasClubPermission } from "./club-permissions.js";
-import { ForbiddenError, ValidationError } from "./errors.js";
+import { ForbiddenError, TooManyRequestsError, ValidationError } from "./errors.js";
 import { enqueue } from "./jobs/queue.js";
 import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
@@ -115,7 +116,7 @@ export type SendResult = { sent: true; outcome: SendOutcome; row: ClubAnnounceme
  * (one delivery per recipient and channel, idempotent) and marks it sent. A failure puts it back to its previous status.
  * `actor` is the user who triggered the send (NULL for the scheduler); `author` re-checks the author's scope for a job run.
  */
-export async function sendAnnouncement(clubId: string, id: string, options: { actorUserId: string | null; authorScope?: AuthorScope | null; expectedPublishAt?: string | null }): Promise<SendResult> {
+export async function sendAnnouncement(clubId: string, id: string, options: { actorUserId: string | null; authorScope?: AuthorScope | null; expectedPublishAt?: string | null; confirmRecipients?: number | null }): Promise<SendResult> {
   const claimed = await db.transaction(async (tx) => {
     const [row] = await tx.select().from(clubAnnouncements).where(and(eq(clubAnnouncements.id, id), eq(clubAnnouncements.clubId, clubId))).for("update");
     if (!row) return null;
@@ -139,6 +140,8 @@ export async function sendAnnouncement(clubId: string, id: string, options: { ac
 
   const { row, previous } = claimed;
   try {
+    // Anti-spam limits (B14). A violation puts the announcement back to its previous status (see the catch below).
+    await assertWithinSendLimits(row, { actorUserId: options.actorUserId, confirmRecipients: options.confirmRecipients ?? null, mode: options.actorUserId === null ? "publish" : "send" });
     const outcome = await notify({
       clubId,
       class: "optional",
@@ -183,7 +186,18 @@ export async function handlePublishAnnouncement(job: JobContext): Promise<void> 
   const [row] = await db.select().from(clubAnnouncements).where(eq(clubAnnouncements.id, id));
   if (!row || row.status !== "scheduled" || row.publishAt?.toISOString() !== publishAt) return;
   const scope = (await authorScopeOf(row.clubId, row.authorMemberId)) ?? { write: false, writeDepartment: false, departmentIds: [] };
-  const result = await sendAnnouncement(row.clubId, id, { actorUserId: null, authorScope: scope, expectedPublishAt: publishAt });
+  let result: SendResult;
+  try {
+    result = await sendAnnouncement(row.clubId, id, { actorUserId: null, authorScope: scope, expectedPublishAt: publishAt });
+  } catch (err) {
+    // Anti-spam limit hit at the scheduled time: retrying would not help, the author finds it as a draft again (audit entry written).
+    if (err instanceof TooManyRequestsError) {
+      await db.update(clubAnnouncements).set({ status: "draft", updatedAt: new Date() }).where(and(eq(clubAnnouncements.id, id), eq(clubAnnouncements.status, "scheduled")));
+      logger.warn({ announcementId: id }, "[announcements] scheduled send refused: rate limit");
+      return;
+    }
+    throw err;
+  }
   if (!result.sent && result.reason === "audience_too_large") {
     await db.update(clubAnnouncements).set({ status: "draft", updatedAt: new Date() }).where(and(eq(clubAnnouncements.id, id), eq(clubAnnouncements.status, "scheduled")));
     logger.warn({ announcementId: id }, "[announcements] scheduled send refused: audience too large");

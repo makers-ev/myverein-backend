@@ -12,6 +12,7 @@ import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { NOTIFICATION_CATEGORIES, type NotificationCategory } from "../lib/notify/types.js";
 import { verifyUnsubscribeToken, type UnsubscribePayload } from "../lib/notify/unsubscribe-token.js";
+import { dbRateLimit, envInt, HOUR_MS } from "../lib/rate-limits.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard, type SessionEnv } from "../middleware/session-guard.js";
@@ -172,6 +173,8 @@ notificationPreferenceRoutes.get("/members", clubGuard, zValidator("query", memb
 export const unsubscribeRoutes = new Hono();
 // Per client IP; the links are signed, so the limit only caps request volume and guessing attempts.
 unsubscribeRoutes.use("*", rateLimit({ windowMs: 60_000, max: 30 }));
+// DB-backed hourly cap per client IP (B14), shared by all instances and surviving restarts.
+unsubscribeRoutes.use("*", dbRateLimit({ bucket: "unsubscribe.ip", windowMs: HOUR_MS, max: () => envInt("UNSUBSCRIBE_IP_LIMIT_PER_HOUR", 120), message: "Too many requests from this address, try again later" }));
 unsubscribeRoutes.use("*", async (c, next) => {
   await next();
   c.header("Cache-Control", "private, no-store");

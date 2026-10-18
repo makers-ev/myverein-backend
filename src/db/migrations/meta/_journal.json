@@ -232,6 +232,13 @@
       "when": 1792317264790,
       "tag": "0032_delivery-content",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1792321248143,
+      "tag": "0033_rate-limit-events",
+      "breakpoints": true
     }
   ]
 }

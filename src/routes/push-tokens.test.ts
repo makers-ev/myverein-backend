@@ -99,4 +99,18 @@ describe("push tokens (B8)", () => {
       delete process.env.PUSH_TOKENS_MAX_PER_USER;
     }
   });
+
+  it("limits registrations per account and hour in the database (429, audit)", async () => {
+    process.env.PUSH_TOKEN_REGISTRATIONS_PER_HOUR = "2";
+    try {
+      const d = await signUp("d");
+      expect((await call(d, "", { body: { token: tok("d1"), platform: "ios" } })).status).toBe(200);
+      expect((await call(d, "", { body: { token: tok("d1"), platform: "ios" } })).status).toBe(200);
+      const res = await call(d, "", { body: { token: tok("d1"), platform: "ios" } });
+      expect(res.status).toBe(429);
+      expect(((await res.json()) as { error: { details: { rule: string } } }).error.details.rule).toBe("push_token.user");
+    } finally {
+      delete process.env.PUSH_TOKEN_REGISTRATIONS_PER_HOUR;
+    }
+  });
 });

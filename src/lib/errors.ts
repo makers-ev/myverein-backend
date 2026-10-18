@@ -23,7 +23,8 @@ export type ErrorCode =
   | "ALREADY_MEMBER"
   | "APPLICATION_PENDING"
   | "QUOTA_EXCEEDED"
-  | "FORM_VERSION_OUTDATED";
+  | "FORM_VERSION_OUTDATED"
+  | "RECIPIENT_CONFIRMATION_REQUIRED";
 
 export interface AppErrorOptions {
   cause?: unknown;
