@@ -842,6 +842,21 @@ DB-backed queue per [ADR-005](../lpj-its-vault/20_Products/MyVerein/Architecture
 
 Tests: `src/lib/jobs/jobs.test.ts` (dedupe incl. parallel enqueue, bucket keys, two parallel workers process 60 jobs exactly once, retry/backoff timing, dead, lease expiry and lost lease, type filter, concurrency, clean shutdown + heartbeat) and `src/db/migration-communication.test.ts`.
 
+### Audience resolver (Wave 9 B5)
+
+`src/lib/audience.ts` turns an announcement `audience` (see `club_announcements`) into a deduplicated recipient **snapshot** with per-channel reachability ([ADR-006](../lpj-its-vault/20_Products/MyVerein/Architecture%20%26%20ADRs/ADR-006%20-%20Kommunikationsmodell.md)). `resolveAudience(audience, candidates, { limit?, today? })` is pure; `loadAudienceCandidates(clubId)` / `resolveClubAudience(clubId, audience)` load the candidates of **one** club (a foreign `memberIds` entry resolves to nothing). The preview route `POST /club-announcements/preview` (counts only, via `summarizeAudience`) is added with the announcement API (B7).
+
+| Rule | Behaviour |
+|---|---|
+| Union | `all` (every `club_members` row, not bare accounts), `departmentIds` (open assignment), `roleTypes` (accounts only), `categoryKeys`, `memberIds`. An empty definition matches nobody |
+| Excluded | `ruhend` and left statuses (`ausgetreten`/`ausgeschlossen`/`verstorben`, incl. a past `left_at`), also when addressed explicitly |
+| Guardians | `includeGuardians` (default on): guardians (`guardian_links`) of every matched ward are added (`via: "guardian"`); not for excluded wards or excluded guardians |
+| Reachability | In-app and push only for account holders (push only with an enabled `push_tokens` row); e-mail = login address of the account, for account-less members **only** the validated contact e-mail |
+| Deduplication | By person (club member / account) and by normalised e-mail: a shared address belongs to one person (accounts first, direct before guardian), the others get `emailCoveredBy` and no second mail |
+| Limit | More than `AUDIENCE_MAX_RECIPIENTS` persons throws `AudienceLimitError` (nothing is truncated silently) |
+
+`summarizeAudience(recipients, channels)` returns only numbers (`total`, `reachable`, `inApp`, `email`, `push`, `emailOnly`, `unreachable`, `sharedAddress`). Tests: `src/lib/audience.test.ts` (pure table tests + DB loader).
+
 ### Migrations 0014-0031 (Wave 7, Wave 8, Wave 9)
 
 Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runtime` (Docker boot) or `npm run db:migrate`.
@@ -1299,6 +1314,7 @@ All variables live in `.env.example`. The ones worth calling out specifically:
 | `WORKER_ENABLED` | no | Runs the job worker inside the API process (default on; only the exact value `false` disables it, then run `npm run start:worker` / `dist/worker.js` separately) |
 | `WORKER_POLL_INTERVAL_MS` / `WORKER_CONCURRENCY` / `WORKER_LEASE_SECONDS` | no | Job worker poll interval (default `2000`), parallel jobs per worker (default `4`), lease before a stuck job is reclaimed (default `300`) |
 | `JOB_MAX_ATTEMPTS` / `JOB_BACKOFF_BASE_SECONDS` | no | Attempts before a job is `dead` (default `5`) and the first retry delay, doubled per attempt up to 1 h (default `30`) |
+| `AUDIENCE_MAX_RECIPIENTS` | no | Hard upper limit of persons in one send / audience snapshot (default `2000`, clamped 1–100000); larger audiences are rejected, not truncated |
 | `MEDIA_UNATTACHED_TTL_HOURS` | no | Hours until an upload that no feature row claimed is swept (default `24`) |
 | `MEDIA_UNATTACHED_MAX_FILES_PER_USER` / `MEDIA_UNATTACHED_MAX_BYTES_PER_USER` | no | Cap on unclaimed uploads per user (defaults `25` files / `52428800` bytes); exceeding it is `422 QUOTA_EXCEEDED` with `details.code = unattached_cap` |
 | `FORM_UPLOADS_PER_HOUR` | no | Per-user limit of file uploads into form submissions per hour (`POST /form-submissions/:id/files`) and, in a separate bucket, of file removals (`DELETE`); default `30`, clamped 1–10000 |
