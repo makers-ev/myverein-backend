@@ -24,6 +24,7 @@ import { clubSettingsRoutes } from "./club-settings.js";
 import { adminEmailRoutes } from "./admin-emails.js";
 import { adminNotificationRoutes } from "./admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./admin-notification-templates.js";
+import { adminJobRoutes } from "./admin-jobs.js";
 import { adminStatsRoutes } from "./admin-stats.js";
 import { availabilityRoutes } from "./availability.js";
 import { calendarRoutes } from "./calendars.js";
@@ -74,6 +75,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/unsubscribe", "unsubscribeRoutes", unsubscribeRoutes],
   ["/push-tokens", "pushTokenRoutes", pushTokenRoutes],
   ["/notifications", "notificationRoutes", notificationRoutes],
+  ["/admin/jobs", "adminJobRoutes", adminJobRoutes],
   ["/admin/notifications", "adminNotificationRoutes", adminNotificationRoutes],
   ["/admin/notification-templates", "adminNotificationTemplateRoutes", adminNotificationTemplateRoutes],
   ["/admin/club-registrations", "adminClubRegistrationRoutes", adminClubRegistrationRoutes],

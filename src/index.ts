@@ -15,6 +15,7 @@ import { adminClubRegistrationRoutes } from "./routes/admin-club-registrations.j
 import { adminNotificationRoutes } from "./routes/admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./routes/admin-notification-templates.js";
 import { adminClubRoutes } from "./routes/admin-clubs.js";
+import { adminJobRoutes } from "./routes/admin-jobs.js";
 import { adminStatsRoutes } from "./routes/admin-stats.js";
 import { adminEmailRoutes } from "./routes/admin-emails.js";
 import { availabilityRoutes } from "./routes/availability.js";
@@ -95,6 +96,7 @@ app.route("/admin", adminStatsRoutes);
 app.route("/admin", adminEmailRoutes);
 app.route("/admin", adminClubRoutes);
 app.route("/notifications", notificationRoutes);
+app.route("/admin/jobs", adminJobRoutes);
 app.route("/admin/notifications", adminNotificationRoutes);
 app.route("/admin/notification-templates", adminNotificationTemplateRoutes);
 app.route("/admin/club-registrations", adminClubRegistrationRoutes);
