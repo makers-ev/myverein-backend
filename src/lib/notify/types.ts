@@ -51,7 +51,7 @@ export interface NotifyInput {
   audience?: AnnouncementAudience;
   recipients?: NotifyRecipient[];
   content: NotifyContent;
-  /** `push` rows are created by the push dispatcher (B8), not here. */
+  /** `push` needs an account; it always implies `in_app`, and an urgent message with push also gets e-mail (never push-only). */
   channels: CommunicationChannel[];
   /** Overrides the audience size limit. */
   limit?: number;
@@ -66,6 +66,7 @@ export interface NotifyResult {
   recipients: number;
   inApp: number;
   queuedEmail: number;
+  queuedPush: number;
   /** Only with `immediate`: mails actually handed to the transport. */
   sentEmail: number;
   skippedOptout: number;
@@ -90,3 +91,5 @@ export interface DeliveryContent {
 }
 
 export const EMAIL_JOB_TYPE = "notify.email";
+export const PUSH_JOB_TYPE = "notify.push";
+export const PUSH_RECEIPTS_JOB_TYPE = "notify.push_receipts";

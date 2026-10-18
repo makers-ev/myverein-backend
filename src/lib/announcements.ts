@@ -96,6 +96,7 @@ export interface SendOutcome {
   recipients: number;
   inApp: number;
   queuedEmail: number;
+  queuedPush: number;
   skippedOptout: number;
   skippedNoAddress: number;
   alreadyDelivered: number;
@@ -146,7 +147,7 @@ export async function sendAnnouncement(clubId: string, id: string, options: { ac
       announcementId: row.id,
       audience: row.audience,
       content: { title: row.title, body: row.body, urgent: row.urgent, category: "announcements" },
-      channels: row.channels.filter((c) => c !== "push"), // push rows are created by the push dispatcher (B8)
+      channels: row.channels,
     });
     const sentAt = new Date();
     const sent = await db.transaction(async (tx) => {

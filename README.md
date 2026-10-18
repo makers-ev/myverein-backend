@@ -149,7 +149,7 @@ src/
 │                       #   availability-match, ics, member-number, club-members, member-lifecycle, member-invites, exit-notice, club-settings, club-stats, club-slug, club-registrations, club-registration-notify, decision-notify, event-notify, reminders, club-time, age-transition, exit-effective, retention, media, media-url, image-sanitize, member-photos, form-defaults, forms, form-schema, form-mapping, form-acceptance, form-applications, form-children, form-exit, form-review, application-review, form-retention, form-sweeper, custom-fields, custom-field-access, credentials, profile-modules, member-read-scope, member-csv, member-import, member-protection, invite-context, key-returns, inventory-status, wifi-qr, text-policy, trusted-origins, emailTemplate, storage — cross-cutting, no HTTP awareness
 ├── middleware/         # session-guard, club-guard, rate-limit, request-id
 ├── routes/            # health, club-members, club-exit-requests, club-settings, club-stats, club-applications, club-registrations, admin-club-registrations, departments, club-info, calendars, events, availability,
-│                       #   meetings, locations, inventory-items, media, my-clubs, club-announcements (+ club-inbox), notification-preferences (+ unsubscribe), notifications, internal-stats, admin-stats, admin-clubs, admin-emails, admin-notifications, admin-notification-templates, forms, club-forms, form-submissions, member-fields, club-member-custom-fields
+│                       #   meetings, locations, inventory-items, media, my-clubs, club-announcements (+ club-inbox), notification-preferences (+ unsubscribe), push-tokens, notifications, internal-stats, admin-stats, admin-clubs, admin-emails, admin-notifications, admin-notification-templates, forms, club-forms, form-submissions, member-fields, club-member-custom-fields
 └── scripts/           # seed-admin, seed-club (CLI, not server runtime)
 ```
 
@@ -845,6 +845,8 @@ DB-backed queue per [ADR-005](../lpj-its-vault/20_Products/MyVerein/Architecture
 | Type | Kind | Dedupe key | Purpose |
 |---|---|---|---|
 | `notify.email` | per delivery | `notify.email:<deliveryId>` | Sends the mail of one `message_deliveries` row ([dispatcher](#notification-dispatcher-wave-9-b6)) |
+| `notify.push` | per batch of ≤100 deliveries | `notify.push:<first deliveryId>:<count>` | Sends the queued push deliveries to Expo in chunks ([Push](#push-notifications-wave-9-b8)) |
+| `notify.push_receipts` | follow-up, delayed | `notify.push_receipts:<first ticket id>` | Fetches the Expo receipts of earlier tickets and disables `DeviceNotRegistered` tokens |
 | `announcement.publish` | scheduled | per announcement | Publishes a scheduled announcement |
 | `notify_event_changed` | per change | `notify_event_changed:<kind>:<id>:<updatedAt ms>` | Notifies about a changed or cancelled event/meeting |
 | `reminder-sweep` | recurring, 15 min | `reminder-sweep:<UTC 15-min bucket>` | Decides which [reminders](#reminders-wave-9-b12) are due and schedules them |
@@ -883,7 +885,7 @@ notify({ clubId, class: "mandatory" | "optional", eventKey, refId?, announcement
 | Aspect | Behaviour |
 |---|---|
 | Recipients | Exactly one of `audience` (resolved with the [audience resolver](#audience-resolver-wave-9-b5), needs `clubId`) or `recipients` (`{ userId?, clubMemberId?, name?, email? }`, e.g. an applicant without a `club_members` row; `clubId: null` = platform context) |
-| Deliveries | One `message_deliveries` row per recipient and channel, with the message snapshot in `content`. In-app: the row itself is the inbox record (`status = sent`, account holders only). E-mail: `queued` with the address snapshot, or `skipped_no_address` / `skipped_optout`; a recipient whose shared address is used by another recipient gets no row. Announcements are idempotent through the unique `(announcement_id, club_member_id, channel)`: a repeated call creates neither rows nor jobs. `push` rows belong to the push dispatcher (B8) |
+| Deliveries | One `message_deliveries` row per recipient and channel, with the message snapshot in `content`. In-app: the row itself is the inbox record (`status = sent`, account holders only). E-mail: `queued` with the address snapshot, or `skipped_no_address` / `skipped_optout`; a recipient whose shared address is used by another recipient gets no row. Announcements are idempotent through the unique `(announcement_id, club_member_id, channel)`: a repeated call creates neither rows nor jobs. `push` rows (one per recipient with an account, B8) are written here too: `queued` when the user has an active device token, else `skipped_no_address` (`error_code = no_push_token`) or `skipped_optout`; they are sent by [`notify.push`](#push-notifications-wave-9-b8). Push never stands alone: `in_app` is always added, and an urgent message with push also gets e-mail |
 | Classes | `optional`: per category (`announcements`, `events`, `reminders`; template `reminder` -> `reminders`) `notification_preferences` with `enabled = false` for the account (`user_id`) or the account-less member (`club_member_id`) turn the e-mail off (`skipped_optout`); no row = enabled. In-app copies are always written. `mandatory` (default template `decision`) ignores preferences completely |
 | E-mail job | Job type `notify.email` (registered in `registerAllJobs`), payload `{ deliveryId }` only, dedupe key `notify.email:<deliveryId>`. **One mail per recipient** with a single `to` (never CC/BCC or shared lists). A failing send is retried by the queue with backoff; on the last attempt the delivery becomes `failed` (`error_code`, `attempts`) and the job ends normally. Only a `queued` row is ever sent, so a double run sends nothing twice |
 | Throttle | `MAIL_SEND_RATE` mails per second and process (default `5`, `0` = unthrottled), shared by all concurrent handlers of the process |
@@ -895,6 +897,22 @@ notify({ clubId, class: "mandatory" | "optional", eventKey, refId?, announcement
 | Test seam | `setMailSender(double)` replaces `sendEmail` in tests |
 
 `sendEmail` gained optional `fromName`, `replyTo` and `headers` (SMTP and Resend); the sender address part is never changeable. Tests: `src/lib/notify/notify.test.ts` (rows per recipient/channel, shared address, preferences, mandatory, retry/failed without address, real worker run, throttle, templates, `List-Unsubscribe`) and `src/lib/email.test.ts`.
+
+### Push notifications (Wave 9 B8)
+
+Code: `src/lib/notify/push.ts`, `src/routes/push-tokens.ts`. Plain `fetch` against the Expo push API, no SDK dependency.
+
+| Aspect | Behaviour |
+|---|---|
+| Tokens | `POST /push-tokens` binds an Expo token to the **caller's** account (upsert on the unique token); a token stored for another account is re-assigned and the response never reveals the previous owner; no route returns tokens. `DELETE /push-tokens/:token` (logout) removes only the caller's own token and answers `204` for any other value. At most `PUSH_TOKENS_MAX_PER_USER` devices per account (disabled and 90-day-unseen tokens are pruned first, then `429`) |
+| Delivery | One `message_deliveries` row (channel `push`) per recipient; the `notify.push` job (payload `{ deliveryIds }`, ids only) sends it to every active token of that user. Requests are chunked at 100 messages (Expo limit) and never split a delivery. Any non-2xx answer (e.g. `429`) is retried by the queue; on the last attempt the deliveries become `failed` (`push_failed`). A delivery is `sent` when at least one device accepted it, otherwise `failed` with the Expo error code |
+| Payload | **No personal data and no message text**: title = club name (fallback `MyVerein`), body = generic line (`Neue Mitteilung`, `Dringende Mitteilung`, `Neue Erinnerung`), `data = { type: announcement\|event\|meeting\|reminder\|message, urgent, clubId, announcementId?, eventId?, meetingId? }`. The app loads the content from the inbox after opening |
+| Urgent | `priority: high`, `channelId: urgent` (the app creates the Android channels `default` and `urgent`), iOS `interruptionLevel: time-sensitive`; everything else `priority: default`, `channelId: default` |
+| Receipts | Every `ok` ticket is collected into a delayed `notify.push_receipts` job (`PUSH_RECEIPT_DELAY_MINUTES`, default 15; payload = ticket id + token row id). `DeviceNotRegistered` in a ticket or receipt sets `push_tokens.disabled_at`; a re-registration by the app re-enables the token. Other receipt errors are only logged by code |
+| Preferences | Category opt-outs of channel `push` apply to optional messages (`skipped_optout`) |
+| Test seam | `setPushFetch(double)` replaces `fetch` in tests |
+
+Tests: `src/lib/notify/push.test.ts` (rows, chunking 100+20, payload without personal data, deep-link ids, urgent priority/channel, urgent never push-only, opt-out, `DeviceNotRegistered` ticket and receipt, retry/last attempt, access token header) and `src/routes/push-tokens.test.ts` (auth, validation, takeover, delete, device limit).
 
 ### Club announcements (Wave 9 B7)
 
@@ -1183,6 +1201,8 @@ The script runs in a `READ ONLY` transaction and prints only table names, counts
 | `/notification-preferences` | GET | session | Own preferences (user-level, not per club): `{ data: { categories: [{ category: announcements\|events\|reminders, channels: [{ channel: in_app\|email\|push, enabled, switchable }] }], mandatory: [{ key: account_security\|own_decisions\|invitation_deadlines, switchable: false }] } }`. `in_app` is always on (`switchable: false`); no stored row = enabled. `Cache-Control: private, no-store` |
 | `/notification-preferences` | PUT | session | Body `{ preferences: [{ category, channel: email\|push, enabled }] }` (1–20 entries, atomic) → same shape as GET. `422` for a mandatory class (`details.code: mandatory_not_switchable`), the `in_app` channel (`channel_not_switchable`) or unknown values; nothing is applied then. Also overrides rows stored for the caller's account-less period (`club_member_id`) |
 | `/notification-preferences/members` | GET | session + `clubGuard` (`announcements:write`) | Leadership view, **yes/no only**: `{ data: [{ clubMemberId, displayName, unsubscribed }], pagination }` where `unsubscribed` = announcement e-mails switched off (no categories, no channels, no other category). Query `unsubscribed=true\|false`, `page`, `pageSize` (default 50, max 200); left/dormant members are not listed |
+| `/push-tokens` | POST | session | Body `{ token (Expo push token), platform: ios\|android, appVersion? }` → `200 { data: { registered: true } }`. Binds the token to the caller's account (idempotent, refreshes `last_seen_at`, re-enables a disabled token); a token of another account is re-assigned silently. `429` above `PUSH_TOKENS_MAX_PER_USER` devices. `Cache-Control: private, no-store` |
+| `/push-tokens/:token` | DELETE | session | Removes the caller's own token (device logout) → `204`; unknown or foreign tokens are an identical `204` |
 | `/unsubscribe/:token` | GET | public (signed token) | Confirmation payload `{ data: { category, channel: "email", clubName, unsubscribed } }` (changes nothing). With `Accept: text/html` a small German confirmation page with a button instead. Invalid, tampered, expired and malformed tokens are one identical `404` (no oracle which case it was); a validly signed token of a deleted person answers like a real one |
 | `/unsubscribe/:token` | POST | public (signed token) | RFC 8058 one-click target of `List-Unsubscribe-Post: List-Unsubscribe=One-Click` (body ignored) and the page's button: switches the **e-mail** channel of the token's category off for the account (`u`) or, for a member without account, the `club_members` row (`m`) → `200 { data: { category, channel, unsubscribed: true } }`. Idempotent and reusable until expiry (a reuse re-applies the opt-out). 30 requests/min per client IP (`429`), `Referrer-Policy: no-referrer` |
 
@@ -1457,6 +1477,10 @@ All variables live in `.env.example`. The ones worth calling out specifically:
 | `JOB_MAX_ATTEMPTS` / `JOB_BACKOFF_BASE_SECONDS` | no | Attempts before a job is `dead` (default `5`) and the first retry delay, doubled per attempt up to 1 h (default `30`) |
 | `AUDIENCE_MAX_RECIPIENTS` | no | Hard upper limit of persons in one send / audience snapshot (default `2000`, clamped 1–100000); larger audiences are rejected, not truncated |
 | `MAIL_SEND_RATE` | no | Maximum club-communication e-mails per second and process (default `5`, `0` = unthrottled; `src/lib/notify/mailer.ts`). Each recipient gets their own mail |
+| `EXPO_ACCESS_TOKEN` | no | Optional Expo access token sent as `Authorization: Bearer` to the push API (needed when push security is enabled for the Expo project) |
+| `EXPO_PUSH_API_URL` | no | Base URL of the Expo push API (default `https://exp.host/--/api/v2/push`) |
+| `PUSH_RECEIPT_DELAY_MINUTES` | no | Delay before the receipts of sent push tickets are fetched (default `15`, 0–1440) |
+| `PUSH_TOKENS_MAX_PER_USER` | no | Maximum registered push devices per account (default `10`, 1–100); beyond that `POST /push-tokens` is `429` |
 | `UNSUBSCRIBE_SECRET` | no | HMAC key for the signed unsubscribe links in club mails (`src/lib/notify/unsubscribe-token.ts`). Unset falls back to `BETTER_AUTH_SECRET`; set a separate value to invalidate all issued links independently of sessions |
 | `UNSUBSCRIBE_TOKEN_TTL_DAYS` | no | Validity of an unsubscribe link in days (default `180`, clamped 1–730). The link host is `BACKEND_URL` |
 | `MEDIA_UNATTACHED_TTL_HOURS` | no | Hours until an upload that no feature row claimed is swept (default `24`) |

@@ -45,6 +45,7 @@ import { memberFieldRoutes } from "./member-fields.js";
 import { meetingRoutes } from "./meetings.js";
 import { myClubRoutes } from "./my-clubs.js";
 import { notificationRoutes } from "./notifications.js";
+import { pushTokenRoutes } from "./push-tokens.js";
 
 /**
  * Rights matrix (Wave 7 B12 part, deny-by-default): EVERY registered writing route (POST/PATCH/PUT/DELETE)
@@ -71,6 +72,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/club-inbox", "clubInboxRoutes", clubInboxRoutes],
   ["/notification-preferences", "notificationPreferenceRoutes", notificationPreferenceRoutes],
   ["/unsubscribe", "unsubscribeRoutes", unsubscribeRoutes],
+  ["/push-tokens", "pushTokenRoutes", pushTokenRoutes],
   ["/notifications", "notificationRoutes", notificationRoutes],
   ["/admin/notifications", "adminNotificationRoutes", adminNotificationRoutes],
   ["/admin/notification-templates", "adminNotificationTemplateRoutes", adminNotificationTemplateRoutes],
@@ -144,6 +146,8 @@ const SELF_SERVICE: Record<string, string> = {
   "POST /form-submissions/:id/withdraw": "withdrawing the own application (ownership checked)",
   "PUT /notification-preferences": "own notification preferences (user-level; mandatory classes are refused with 422)",
   "POST /unsubscribe/:token": "public one-click unsubscribe (RFC 8058): no session, authorized by the HMAC-signed token itself; invalid/expired tokens are 404",
+  "POST /push-tokens": "own device token (bound to the caller's account; a token of another account is re-assigned, never read)",
+  "DELETE /push-tokens/:token": "logout of an own device (only the caller's own token is removed)",
   "POST /club-inbox/:id/read": "own in-app message (bound to user and club; foreign ids are 404)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
 };

@@ -42,6 +42,7 @@ import { myClubRoutes } from "./routes/my-clubs.js";
 import { internalStatsRoutes } from "./routes/internal-stats.js";
 import { notificationPreferenceRoutes, unsubscribeRoutes } from "./routes/notification-preferences.js";
 import { notificationRoutes } from "./routes/notifications.js";
+import { pushTokenRoutes } from "./routes/push-tokens.js";
 import { trustedOrigins } from "./lib/trusted-origins.js";
 
 const app = new Hono<LoggerEnv>();
@@ -107,6 +108,7 @@ app.route("/club-announcements", clubAnnouncementRoutes);
 app.route("/club-inbox", clubInboxRoutes);
 app.route("/notification-preferences", notificationPreferenceRoutes);
 app.route("/unsubscribe", unsubscribeRoutes);
+app.route("/push-tokens", pushTokenRoutes);
 app.route("/club-applications", clubApplicationRoutes);
 app.route("/forms", formRoutes);
 app.route("/member-fields", memberFieldRoutes);

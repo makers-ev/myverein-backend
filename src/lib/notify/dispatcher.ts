@@ -1,12 +1,13 @@
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, isNull, or } from "drizzle-orm";
 
 import { db } from "../../db/client.js";
-import { messageDeliveries, notificationPreferences, type CommunicationChannel } from "../../db/schema/communication.js";
+import { messageDeliveries, notificationPreferences, pushTokens, type CommunicationChannel } from "../../db/schema/communication.js";
 import { normalizeEmail, resolveClubAudience, type AudienceRecipient } from "../audience.js";
 import { logger } from "../logger.js";
 import { enqueue } from "../jobs/queue.js";
 import { handleEmailDelivery } from "./email-job.js";
-import { EMAIL_JOB_TYPE, type DeliveryContent, type NotificationCategory, type NotifyInput, type NotifyRecipient, type NotifyResult, type NotifyTemplate } from "./types.js";
+import { PUSH_DELIVERIES_PER_JOB } from "./push.js";
+import { EMAIL_JOB_TYPE, PUSH_JOB_TYPE, type DeliveryContent, type NotificationCategory, type NotifyInput, type NotifyRecipient, type NotifyResult, type NotifyTemplate } from "./types.js";
 
 /**
  * Central delivery layer (Wave 9 B6, ADR-006). `notify` writes one `message_deliveries` row per recipient and channel
@@ -87,6 +88,30 @@ async function loadOptOuts(category: string, targets: Target[]): Promise<Set<str
   return out;
 }
 
+/** Users with at least one active push token. */
+async function loadPushUsers(targets: Target[]): Promise<Set<string>> {
+  const userIds = [...new Set(targets.map((t) => t.userId).filter((v): v is string => v !== null))];
+  const out = new Set<string>();
+  for (let i = 0; i < userIds.length; i += INSERT_CHUNK) {
+    const rows = await db
+      .selectDistinct({ userId: pushTokens.userId })
+      .from(pushTokens)
+      .where(and(inArray(pushTokens.userId, userIds.slice(i, i + INSERT_CHUNK)), isNull(pushTokens.disabledAt)));
+    for (const r of rows) out.add(r.userId);
+  }
+  return out;
+}
+
+/** Push never stands alone: the in-app copy is the source of truth, and an urgent message always has the e-mail fallback (ADR-006, O1). */
+function effectiveChannels(input: NotifyInput, template: NotifyTemplate): CommunicationChannel[] {
+  const channels = new Set<CommunicationChannel>(input.channels);
+  if (channels.has("push")) {
+    channels.add("in_app");
+    if (input.content.urgent === true || template === "urgent") channels.add("email");
+  }
+  return [...channels];
+}
+
 const optedOut = (optOuts: Set<string>, channel: CommunicationChannel, t: Target): boolean =>
   (t.userId !== null && optOuts.has(`${channel}:u:${t.userId}`)) || (t.clubMemberId !== null && optOuts.has(`${channel}:m:${t.clubMemberId}`));
 
@@ -103,10 +128,14 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
     ? targetsFromAudience((await resolveClubAudience(input.clubId!, input.audience, input.limit === undefined ? {} : { limit: input.limit })).recipients)
     : targetsFromRecipients(input.recipients ?? []);
 
-  const wantsInApp = input.channels.includes("in_app");
-  const wantsEmail = input.channels.includes("email");
+  const channels = effectiveChannels(input, template);
+  const wantsInApp = channels.includes("in_app");
+  const wantsEmail = channels.includes("email");
+  const wantsPush = channels.includes("push");
   // Mandatory messages ignore preferences entirely; optional ones are filtered per channel (in-app is the source of truth and stays on).
-  const optOuts = input.class === "optional" && wantsEmail ? await loadOptOuts(category, targets) : new Set<string>();
+  const optOuts = input.class === "optional" && (wantsEmail || wantsPush) ? await loadOptOuts(category, targets) : new Set<string>();
+
+  const pushUsers = wantsPush ? await loadPushUsers(targets) : new Set<string>();
 
   const now = new Date();
   const rows: DeliveryInsert[] = [];
@@ -132,7 +161,7 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
       ...(input.content.sensitive ? { sensitive: true } : {}),
     } satisfies DeliveryContent,
   });
-  const result: NotifyResult = { recipients: targets.length, inApp: 0, queuedEmail: 0, sentEmail: 0, skippedOptout: 0, skippedNoAddress: 0, alreadyDelivered: 0 };
+  const result: NotifyResult = { recipients: targets.length, inApp: 0, queuedEmail: 0, queuedPush: 0, sentEmail: 0, skippedOptout: 0, skippedNoAddress: 0, alreadyDelivered: 0 };
 
   for (const t of targets) {
     if (wantsInApp && t.inApp) rows.push({ ...base(t, "in_app"), status: "sent", sentAt: now });
@@ -141,9 +170,15 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
       else if (optedOut(optOuts, "email", t)) rows.push({ ...base(t, "email"), status: "skipped_optout" });
       else rows.push({ ...base(t, "email"), status: "queued", address: t.email });
     }
+    if (wantsPush && t.userId !== null) {
+      if (optedOut(optOuts, "push", t)) rows.push({ ...base(t, "push"), status: "skipped_optout" });
+      else if (!pushUsers.has(t.userId)) rows.push({ ...base(t, "push"), status: "skipped_no_address", errorCode: "no_push_token" });
+      else rows.push({ ...base(t, "push"), status: "queued" });
+    }
   }
 
   const immediateIds: string[] = [];
+  const pushIds: string[] = [];
   await db.transaction(async (tx) => {
     for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
       const chunk = rows.slice(i, i + INSERT_CHUNK);
@@ -151,13 +186,24 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
       result.alreadyDelivered += chunk.length - inserted.length;
       for (const row of inserted) {
         if (row.channel === "in_app") result.inApp += 1;
-        else if (row.status === "queued") {
+        else if (row.channel === "push") {
+          if (row.status === "queued") {
+            result.queuedPush += 1;
+            pushIds.push(row.id);
+          } else if (row.status === "skipped_optout") result.skippedOptout += 1;
+          else if (row.status === "skipped_no_address") result.skippedNoAddress += 1;
+        } else if (row.status === "queued") {
           result.queuedEmail += 1;
           if (input.immediate) immediateIds.push(row.id);
           else await enqueue({ type: EMAIL_JOB_TYPE, payload: { deliveryId: row.id }, dedupeKey: `${EMAIL_JOB_TYPE}:${row.id}` }, tx);
         } else if (row.status === "skipped_optout") result.skippedOptout += 1;
         else if (row.status === "skipped_no_address") result.skippedNoAddress += 1;
       }
+    }
+    // One job per batch of deliveries, so the handler can fill Expo's 100-message requests.
+    for (let i = 0; i < pushIds.length; i += PUSH_DELIVERIES_PER_JOB) {
+      const deliveryIds = pushIds.slice(i, i + PUSH_DELIVERIES_PER_JOB);
+      await enqueue({ type: PUSH_JOB_TYPE, payload: { deliveryIds }, dedupeKey: `${PUSH_JOB_TYPE}:${deliveryIds[0]}:${deliveryIds.length}` }, tx);
     }
   });
   for (const deliveryId of immediateIds) {
