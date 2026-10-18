@@ -70,3 +70,16 @@ describe("hasClubPermission", () => {
     expect(hasClubPermission([], "forms:write")).toBe(false);
   });
 });
+
+describe("announcements permissions (Wave 9 B7)", () => {
+  it("announcements:write is held by vorsitz, stellv_vorsitz and schriftfuehrer only", () => {
+    for (const role of ["vorsitz", "stellv_vorsitz", "schriftfuehrer"]) expect(hasClubPermission([role], "announcements:write")).toBe(true);
+    for (const role of ["mitglied", "kassenwart", "beisitzer", "abteilungsleitung", "trainer", "erziehungsberechtigt", "unknown"]) expect(hasClubPermission([role], "announcements:write")).toBe(false);
+  });
+
+  it("announcements:write_department is held by abteilungsleitung and trainer only (scope comes from club_roles.department_id)", () => {
+    for (const role of ["abteilungsleitung", "trainer"]) expect(hasClubPermission([role], "announcements:write_department")).toBe(true);
+    for (const role of ["mitglied", "vorsitz", "kassenwart", "beisitzer", "erziehungsberechtigt"]) expect(hasClubPermission([role], "announcements:write_department")).toBe(false);
+    expect(clubPermissionsFor(["trainer"])).toEqual(["announcements:write_department"]);
+  });
+});

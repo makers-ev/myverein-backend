@@ -18,6 +18,7 @@ import { adminClubRegistrationRoutes } from "./admin-club-registrations.js";
 import { adminClubRoutes } from "./admin-clubs.js";
 import { clubStatsRoutes } from "./club-stats.js";
 import { clubExitRequestRoutes } from "./club-exit-requests.js";
+import { clubAnnouncementRoutes, clubInboxRoutes } from "./club-announcements.js";
 import { clubSettingsRoutes } from "./club-settings.js";
 import { adminEmailRoutes } from "./admin-emails.js";
 import { adminNotificationRoutes } from "./admin-notifications.js";
@@ -65,6 +66,8 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/club-stats", "clubStatsRoutes", clubStatsRoutes],
   ["/club-settings", "clubSettingsRoutes", clubSettingsRoutes],
   ["/club-exit-requests", "clubExitRequestRoutes", clubExitRequestRoutes],
+  ["/club-announcements", "clubAnnouncementRoutes", clubAnnouncementRoutes],
+  ["/club-inbox", "clubInboxRoutes", clubInboxRoutes],
   ["/notifications", "notificationRoutes", notificationRoutes],
   ["/admin/notifications", "adminNotificationRoutes", adminNotificationRoutes],
   ["/admin/notification-templates", "adminNotificationTemplateRoutes", adminNotificationTemplateRoutes],
@@ -136,6 +139,7 @@ const SELF_SERVICE: Record<string, string> = {
   "DELETE /form-submissions/:id": "discarding the own draft (ownership checked, foreign ids are 404; only status draft)",
   "POST /form-submissions/:id/submit": "submitting the own draft (ownership checked)",
   "POST /form-submissions/:id/withdraw": "withdrawing the own application (ownership checked)",
+  "POST /club-inbox/:id/read": "own in-app message (bound to user and club; foreign ids are 404)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
 };
 
@@ -379,6 +383,13 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
       for (const role of ["kassenwart", "abteilungsleitung", "trainer", "erziehungsberechtigt"]) expect(clubPermissionsFor([role])).not.toContain("meetings:read_board");
       for (const role of ["vorsitz", "stellv_vorsitz", "schriftfuehrer", "abteilungsleitung"]) expect(clubPermissionsFor([role])).toContain("locations:read_access");
       for (const role of ["kassenwart", "beisitzer", "trainer", "erziehungsberechtigt"]) expect(clubPermissionsFor([role])).not.toContain("locations:read_access");
+    });
+
+    it("grants the announcement permissions deny-by-default along the agreed roles (Wave 9 B7)", () => {
+      for (const role of ["vorsitz", "stellv_vorsitz", "schriftfuehrer"]) expect(clubPermissionsFor([role])).toContain("announcements:write");
+      for (const role of ["mitglied", "kassenwart", "beisitzer", "abteilungsleitung", "trainer", "erziehungsberechtigt"]) expect(clubPermissionsFor([role])).not.toContain("announcements:write");
+      for (const role of ["abteilungsleitung", "trainer"]) expect(clubPermissionsFor([role])).toContain("announcements:write_department");
+      for (const role of ["mitglied", "vorsitz", "kassenwart", "beisitzer", "erziehungsberechtigt"]) expect(clubPermissionsFor([role])).not.toContain("announcements:write_department");
     });
 
     it("cannot be assigned (422) or revoked (409) and is listed as implicit, not as a deletable row", async () => {

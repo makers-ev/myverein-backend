@@ -1,4 +1,6 @@
+import { handlePublishAnnouncement, PUBLISH_JOB_TYPE } from "../announcements.js";
 import { registerNotifyJobs } from "../notify/index.js";
+import { registerJob } from "./registry.js";
 
 /**
  * Registers every job handler of the app. Called by both entry points (the API process and `worker.ts`) before the
@@ -11,4 +13,5 @@ export function registerAllJobs(): void {
   if (registered) return;
   registered = true;
   registerNotifyJobs();
+  registerJob(PUBLISH_JOB_TYPE, handlePublishAnnouncement);
 }
