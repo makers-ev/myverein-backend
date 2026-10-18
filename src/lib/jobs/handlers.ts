@@ -2,7 +2,8 @@ import { handlePublishAnnouncement, PUBLISH_JOB_TYPE } from "../announcements.js
 import { EVENT_CHANGED_JOB_TYPE, handleEventChanged } from "../event-notify.js";
 import { registerNotifyJobs } from "../notify/index.js";
 import { installUnsubscribeProvider } from "../notify/unsubscribe-token.js";
-import { registerJob } from "./registry.js";
+import { handleReminder, handleReminderSweep, REMINDER_JOB_TYPE, REMINDER_SWEEP_INTERVAL_MS, REMINDER_SWEEP_JOB_TYPE } from "../reminders.js";
+import { registerJob, registerRecurringJob } from "./registry.js";
 
 /**
  * Registers every job handler of the app. Called by both entry points (the API process and `worker.ts`) before the
@@ -18,4 +19,6 @@ export function registerAllJobs(): void {
   installUnsubscribeProvider();
   registerJob(PUBLISH_JOB_TYPE, handlePublishAnnouncement);
   registerJob(EVENT_CHANGED_JOB_TYPE, handleEventChanged);
+  registerRecurringJob({ type: REMINDER_SWEEP_JOB_TYPE, intervalMs: REMINDER_SWEEP_INTERVAL_MS }, handleReminderSweep);
+  registerJob(REMINDER_JOB_TYPE, handleReminder);
 }

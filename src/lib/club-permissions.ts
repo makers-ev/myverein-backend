@@ -132,3 +132,8 @@ export function clubPermissionsFor(roleTypes: readonly string[]): ClubPermission
 
 /** Roles considered "board" for quick checks (e.g. Vereinsinfo board listing). */
 export const BOARD_ROLE_TYPES: ClubRoleType[] = ["vorsitz", "stellv_vorsitz", "kassenwart", "schriftfuehrer", "beisitzer"];
+
+/** All role types that grant `permission` (used to address "everyone who may manage X" by role, e.g. maintenance digests). */
+export function roleTypesWithPermission(permission: ClubPermission): ClubRoleType[] {
+  return CLUB_ROLE_TYPES.filter((roleType) => ROLE_PERMISSIONS[roleType].includes(permission));
+}

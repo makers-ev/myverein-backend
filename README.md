@@ -146,7 +146,7 @@ src/
 │                       #   meeting_resolutions, club_registrations, club_registration_documents, media_files,
 │                       #   forms, form_versions, form_submissions, form_submission_files, member_field_definitions, member_field_values)
 ├── lib/               # errors, email, logger, activity-stats, club-permissions, calendar-visibility,
-│                       #   availability-match, ics, member-number, club-members, member-lifecycle, member-invites, exit-notice, club-settings, club-stats, club-slug, club-registrations, club-registration-notify, decision-notify, event-notify, media, media-url, image-sanitize, member-photos, form-defaults, forms, form-schema, form-mapping, form-acceptance, form-applications, form-children, form-exit, form-review, application-review, form-retention, form-sweeper, custom-fields, custom-field-access, credentials, profile-modules, member-read-scope, member-csv, member-import, member-protection, invite-context, key-returns, inventory-status, wifi-qr, text-policy, trusted-origins, emailTemplate, storage — cross-cutting, no HTTP awareness
+│                       #   availability-match, ics, member-number, club-members, member-lifecycle, member-invites, exit-notice, club-settings, club-stats, club-slug, club-registrations, club-registration-notify, decision-notify, event-notify, reminders, club-time, media, media-url, image-sanitize, member-photos, form-defaults, forms, form-schema, form-mapping, form-acceptance, form-applications, form-children, form-exit, form-review, application-review, form-retention, form-sweeper, custom-fields, custom-field-access, credentials, profile-modules, member-read-scope, member-csv, member-import, member-protection, invite-context, key-returns, inventory-status, wifi-qr, text-policy, trusted-origins, emailTemplate, storage — cross-cutting, no HTTP awareness
 ├── middleware/         # session-guard, club-guard, rate-limit, request-id
 ├── routes/            # health, club-members, club-exit-requests, club-settings, club-stats, club-applications, club-registrations, admin-club-registrations, departments, club-info, calendars, events, availability,
 │                       #   meetings, locations, inventory-items, media, my-clubs, club-announcements (+ club-inbox), notification-preferences (+ unsubscribe), notifications, internal-stats, admin-stats, admin-clubs, admin-emails, admin-notifications, admin-notification-templates, forms, club-forms, form-submissions, member-fields, club-member-custom-fields
@@ -827,7 +827,7 @@ Schema only (B3); routes follow in later packages. Decisions: [ADR-005](../lpj-i
 
 ### Job queue and worker (Wave 9 B4)
 
-DB-backed queue per [ADR-005](../lpj-its-vault/20_Products/MyVerein/Architecture%20%26%20ADRs/ADR-005%20-%20Scheduler%20und%20Worker%20als%20DB-Job-Queue.md), code in `src/lib/jobs/` (table `jobs`, see [above](#communication-and-job-queue-data-model-wave-9)). The engine ships without functional jobs; later packages register handlers in `src/lib/jobs/handlers.ts` (`registerAllJobs`).
+DB-backed queue per [ADR-005](../lpj-its-vault/20_Products/MyVerein/Architecture%20%26%20ADRs/ADR-005%20-%20Scheduler%20und%20Worker%20als%20DB-Job-Queue.md), code in `src/lib/jobs/` (table `jobs`, see [above](#communication-and-job-queue-data-model-wave-9)). Handlers are registered in `src/lib/jobs/handlers.ts` (`registerAllJobs`); see the job types table below.
 
 | Piece | Behaviour |
 |---|---|
@@ -839,6 +839,16 @@ DB-backed queue per [ADR-005](../lpj-its-vault/20_Products/MyVerein/Architecture
 | Shutdown | `SIGTERM`/`SIGINT`: stop polling, wait up to 10 s for running handlers, unfinished leases simply expire |
 | Heartbeat | `GET /ready` adds `worker: { status: "ok" \| "stale", lastPollAt, inFlight }` when this process runs the worker; a stale worker is reported but does not turn `/ready` into `503` |
 | Operation | In-process with the API unless `WORKER_ENABLED=false`; stand-alone via `npm run start:worker` (`node dist/worker.js`, dev: `npm run dev:worker`). Several processes are safe |
+
+**Job types** (all registered in `registerAllJobs`; recurring ones are scheduled by every worker poll):
+
+| Type | Kind | Dedupe key | Purpose |
+|---|---|---|---|
+| `notify.email` | per delivery | `notify.email:<deliveryId>` | Sends the mail of one `message_deliveries` row ([dispatcher](#notification-dispatcher-wave-9-b6)) |
+| `announcement.publish` | scheduled | per announcement | Publishes a scheduled announcement |
+| `notify_event_changed` | per change | `notify_event_changed:<kind>:<id>:<updatedAt ms>` | Notifies about a changed or cancelled event/meeting |
+| `reminder-sweep` | recurring, 15 min | `reminder-sweep:<UTC 15-min bucket>` | Decides which [reminders](#reminders-wave-9-b12) are due and schedules them |
+| `notify_reminder` | per reminder | `reminder:<kind>:<ref>:<date>` | Dispatches one prepared reminder (`optional`, category `reminders`) |
 
 Tests: `src/lib/jobs/jobs.test.ts` (dedupe incl. parallel enqueue, bucket keys, two parallel workers process 60 jobs exactly once, retry/backoff timing, dead, lease expiry and lost lease, type filter, concurrency, clean shutdown + heartbeat) and `src/db/migration-communication.test.ts`.
 
@@ -910,6 +920,22 @@ Tests: `src/lib/notify/unsubscribe-token.test.ts` (signature, expiry, tampering,
 | Read shape | Event responses (`GET /events`, `GET /events/:id`, create/update/cancel) keep every previous field and add `cancelled` (boolean); `cancelledAt` and `cancelReason` come from the columns |
 
 Tests: `src/routes/event-notifications.test.ts` (audience incl. waitlist, department on cancel, old/new time in the text, location change, `notify:false` + audit, delete with RSVPs, cancelled state in reads, RSVP refused, meeting reschedule/cancel).
+
+### Reminders (Wave 9 B12)
+
+`src/lib/reminders.ts`, `src/lib/club-time.ts`. The recurring job `reminder-sweep` (every 15 min) loads every club with its `club_settings` (switches, lead times, `timezone`; a club without a row runs on the defaults), works out which reminders are due and schedules one `notify_reminder` job each under the key `reminder:<kind>:<ref>:<date>`. The key makes a reminder **exactly-once**: later sweeps, a double run or several instances find it taken. `notify_reminder` hands the prepared message to the [dispatcher](#notification-dispatcher-wave-9-b6) (class `optional`, category `reminders`, template `reminder`, channels `in_app` + `email`; members can switch it off, left and dormant members are skipped by the audience resolver).
+
+| Kind (key `<kind>:<ref>:<date>`) | Recipients | When | Switch / lead time |
+|---|---|---|---|
+| `event:<eventId>:<local start date>` | Attendees with RSVP `angemeldet` (not waitlist, not declined); cancelled events never | Start lies within the lead time (absolute hours before the start) | `reminder_event_enabled`, `reminder_event_lead_hours` (24) |
+| `loan_due:<loanId>:<due date>` | The borrower | From `reminder_loan_lead_days` (1) before the due day until the due day, once | `reminder_loan_enabled`, `reminder_loan_lead_days` |
+| `loan_overdue:<loanId>:<due date + step>` | The borrower | Overdue (`isLoanOverdue` of `inventory-status.ts`) on day 1, 4 and 7 after the due day, then never again; after downtime only the latest missed step is sent | `reminder_loan_enabled` |
+| `maintenance:<clubId>:<local date>` | Everyone with `inventory:write` (by role), one **daily digest** per club listing items whose due date (`maintenanceDueDate` of `inventory-status.ts`) is within the lead time or overdue | Daily while something is due | `reminder_maintenance_enabled`, `reminder_maintenance_lead_days` (7) |
+| `rsvp:<meetingId>:<local meeting date>` | Invitees of a `geplant` meeting with response `ausstehend` | From `reminder_rsvp_lead_days` (3) calendar days before the meeting day, once | `reminder_rsvp_enabled`, `reminder_rsvp_lead_days` |
+
+Time zone and DST: "day" always means the calendar day in `club_settings.timezone` (Intl, never 24 h multiples), day arithmetic is calendar arithmetic, so the 23 h and 25 h switch days move nothing by a day. Everything date based (loans, maintenance, RSVP) goes out from `REMINDER_DIGEST_HOUR` (default 8) club time on; events use the absolute lead. The settings are read and changed through `GET`/`PATCH /club-settings`.
+
+Tests: `src/lib/reminders.test.ts` (day/hour helpers around both switch days, every kind incl. switches and lead times, digest hour in another zone, catch-up, exactly-once under repeated and parallel sweeps, DST meeting reminders) and `src/routes/club-exit-requests.test.ts` (settings validation).
 
 ### Decision notifications (Wave 9 B11)
 
@@ -1010,8 +1036,8 @@ The script runs in a `READ ONLY` transaction and prints only table names, counts
 | `/club-members/:id/departments` | GET, POST, DELETE `/:departmentId` | session + `clubGuard` (POST/DELETE need `members:write`) | Department assignment with validity period. GET `[{ id, name, since, until }]`; POST `{ departmentId, since? }` → `201` (department must belong to the club, else `404`; already assigned → `409`); DELETE ends the open assignment (`until` = today or `?until=YYYY-MM-DD`) and keeps the history → `204`, `404` if none open |
 | `/club-members/:id/roles` | GET, POST, DELETE `/:roleId` | session + `clubGuard` (write needs `roles:write`) | `club_roles` assignment on the **linked account** — `roleType` one of `CLUB_ROLE_TYPES` (`src/lib/club-permissions.ts`), optional `departmentId`/`termEndsAt`; assigning a role the member already holds returns `409`. **`mitglied` is implicit and cannot be assigned (`422`, not part of the enum) or revoked (`409`);** `GET` answers `{ data: [stored club_roles rows], implicit: ["mitglied"] }` — `data` is unchanged (only revocable rows), the implicit base role is listed separately. **A member without account answers `409 "Member has no account"`** on all three methods |
 | `/club-members/:id/guardians` | GET, POST, DELETE `/:guardianMemberId` | session + `clubGuard` (write needs `members:write`) | `guardian_links` for the externe Rolle — board-managed only. `:id` is the **ward** (any club member, account optional); `guardianMemberId` (body / path) is a `club_members.id` or, for older clients, the guardian's `member.id`, and the guardian must have an account (`409` otherwise, `404` if not in this club, `422` if equal to the ward, `409` for a duplicate). **Reading** (`GET`) needs `members:read_sensitive` or being a guardian of this ward (`403` otherwise) because guardian names are personal data. Link shape: `{ id, guardianMemberId (member.id), guardianClubMemberId, guardianName, wardClubMemberId, wardMemberId (account id or null), createdAt }` |
-| `/club-settings` | GET | session + `clubGuard` | `200 { data: { noticePeriodDays, noticeMode, memberNumberPrefix, allowSelfLoans } }` for **every** member (defaults `null`/`null`/`null`/`true` without a row; `memberNumberPrefix` is `null` when not set, i.e. the slug abbreviation is used) |
-| `/club-settings` | PATCH | session + `clubGuard` (`members:write`) | Body (all optional): `noticePeriodDays` (int 0–365 \| null), `noticeMode` (`immediate` \| `month_end` \| `quarter_end` \| `year_end` \| null), `memberNumberPrefix` (1–10 letters/digits, stored upper case, null = slug abbreviation; used for NEW member numbers), `allowSelfLoans` (bool). Creates the row on demand; `200 { data: { noticePeriodDays, noticeMode, memberNumberPrefix, allowSelfLoans } }`. Audit `club_settings.update` |
+| `/club-settings` | GET | session + `clubGuard` | `200 { data: { noticePeriodDays, noticeMode, memberNumberPrefix, allowSelfLoans, timezone, reminderEventEnabled, reminderEventLeadHours, reminderLoanEnabled, reminderLoanLeadDays, reminderMaintenanceEnabled, reminderMaintenanceLeadDays, reminderRsvpEnabled, reminderRsvpLeadDays, ageTransitionAuto } }` for **every** member (defaults `null`/`null`/`null`/`true`, `Europe/Berlin`, reminders on with 24 h / 1 / 7 / 3, age transition off, without a row; `memberNumberPrefix` is `null` when not set, i.e. the slug abbreviation is used) |
+| `/club-settings` | PATCH | session + `clubGuard` (`members:write`) | Body (all optional): `noticePeriodDays` (int 0–365 \| null), `noticeMode` (`immediate` \| `month_end` \| `quarter_end` \| `year_end` \| null), `memberNumberPrefix` (1–10 letters/digits, stored upper case, null = slug abbreviation; used for NEW member numbers), `allowSelfLoans` (bool), `timezone` (valid IANA name), `reminderEventEnabled`/`reminderLoanEnabled`/`reminderMaintenanceEnabled`/`reminderRsvpEnabled` (bool), `reminderEventLeadHours` (int 1–168), `reminderLoanLeadDays` (0–30), `reminderMaintenanceLeadDays` (0–90), `reminderRsvpLeadDays` (1–30), `ageTransitionAuto` (bool). Creates the row on demand; `200 { data: <same shape as GET> }`. Audit `club_settings.update` |
 | `/club-exit-requests/preview` | GET | session + `clubGuard` | `?requestedOn=YYYY-MM-DD` (default today Europe/Berlin; past → `422`) → `200 { data: { requestedOn, noticePeriodDays, noticeMode, earliestEffectiveOn } }` |
 | `/club-exit-requests/form` | GET | session + `clubGuard` | The club's published **exit form** (`austritt`, Wave 8 B9) for the cancellation dialog: `{ data: { formId, formVersionId, version, purpose, name, privacyNotice, childApplication, fields } }` (applicant view: no admin data). Standard form v1: `reason` (textarea, optional, ≤ 1000) and `confirm` (checkbox, required). `Cache-Control: private, no-cache`. The standard forms are seeded on first access if the club lacks them |
 | `/club-exit-requests/mine` | GET | session + `clubGuard` | Own requests (about the caller's member row), newest first: `{ data: [request] }` |
@@ -1408,6 +1434,7 @@ All variables live in `.env.example`. The ones worth calling out specifically:
 | `MEDIA_QUOTA_BYTES_PER_CLUB` | no | Storage quota per club in bytes over live `media_files` (default `1073741824` = 1 GiB); exceeding it is `422 QUOTA_EXCEEDED` with `details.code = club_quota` |
 | `WORKER_ENABLED` | no | Runs the job worker inside the API process (default on; only the exact value `false` disables it, then run `npm run start:worker` / `dist/worker.js` separately) |
 | `WORKER_POLL_INTERVAL_MS` / `WORKER_CONCURRENCY` / `WORKER_LEASE_SECONDS` | no | Job worker poll interval (default `2000`), parallel jobs per worker (default `4`), lease before a stuck job is reclaimed (default `300`) |
+| `REMINDER_DIGEST_HOUR` | no | Club-local hour (0–23, default `8`) from which date-based reminders (loans, maintenance digest, missing RSVP) are sent |
 | `JOB_MAX_ATTEMPTS` / `JOB_BACKOFF_BASE_SECONDS` | no | Attempts before a job is `dead` (default `5`) and the first retry delay, doubled per attempt up to 1 h (default `30`) |
 | `AUDIENCE_MAX_RECIPIENTS` | no | Hard upper limit of persons in one send / audience snapshot (default `2000`, clamped 1–100000); larger audiences are rejected, not truncated |
 | `MAIL_SEND_RATE` | no | Maximum club-communication e-mails per second and process (default `5`, `0` = unthrottled; `src/lib/notify/mailer.ts`). Each recipient gets their own mail |

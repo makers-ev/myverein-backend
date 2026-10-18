@@ -5,6 +5,7 @@ import { z } from "zod";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubSettings, NOTICE_MODES } from "../db/schema/club-settings.js";
+import { isValidTimezone } from "../lib/club-time.js";
 import { loadClubSettings } from "../lib/club-settings.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, ValidationError } from "../lib/errors.js";
@@ -24,7 +25,7 @@ clubSettingsRoutes.use("*", clubGuard);
 
 clubSettingsRoutes.get("/", async (c) => {
   const settings = await loadClubSettings(db, c.get("clubId"));
-  return c.json({ data: { noticePeriodDays: settings.noticePeriodDays, noticeMode: settings.noticeMode, memberNumberPrefix: settings.memberNumberPrefix, allowSelfLoans: settings.allowSelfLoans } });
+  return c.json({ data: settings });
 });
 
 const updateSettingsSchema = z.object({
@@ -39,6 +40,23 @@ const updateSettingsSchema = z.object({
     .nullable()
     .optional(),
   allowSelfLoans: z.boolean().optional(),
+  // Time zone of the club's reminders and sweeps (IANA name, e.g. "Europe/Berlin").
+  timezone: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .refine(isValidTimezone, { message: "timezone must be a valid IANA time zone" })
+    .optional(),
+  reminderEventEnabled: z.boolean().optional(),
+  reminderEventLeadHours: z.number().int().min(1).max(168).optional(),
+  reminderLoanEnabled: z.boolean().optional(),
+  reminderLoanLeadDays: z.number().int().min(0).max(30).optional(),
+  reminderMaintenanceEnabled: z.boolean().optional(),
+  reminderMaintenanceLeadDays: z.number().int().min(0).max(90).optional(),
+  reminderRsvpEnabled: z.boolean().optional(),
+  reminderRsvpLeadDays: z.number().int().min(1).max(30).optional(),
+  ageTransitionAuto: z.boolean().optional(),
 });
 
 clubSettingsRoutes.patch(

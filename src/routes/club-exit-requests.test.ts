@@ -118,7 +118,22 @@ describe("exit workflow (B6)", () => {
       const plain = await join("settings-reader");
       const res = await call(plain, "/club-settings");
       expect(res.status).toBe(200);
-      expect((await body(res)).data).toEqual({ noticePeriodDays: null, noticeMode: null, memberNumberPrefix: null, allowSelfLoans: true });
+      expect((await body(res)).data).toEqual({
+        noticePeriodDays: null,
+        noticeMode: null,
+        memberNumberPrefix: null,
+        allowSelfLoans: true,
+        timezone: "Europe/Berlin",
+        reminderEventEnabled: true,
+        reminderEventLeadHours: 24,
+        reminderLoanEnabled: true,
+        reminderLoanLeadDays: 1,
+        reminderMaintenanceEnabled: true,
+        reminderMaintenanceLeadDays: 7,
+        reminderRsvpEnabled: true,
+        reminderRsvpLeadDays: 3,
+        ageTransitionAuto: false,
+      });
     });
 
     it("PATCH needs members:write and validates the values", async () => {
@@ -132,9 +147,9 @@ describe("exit workflow (B6)", () => {
     it("PATCH creates the row on demand, returns all four values, GET shows all four, and the prefix drives new member numbers", async () => {
       const res = await call(founder, "/club-settings", { method: "PATCH", body: { noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: " tsv ", allowSelfLoans: false } });
       expect(res.status).toBe(200);
-      expect((await body(res)).data).toEqual({ noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: "TSV", allowSelfLoans: false });
+      expect((await body(res)).data).toMatchObject({ noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: "TSV", allowSelfLoans: false });
       const plain = await join("settings-after");
-      expect((await body(await call(plain, "/club-settings"))).data).toEqual({ noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: "TSV", allowSelfLoans: false });
+      expect((await body(await call(plain, "/club-settings"))).data).toMatchObject({ noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: "TSV", allowSelfLoans: false });
       const created = await childMember();
       expect(created.memberNumber).toMatch(/^TSV-\d{4}$/);
       // partial update keeps the rest; null clears
@@ -144,9 +159,20 @@ describe("exit workflow (B6)", () => {
       expect(await db.query.auditLog.findFirst({ where: eq(auditLog.eventType, "club_settings.update") })).toBeTruthy();
     });
 
+    it("PATCH validates and stores the reminder switches, lead times, time zone and the age transition switch", async () => {
+      for (const bad of [{ timezone: "Mars/Olympus" }, { timezone: "" }, { reminderEventLeadHours: 0 }, { reminderEventLeadHours: 169 }, { reminderLoanLeadDays: -1 }, { reminderMaintenanceLeadDays: 91 }, { reminderRsvpLeadDays: 0 }, { reminderRsvpEnabled: "yes" }, { ageTransitionAuto: 1 }]) {
+        expect((await call(founder, "/club-settings", { method: "PATCH", body: bad })).status, JSON.stringify(bad)).toBe(422);
+      }
+      const res = await call(founder, "/club-settings", { method: "PATCH", body: { timezone: "Europe/Lisbon", reminderEventEnabled: false, reminderEventLeadHours: 48, reminderLoanLeadDays: 0, reminderMaintenanceLeadDays: 14, reminderRsvpEnabled: false, reminderRsvpLeadDays: 5, ageTransitionAuto: true } });
+      expect(res.status).toBe(200);
+      expect((await body(res)).data).toMatchObject({ timezone: "Europe/Lisbon", reminderEventEnabled: false, reminderEventLeadHours: 48, reminderLoanEnabled: true, reminderLoanLeadDays: 0, reminderMaintenanceLeadDays: 14, reminderRsvpEnabled: false, reminderRsvpLeadDays: 5, ageTransitionAuto: true });
+      const plain = await join("settings-reminders");
+      expect((await body(await call(plain, "/club-settings"))).data).toMatchObject({ timezone: "Europe/Lisbon", ageTransitionAuto: true });
+    });
+
     it("is club-scoped", async () => {
       const other = await call(outsider, "/club-settings", { clubId: otherClub });
-      expect((await body(other)).data).toEqual({ noticePeriodDays: null, noticeMode: null, memberNumberPrefix: null, allowSelfLoans: true });
+      expect((await body(other)).data).toMatchObject({ noticePeriodDays: null, noticeMode: null, memberNumberPrefix: null, allowSelfLoans: true });
     });
   });
 
