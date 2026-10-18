@@ -57,7 +57,8 @@ export async function enqueueRecurring(type: string, intervalMs: number, payload
 }
 
 /** Deletes finished jobs older than `olderThanMs` (housekeeping; `dead` jobs are kept for inspection). */
-export async function deleteFinishedJobs(olderThanMs: number): Promise<number> {
-  const result = await db.execute(sql`DELETE FROM jobs WHERE status = 'done' AND finished_at < now() - make_interval(secs => ${olderThanMs / 1000})`);
+export async function deleteFinishedJobs(olderThanMs: number, now: Date = new Date()): Promise<number> {
+  const cutoff = new Date(now.getTime() - olderThanMs);
+  const result = await db.execute(sql`DELETE FROM jobs WHERE status = 'done' AND finished_at < ${cutoff}`);
   return result.rowCount ?? 0;
 }

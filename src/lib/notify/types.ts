@@ -93,3 +93,5 @@ export interface DeliveryContent {
 export const EMAIL_JOB_TYPE = "notify.email";
 export const PUSH_JOB_TYPE = "notify.push";
 export const PUSH_RECEIPTS_JOB_TYPE = "notify.push_receipts";
+export const DELIVERY_REAPER_JOB_TYPE = "notify.reap_dead_deliveries";
+export const DELIVERY_REAPER_INTERVAL_MS = 10 * 60 * 1000;

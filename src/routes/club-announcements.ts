@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, count, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 
@@ -25,6 +25,7 @@ import {
 import { ensureClubMember, isUuid } from "../lib/club-members.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { enqueue } from "../lib/jobs/queue.js";
+import { optedOutDeliveryIds } from "../lib/notify/guards.js";
 import { EMAIL_JOB_TYPE, type DeliveryContent } from "../lib/notify/types.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -98,6 +99,21 @@ async function loadVisible(c: Context<AnnouncementEnv>, idParam: string, lock = 
 }
 
 const isEditable = (row: ClubAnnouncementRow) => row.status === "draft" || row.status === "scheduled";
+
+/** Order-insensitive JSON for comparing audience objects. */
+function canon(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canon).sort().join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${JSON.stringify(k)}:${canon(v)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+/** Withdraw / cancel: mails and pushes that have not gone out yet must not go out any more. */
+async function skipUnsentDeliveries(tx: Pick<typeof db, "update">, announcementId: string): Promise<void> {
+  await tx
+    .update(messageDeliveries)
+    .set({ status: "skipped", errorCode: "withdrawn" })
+    .where(and(eq(messageDeliveries.announcementId, announcementId), inArray(messageDeliveries.channel, ["email", "push"]), eq(messageDeliveries.status, "queued")));
+}
 
 // --- Create / list ---------------------------------------------------------------------------------
 
@@ -225,6 +241,17 @@ clubAnnouncementRoutes.patch("/:id", zValidator("json", patchSchema, validationH
         if (body.expiresAt && body.expiresAt.getTime() <= Date.now()) throw new ValidationError("expiresAt must be in the future");
         set.expiresAt = body.expiresAt;
       }
+      // A scheduled announcement was confirmed (limits, recipient count) for its audience/channels/urgency: changing any of
+      // them sends it back to draft, so it needs a new /send with confirmation instead of going out unchecked.
+      if (
+        row.status === "scheduled" &&
+        ((body.audience !== undefined && canon(body.audience) !== canon(row.audience)) ||
+          (body.channels !== undefined && canon([...body.channels].sort()) !== canon([...row.channels].sort())) ||
+          (body.urgent !== undefined && body.urgent !== row.urgent))
+      ) {
+        set.status = "draft";
+        reschedule = false;
+      }
       if (body.title !== undefined) set.title = body.title;
       if (body.body !== undefined) set.body = body.body;
       if (body.audience !== undefined) set.audience = body.audience;
@@ -240,6 +267,7 @@ clubAnnouncementRoutes.patch("/:id", zValidator("json", patchSchema, validationH
       if (body.withdraw) {
         set.expiresAt = new Date();
         set.pinned = false;
+        await skipUnsentDeliveries(tx, id);
         await tx.insert(auditLog).values({ eventType: "club_announcement.withdraw", subjectId: id, payload: { clubId, actor: c.get("user").id } });
       }
     }
@@ -309,6 +337,7 @@ clubAnnouncementRoutes.post("/:id/cancel", async (c) => {
     if (!row) throw new NotFoundError("Announcement not found");
     if (row.status !== "scheduled") throw new ConflictError("Only a scheduled announcement can be cancelled", { code: "CONFLICT" });
     const [done] = await tx.update(clubAnnouncements).set({ status: "cancelled", updatedAt: new Date() }).where(eq(clubAnnouncements.id, id)).returning();
+    await skipUnsentDeliveries(tx, id);
     await tx.insert(auditLog).values({ eventType: "club_announcement.cancel", subjectId: id, payload: { clubId: c.get("clubId"), actor: c.get("user").id } });
     return done!;
   });
@@ -382,12 +411,18 @@ clubAnnouncementRoutes.post("/:id/resend-failed", sendLimit, async (c) => {
   const clubId = c.get("clubId");
   const { row } = await loadVisible(c, id);
   if (row.status !== "sent") throw new ConflictError("Only a sent announcement has deliveries to retry", { code: "CONFLICT" });
+  if (row.expiresAt !== null && row.expiresAt.getTime() <= Date.now()) throw new ConflictError("A withdrawn or expired announcement cannot be resent", { code: "CONFLICT" });
   const requeued = await db.transaction(async (tx) => {
-    const failed = await tx
-      .update(messageDeliveries)
-      .set({ status: "queued", attempts: 0, errorCode: null })
+    const candidates = await tx
+      .select()
+      .from(messageDeliveries)
       .where(and(eq(messageDeliveries.announcementId, id), eq(messageDeliveries.clubId, clubId), eq(messageDeliveries.channel, "email"), eq(messageDeliveries.status, "failed"), sql`${messageDeliveries.address} IS NOT NULL`))
-      .returning({ id: messageDeliveries.id });
+      .for("update");
+    // Preferences are re-checked: whoever opted out since the first attempt is not mailed again.
+    const optedOut = await optedOutDeliveryIds(candidates);
+    if (optedOut.size > 0) await tx.update(messageDeliveries).set({ status: "skipped_optout" }).where(inArray(messageDeliveries.id, [...optedOut]));
+    const failed = candidates.filter((r) => !optedOut.has(r.id));
+    if (failed.length > 0) await tx.update(messageDeliveries).set({ status: "queued", attempts: 0, errorCode: null }).where(inArray(messageDeliveries.id, failed.map((r) => r.id)));
     const stamp = Date.now();
     for (const f of failed) await enqueue({ type: EMAIL_JOB_TYPE, payload: { deliveryId: f.id }, dedupeKey: `${EMAIL_JOB_TYPE}:${f.id}:retry:${stamp}` }, tx);
     await tx.insert(auditLog).values({ eventType: "club_announcement.resend_failed", subjectId: id, payload: { clubId, actor: c.get("user").id, requeued: failed.length } });

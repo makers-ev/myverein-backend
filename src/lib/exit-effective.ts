@@ -104,7 +104,7 @@ export async function handleExitEffectiveNotify(job: JobContext): Promise<void> 
       clubId,
       class: "optional",
       eventKey: "member.exit_effective",
-      refId: clubMemberId,
+      refId: `${clubMemberId}#${leftAt}`,
       audience: { roleTypes: roleTypesWithPermission("members:write"), includeGuardians: false },
       content: { title: lines.length > 0 ? `Austritt wirksam – Rückgabe offen: ${member.displayName}` : `Austritt wirksam: ${member.displayName}`, body, template: "reminder", category: "reminders" },
       channels: ["in_app", "email"],

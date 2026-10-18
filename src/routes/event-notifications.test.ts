@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -64,7 +64,7 @@ describe("event and meeting change notifications (B10)", () => {
     return job!.payload as Json;
   };
   const deliveredTo = async (refId: string, eventKey: string) =>
-    (await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, refId), eq(messageDeliveries.eventKey, eventKey), eq(messageDeliveries.channel, "in_app")))).map((d) => d.clubMemberId).sort();
+    (await db.select().from(messageDeliveries).where(and(like(messageDeliveries.refId, `${refId}%`), eq(messageDeliveries.eventKey, eventKey), eq(messageDeliveries.channel, "in_app")))).map((d) => d.clubMemberId).sort();
   const newEvent = async (title: string, extra: Json = {}) => {
     const res = await call(board, "/events", { method: "POST", body: { calendarId, title, startsAt: "2030-06-01T16:00:00.000Z", endsAt: "2030-06-01T17:30:00.000Z", ...extra } });
     expect(res.status).toBe(201);
@@ -122,7 +122,7 @@ describe("event and meeting change notifications (B10)", () => {
     expect(payload.body).toContain("Neu: ");
     expect(payload.body).toContain("02.06.2030, 19:00 Uhr bis 20:30 Uhr");
     expect(await deliveredTo(event.id, "event.changed")).toEqual([clubMemberOf.m1, clubMemberOf.m2].sort());
-    const [row] = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, event.id), eq(messageDeliveries.clubMemberId, clubMemberOf.m1!), eq(messageDeliveries.channel, "email")));
+    const [row] = await db.select().from(messageDeliveries).where(and(like(messageDeliveries.refId, `${event.id}%`), eq(messageDeliveries.clubMemberId, clubMemberOf.m1!), eq(messageDeliveries.channel, "email")));
     expect((row!.content as { class: string; category: string }).class).toBe("optional");
     expect((row!.content as { category: string }).category).toBe("events");
   });

@@ -167,7 +167,8 @@ export async function handleEventChanged(job: JobContext): Promise<void> {
       clubId: p.clubId,
       class: "optional",
       eventKey: `${p.kind}.${p.cancelled ? "cancelled" : "changed"}`,
-      refId: p.refId,
+      // Every change of the same event is a new message; a re-run of one change is the same delivery.
+      refId: `${p.refId}#${p.version ?? ""}`,
       audience: p.audience,
       content: { title: p.title, body: p.body, category: "events", template: "announcement" },
       channels: ["in_app", "email"],

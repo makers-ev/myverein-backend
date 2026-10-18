@@ -10,11 +10,13 @@ import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubMemberDepartments, clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
-import { clubAnnouncements, messageDeliveries } from "../db/schema/communication.js";
+import { clubAnnouncements, messageDeliveries, notificationPreferences } from "../db/schema/communication.js";
 import { departments } from "../db/schema/departments.js";
 import { jobs } from "../db/schema/jobs.js";
 import { toAppError } from "../lib/errors.js";
 import { handlePublishAnnouncement, PUBLISH_JOB_TYPE } from "../lib/announcements.js";
+import { handleEmailDelivery } from "../lib/notify/email-job.js";
+import { EMAIL_JOB_TYPE } from "../lib/notify/types.js";
 import { clubAnnouncementRoutes, clubInboxRoutes } from "./club-announcements.js";
 
 /** Wave 9 B7: announcement authoring, scoping, sending, deliveries and the member inbox. */
@@ -361,6 +363,129 @@ describe("club announcements (B7)", () => {
       expect(mine.data.find((m: Json) => m.id === row!.id)).toMatchObject({ kind: "system", title: "Termin abgesagt" });
       const theirs = await json(await call(plain2, "/club-inbox"));
       expect(theirs.data.map((m: Json) => m.id)).not.toContain(row!.id);
+    });
+  });
+  describe("department author rights over HTTP", () => {
+    let trainerB: Actor; // trainer of deptB only
+
+    beforeAll(async () => {
+      trainerB = await join("trainerb", club, [{ roleType: "trainer", departmentId: deptB! }]);
+    });
+
+    it("hides another author's announcement completely (404 on every id route), even from a trainer of another department", async () => {
+      const a = await draft(trainer, { audience: { departmentIds: [deptA!] }, channels: ["in_app", "email"] });
+      for (const [method, path] of [["GET", ""], ["PATCH", ""], ["DELETE", ""], ["POST", "/send"], ["POST", "/cancel"], ["GET", "/deliveries"], ["POST", "/resend-failed"]] as const) {
+        const res = await call(trainerB, `/club-announcements/${a.id}${path}`, { method, body: method === "PATCH" ? { title: "Fremd" } : method === "POST" ? {} : undefined });
+        expect(res.status, `${method} ${path}`).toBe(404);
+      }
+      expect((await db.query.clubAnnouncements.findFirst({ where: eq(clubAnnouncements.id, a.id) }))!.title).toBe("Hallo");
+    });
+
+    it("refuses another department, club-wide, wide and urgent audiences at create, preview and edit", async () => {
+      const bodyOf = (extra: object) => ({ method: "POST", body: { title: "T", body: "B", audience: { departmentIds: [deptB!] }, ...extra } });
+      expect((await call(trainerB, "/club-announcements", bodyOf({}))).status).toBe(201);
+      for (const extra of [{ audience: { departmentIds: [deptA!] } }, { audience: { all: true } }, { audience: { roleTypes: ["vorsitz"] } }, { audience: { departmentIds: [deptB!], categoryKeys: ["erwachsene"] } }, { urgent: true }]) {
+        expect((await call(trainerB, "/club-announcements", bodyOf(extra))).status, JSON.stringify(extra)).toBe(403);
+      }
+      expect((await call(trainerB, "/club-announcements/preview", { method: "POST", body: { audience: { departmentIds: [deptA!] } } })).status).toBe(403);
+      const own = await draft(trainerB, { audience: { departmentIds: [deptB!] } });
+      expect((await call(trainerB, `/club-announcements/${own.id}`, { method: "PATCH", body: { audience: { departmentIds: [deptA!] } } })).status).toBe(403);
+    });
+
+    it("re-checks the scope when sending: an announcement the board widened cannot be sent by the department author", async () => {
+      const a = await draft(trainerB, { audience: { departmentIds: [deptB!] } });
+      expect((await call(vorsitz, `/club-announcements/${a.id}`, { method: "PATCH", body: { audience: { all: true }, urgent: true } })).status).toBe(200);
+      expect((await call(trainerB, `/club-announcements/${a.id}/send`, { method: "POST", body: {} })).status).toBe(403);
+      expect((await call(trainerB, `/club-announcements/${a.id}`, { method: "PATCH", body: { title: "Neu" } })).status).toBe(403);
+      expect(await db.select().from(messageDeliveries).where(eq(messageDeliveries.announcementId, a.id))).toHaveLength(0);
+    });
+
+    it("never returns a per-recipient delivery list to the department author, whatever the query", async () => {
+      const a = await draft(trainerB, { audience: { departmentIds: [deptB!] }, channels: ["in_app", "email"] });
+      expect((await call(trainerB, `/club-announcements/${a.id}/send`, { method: "POST", body: {} })).status).toBe(200);
+      for (const query of ["", "?status=sent", "?page=1&pageSize=200", "?status=queued"]) {
+        const res = await call(trainerB, `/club-announcements/${a.id}/deliveries${query}`);
+        expect(res.status).toBe(200);
+        const body = await json(res);
+        expect(body.data.recipients).toBeUndefined();
+        expect(body.pagination).toBeUndefined();
+        expect(Object.keys(body.data)).toEqual(["summary"]);
+        expect(JSON.stringify(body)).not.toMatch(/clubMemberId|attempts|errorCode/);
+      }
+      const audit = await db.select().from(auditLog).where(and(eq(auditLog.eventType, "club_announcement.deliveries_read"), eq(auditLog.subjectId, a.id)));
+      expect(audit).toHaveLength(0); // only the per-recipient view is audited
+    });
+  });
+
+  describe("scheduled edits, withdrawal and send-time checks", () => {
+    // A second board member: the send route is rate limited per user (20/min), which the suite above already uses up.
+    let vorsitz: Actor;
+    beforeAll(async () => {
+      vorsitz = await join("board2", club, [{ roleType: "vorsitz" }]);
+    });
+
+    it("resets a scheduled announcement to draft when audience, channels or urgency change (needs a new /send)", async () => {
+      for (const change of [{ audience: { departmentIds: [deptA!] } }, { channels: ["in_app", "email"] }, { urgent: true }]) {
+        const a = await draft(vorsitz, { title: "Geplant", audience: { departmentIds: [deptB!] } });
+        const at = new Date(Date.now() + 3_600_000);
+        await call(vorsitz, `/club-announcements/${a.id}/send`, { method: "POST", body: { publishAt: at.toISOString() } });
+        const res = await call(vorsitz, `/club-announcements/${a.id}`, { method: "PATCH", body: change });
+        expect((await json(res)).data.status, JSON.stringify(change)).toBe("draft");
+        await handlePublishAnnouncement({ id: randomUUID(), type: PUBLISH_JOB_TYPE, payload: { announcementId: a.id, publishAt: at.toISOString() }, attempt: 1, maxAttempts: 3 });
+        expect(await db.select().from(messageDeliveries).where(eq(messageDeliveries.announcementId, a.id))).toHaveLength(0);
+      }
+      // text-only edits and an unchanged audience keep the schedule
+      const b = await draft(vorsitz, { title: "Bleibt", audience: { departmentIds: [deptB!] } });
+      await call(vorsitz, `/club-announcements/${b.id}/send`, { method: "POST", body: { publishAt: new Date(Date.now() + 3_600_000).toISOString() } });
+      const kept = await call(vorsitz, `/club-announcements/${b.id}`, { method: "PATCH", body: { title: "Bleibt!", audience: { departmentIds: [deptB!] }, channels: ["in_app"] } });
+      expect((await json(kept)).data.status).toBe("scheduled");
+    });
+
+    it("withdrawing skips queued mails, the email handler skips withdrawn and opted-out rows, and resend-failed is refused", async () => {
+      const a = await draft(vorsitz, { title: "Zurueck", audience: { memberIds: [plain.clubMemberId, plain2.clubMemberId] }, channels: ["in_app", "email"] });
+      await call(vorsitz, `/club-announcements/${a.id}/send`, { method: "POST", body: {} });
+      const mails = () => db.select().from(messageDeliveries).where(and(eq(messageDeliveries.announcementId, a.id), eq(messageDeliveries.channel, "email")));
+      await db.update(messageDeliveries).set({ address: "x@example.test" }).where(and(eq(messageDeliveries.announcementId, a.id), eq(messageDeliveries.channel, "email")));
+      const queued = (await mails()).filter((r) => r.status === "queued");
+      expect(queued.length).toBeGreaterThan(0);
+      expect((await call(vorsitz, `/club-announcements/${a.id}`, { method: "PATCH", body: { withdraw: true } })).status).toBe(200);
+      for (const r of await mails()) {
+        if (queued.some((q) => q.id === r.id)) expect([r.status, r.errorCode]).toEqual(["skipped", "withdrawn"]);
+      }
+      expect((await call(vorsitz, `/club-announcements/${a.id}/resend-failed`, { method: "POST" })).status).toBe(409);
+
+      // a row that was still queued when the withdrawal happened elsewhere is skipped by the handler itself
+      const [one] = queued;
+      await db.update(messageDeliveries).set({ status: "queued", errorCode: null }).where(eq(messageDeliveries.id, one!.id));
+      await handleEmailDelivery({ id: randomUUID(), type: EMAIL_JOB_TYPE, payload: { deliveryId: one!.id }, attempt: 1, maxAttempts: 3 });
+      const [after] = await db.select().from(messageDeliveries).where(eq(messageDeliveries.id, one!.id));
+      expect([after!.status, after!.errorCode]).toEqual(["skipped", "withdrawn"]);
+    });
+
+    it("skips mails of recipients who opted out of the category after sending, in the handler and in resend-failed", async () => {
+      const a = await draft(vorsitz, { title: "Opt-out spaeter", audience: { memberIds: [plain.clubMemberId] }, channels: ["in_app", "email"] });
+      await call(vorsitz, `/club-announcements/${a.id}/send`, { method: "POST", body: {} });
+      await db.update(messageDeliveries).set({ address: "plain@example.test", status: "failed", errorCode: "EENVELOPE" }).where(and(eq(messageDeliveries.announcementId, a.id), eq(messageDeliveries.channel, "email")));
+      await db.insert(notificationPreferences).values({ userId: plain.userId, category: "announcements", channel: "email", enabled: false });
+      try {
+        const res = await call(vorsitz, `/club-announcements/${a.id}/resend-failed`, { method: "POST" });
+        expect((await json(res)).data.requeued).toBe(0);
+        const [row] = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.announcementId, a.id), eq(messageDeliveries.channel, "email")));
+        expect(row!.status).toBe("skipped_optout");
+        await db.update(messageDeliveries).set({ status: "queued" }).where(eq(messageDeliveries.id, row!.id));
+        await handleEmailDelivery({ id: randomUUID(), type: EMAIL_JOB_TYPE, payload: { deliveryId: row!.id }, attempt: 1, maxAttempts: 3 });
+        const [done] = await db.select().from(messageDeliveries).where(eq(messageDeliveries.id, row!.id));
+        expect(done!.status).toBe("skipped_optout");
+      } finally {
+        await db.delete(notificationPreferences).where(eq(notificationPreferences.userId, plain.userId));
+      }
+    });
+
+    it("stores no recipient name on in-app rows", async () => {
+      const a = await draft(vorsitz, { title: "Ohne Namen", audience: { memberIds: [plain.clubMemberId] } });
+      await call(vorsitz, `/club-announcements/${a.id}/send`, { method: "POST", body: {} });
+      const [row] = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.announcementId, a.id), eq(messageDeliveries.channel, "in_app")));
+      expect((row!.content as Json).recipientName).toBeNull();
     });
   });
 });

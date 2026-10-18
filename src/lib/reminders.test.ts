@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { auth } from "../auth/auth.js";
@@ -81,7 +81,7 @@ describe("reminder-sweep", () => {
   };
   const deliver = async (job: { id: string; payload: unknown }) => handleReminder({ id: job.id, type: REMINDER_JOB_TYPE, payload: job.payload as Record<string, unknown>, attempt: 1, maxAttempts: 3 });
   const inAppTo = async (refId: string) =>
-    (await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, refId), eq(messageDeliveries.channel, "in_app")))).map((d) => d.clubMemberId).sort();
+    (await db.select().from(messageDeliveries).where(and(like(messageDeliveries.refId, `${refId}%`), eq(messageDeliveries.channel, "in_app")))).map((d) => d.clubMemberId).sort();
 
   beforeAll(async () => {
     const make = async (label: string) => {
@@ -140,7 +140,7 @@ describe("reminder-sweep", () => {
 
     await deliver(job!);
     expect(await inAppTo(ev!.id)).toEqual([clubMemberOf.a]);
-    const [row] = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, ev!.id), eq(messageDeliveries.clubMemberId, clubMemberOf.a!), eq(messageDeliveries.channel, "email")));
+    const [row] = await db.select().from(messageDeliveries).where(and(like(messageDeliveries.refId, `${ev!.id}%`), eq(messageDeliveries.clubMemberId, clubMemberOf.a!), eq(messageDeliveries.channel, "email")));
     expect(row!.content).toMatchObject({ class: "optional", category: "reminders", template: "reminder" });
   });
 

@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import type { JobContext } from "./jobs/registry.js";
+import { deleteFinishedJobs } from "./jobs/queue.js";
 import { logger } from "./logger.js";
 import { purgeRateLimitEvents } from "./rate-limits.js";
 
@@ -105,7 +106,49 @@ export async function scrubOldEmailDeliveries(now: Date = new Date(), days: numb
   }
 }
 
+/**
+ * In-app and push rows carry the message text (the inbox copy / send snapshot). Once a push row is settled or an in-app
+ * row was read and is older than `DELIVERY_RETENTION_DAYS`, the content is reduced to title/template/category/class
+ * (`scrubbed: true`, no body, name or link); the row itself stays as proof of delivery. Unread inbox rows are kept intact.
+ */
+export async function scrubOldInboxDeliveries(now: Date = new Date(), days: number = deliveryRetentionDays()): Promise<number> {
+  const cutoff = new Date(now.getTime() - days * 86_400_000);
+  let total = 0;
+  for (;;) {
+    const result = await db.execute(sql`
+      UPDATE message_deliveries d
+      SET content = jsonb_strip_nulls(jsonb_build_object(
+            'title', d.content->'title', 'template', d.content->'template', 'category', d.content->'category', 'class', d.content->'class', 'scrubbed', true
+          ))
+      WHERE d.id IN (
+        SELECT id FROM message_deliveries
+        WHERE created_at < ${cutoff} AND content IS NOT NULL AND content->>'scrubbed' IS NULL
+          AND ((channel = 'in_app' AND read_at IS NOT NULL) OR (channel = 'push' AND status <> 'queued'))
+        LIMIT ${BATCH}
+      )`);
+    const n = result.rowCount ?? 0;
+    total += n;
+    if (n < BATCH) return total;
+  }
+}
+
+/** Days after which finished (`done`) jobs are deleted (default 14, clamped 2-3650: must outlive the reminder horizon / dedupe keys). */
+export function jobsRetentionDays(): number {
+  const n = Number(process.env.JOBS_RETENTION_DAYS);
+  return Number.isFinite(n) && n >= 2 && n <= 3650 ? Math.floor(n) : 14;
+}
+
 export function registerRetentionTasks(): void {
+  registerRetentionTask({
+    key: "inbox-retention",
+    description: "Scrub message text of read in-app and settled push deliveries after DELIVERY_RETENTION_DAYS",
+    run: async ({ now }) => ({ affected: await scrubOldInboxDeliveries(now) }),
+  });
+  registerRetentionTask({
+    key: "jobs-retention",
+    description: "Delete done jobs older than JOBS_RETENTION_DAYS (dead jobs are kept for inspection)",
+    run: async ({ now }) => ({ affected: await deleteFinishedJobs(jobsRetentionDays() * 86_400_000, now) }),
+  });
   registerRetentionTask({
     key: "delivery-retention",
     description: "Wipe e-mail delivery addresses and content snapshots after DELIVERY_RETENTION_DAYS",

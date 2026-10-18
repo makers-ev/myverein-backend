@@ -14,7 +14,7 @@ import { AudienceLimitError } from "../audience.js";
 import { JobRegistry, defaultRegistry } from "../jobs/registry.js";
 import { JobWorker } from "../jobs/worker.js";
 import { registerAllJobs } from "../jobs/handlers.js";
-import { EMAIL_JOB_TYPE, handleEmailDelivery, notify, notifySafely, registerNotifyJobs, renderNotifyEmail, resetMailThrottle, setMailSender, setUnsubscribeUrlProvider, textToHtml, waitForMailSlot, type MailSender } from "./index.js";
+import { EMAIL_JOB_TYPE, handleEmailDelivery, notify, reapDeadDeliveries, notifySafely, registerNotifyJobs, renderNotifyEmail, resetMailThrottle, setMailSender, setUnsubscribeUrlProvider, textToHtml, waitForMailSlot, type MailSender } from "./index.js";
 
 const sfx = randomUUID().slice(0, 8);
 const clubId = `ntf-${sfx}`;
@@ -96,6 +96,61 @@ afterAll(async () => {
 });
 
 const base = { clubId, class: "optional" as const, channels: ["in_app", "email"] as Array<"in_app" | "email">, content: { title: "Training fällt aus", body: "Heute kein Training.\nMehr: https://example.test/x." } };
+
+describe("notify: idempotency and send-time safety", () => {
+  it("is idempotent for system events and for account-only announcement recipients; a ref_id discriminator makes a repeat a new delivery", async () => {
+    const eventKey = `t-sys-${sfx}`;
+    const input = { ...base, eventKey, refId: "ref-1", recipients: [{ userId: userOf.anna!, clubMemberId: ids.anna!, name: "Anna", email: "a-sys@example.test" }] };
+    expect(await notify(input)).toMatchObject({ inApp: 1, queuedEmail: 1, alreadyDelivered: 0 });
+    expect(await notify(input)).toMatchObject({ inApp: 0, queuedEmail: 0, alreadyDelivered: 2 });
+    expect(await notify({ ...input, refId: "ref-1#2030-01-02" })).toMatchObject({ inApp: 1, queuedEmail: 1, alreadyDelivered: 0 });
+    expect((await deliveries({ eventKey })).length).toBe(4);
+
+    const [ann] = await db.insert(clubAnnouncements).values({ clubId, title: "A", body: "B", audience: { memberIds: [ids.anna!] }, channels: ["in_app"] }).returning();
+    const accountOnly = { ...base, channels: ["in_app" as const], eventKey: `t-acc-${sfx}`, announcementId: ann!.id, recipients: [{ userId: userOf.ben! }] };
+    expect(await notify(accountOnly)).toMatchObject({ inApp: 1 });
+    expect(await notify(accountOnly)).toMatchObject({ inApp: 0, alreadyDelivered: 1 });
+  });
+
+  it("keeps the recipient name out of in-app rows but in the mail row", async () => {
+    const eventKey = `t-name-${sfx}`;
+    await notify({ ...base, eventKey, refId: "n", recipients: [{ userId: userOf.anna!, clubMemberId: ids.anna!, name: "Anna", email: "anna-n@example.test" }] });
+    const rows = await deliveries({ eventKey });
+    expect(rows.find((r) => r.channel === "in_app")!.content).toMatchObject({ recipientName: null });
+    expect(rows.find((r) => r.channel === "email")!.content).toMatchObject({ recipientName: "Anna" });
+  });
+
+  it("claims queued -> sending, never sends a claimed row twice, and takes it over only on a later attempt", async () => {
+    const eventKey = `t-claim-${sfx}`;
+    await notify({ ...base, channels: ["email"], eventKey, refId: "c", recipients: [{ clubMemberId: ids.kid!, name: "Kind", email: "kind-c@example.test" }] });
+    const [row] = await deliveries({ eventKey });
+    await db.update(messageDeliveries).set({ status: "sending", attempts: 1 }).where(eq(messageDeliveries.id, row!.id));
+    await handleEmailDelivery(ctx(row!.id, 1)); // same attempt: somebody else is sending
+    expect(sent).toHaveLength(0);
+    await handleEmailDelivery(ctx(row!.id, 2)); // crashed earlier attempt: taken over
+    expect(sent).toHaveLength(1);
+    expect((await deliveries({ eventKey }))[0]).toMatchObject({ status: "sent", attempts: 2 });
+  });
+
+  it("returns a failed non-final attempt to queued and the reaper fails deliveries whose job is dead (not those with a live job)", async () => {
+    const eventKey = `t-reap-${sfx}`;
+    await notify({ ...base, channels: ["email"], eventKey, refId: "r", recipients: [{ clubMemberId: ids.kid!, name: "Kind", email: "kind-r@example.test" }] });
+    const [row] = await deliveries({ eventKey });
+    failures.push(Object.assign(new Error("smtp"), { code: "ECONNRESET" }));
+    await expect(handleEmailDelivery(ctx(row!.id, 1, 3))).rejects.toThrow();
+    expect((await deliveries({ eventKey }))[0]).toMatchObject({ status: "queued", errorCode: "ECONNRESET" });
+
+    await db.update(jobs).set({ status: "dead" }).where(eq(jobs.dedupeKey, `${EMAIL_JOB_TYPE}:${row!.id}`));
+    expect(await reapDeadDeliveries()).toBeGreaterThanOrEqual(1);
+    expect((await deliveries({ eventKey }))[0]).toMatchObject({ status: "failed", errorCode: "job_dead" });
+
+    // re-queued by resend-failed with a fresh live job: the old dead job no longer counts
+    await db.update(messageDeliveries).set({ status: "queued" }).where(eq(messageDeliveries.id, row!.id));
+    await db.insert(jobs).values({ type: EMAIL_JOB_TYPE, payload: { deliveryId: row!.id }, dedupeKey: `${EMAIL_JOB_TYPE}:${row!.id}:retry:1` });
+    await reapDeadDeliveries();
+    expect((await deliveries({ eventKey }))[0]!.status).toBe("queued");
+  });
+});
 
 describe("notify: deliveries", () => {
   it("creates one row per recipient and channel and one email job per queued mail", async () => {

@@ -314,7 +314,8 @@ export async function handleReminder(job: JobContext): Promise<void> {
       clubId: p.clubId,
       class: "optional",
       eventKey: `reminder.${p.kind}`,
-      refId: p.refId,
+      // The date makes a legitimately repeating reminder (overdue steps, daily digests) a new delivery, a re-run the same one.
+      refId: `${p.refId}#${p.date ?? ""}`,
       audience: p.audience,
       content: { title: p.title, body: p.body, template: "reminder", category: "reminders" },
       channels: ["in_app", "email"],

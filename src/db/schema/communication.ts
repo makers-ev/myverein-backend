@@ -11,7 +11,7 @@ export type CommunicationChannel = (typeof COMMUNICATION_CHANNELS)[number];
 export const ANNOUNCEMENT_STATUSES = ["draft", "scheduled", "sending", "sent", "cancelled"] as const;
 export type AnnouncementStatus = (typeof ANNOUNCEMENT_STATUSES)[number];
 
-export const DELIVERY_STATUSES = ["queued", "sent", "failed", "skipped_optout", "skipped_no_address", "bounced"] as const;
+export const DELIVERY_STATUSES = ["queued", "sending", "sent", "failed", "skipped", "skipped_optout", "skipped_no_address", "bounced"] as const;
 export type DeliveryStatus = (typeof DELIVERY_STATUSES)[number];
 
 /** Audience definition stored with an announcement (resolved to a recipient snapshot at send time). */
@@ -88,6 +88,15 @@ export const messageDeliveries = pgTable(
     uniqueIndex("message_deliveries_announcement_recipient_uidx")
       .on(table.announcementId, table.clubMemberId, table.channel)
       .where(sql`${table.announcementId} IS NOT NULL AND ${table.clubMemberId} IS NOT NULL`),
+    // Idempotency for recipients without a club member row (account-only announcement recipients).
+    uniqueIndex("message_deliveries_announcement_user_uidx")
+      .on(table.announcementId, table.userId, table.channel)
+      .where(sql`${table.announcementId} IS NOT NULL AND ${table.clubMemberId} IS NULL`),
+    // Idempotency for system events: one delivery per event key, reference, channel and person. A reference that may
+    // legitimately repeat (reminders per day, event changes per version) carries a `#discriminator` suffix in ref_id.
+    uniqueIndex("message_deliveries_system_event_uidx")
+      .on(table.eventKey, table.refId, table.channel, sql`coalesce(${table.clubMemberId}::text, ${table.userId})`)
+      .where(sql`${table.announcementId} IS NULL`),
   ],
 );
 

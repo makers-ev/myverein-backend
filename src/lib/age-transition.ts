@@ -80,7 +80,7 @@ export async function applyAgeTransitionsForClub(clubId: string, today: string):
       clubId,
       kind: "age_transition",
       refId: clubId,
-      date: today,
+      date: `${today}:${moves[0]!.id}`,
       title: moves.length === 1 ? "Altersübergang: 1 Mitglied verschoben" : `Altersübergang: ${moves.length} Mitglieder verschoben`,
       body: `Wegen des Alters wurden automatisch neue Kategorien zugewiesen:\n${lines.join("\n")}\nDie Änderungen stehen im Verlauf der Mitglieder (Urheber: System).`,
       audience: { roleTypes: roleTypesWithPermission("members:write"), includeGuardians: false },

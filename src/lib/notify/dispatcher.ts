@@ -154,7 +154,8 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
       category,
       class: input.class,
       urgent: input.content.urgent === true || template === "urgent",
-      recipientName: t.name,
+      // Only the e-mail needs the salutation; in-app/push rows live on in the inbox and must not carry a name.
+      recipientName: channel === "email" ? t.name : null,
       ctaLabel: input.content.ctaLabel ?? null,
       ctaUrl: input.content.ctaUrl ?? null,
       ...(input.content.rendered ? { rendered: input.content.rendered } : {}),

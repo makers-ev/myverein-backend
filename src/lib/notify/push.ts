@@ -6,6 +6,7 @@ import { messageDeliveries, pushTokens } from "../../db/schema/communication.js"
 import { enqueue } from "../jobs/queue.js";
 import type { JobContext } from "../jobs/registry.js";
 import { logger } from "../logger.js";
+import { optedOutDeliveryIds, withdrawnAnnouncementIds } from "./guards.js";
 import { PUSH_RECEIPTS_JOB_TYPE, type DeliveryContent } from "./types.js";
 
 /**
@@ -73,6 +74,8 @@ interface ExpoTicket {
 /** Deep-link data (ids only) derived from the delivery's event key. */
 export function pushDataFor(eventKey: string | null, refId: string | null, announcementId: string | null, clubId: string | null, urgent: boolean): Record<string, string | boolean> {
   const key = eventKey ?? "";
+  // `refId` may carry a `#discriminator` suffix (idempotency, see dispatcher); the deep link only wants the id.
+  refId = refId ? refId.split("#")[0]! : refId;
   const data: Record<string, string | boolean> = { type: "message", urgent };
   if (clubId) data.clubId = clubId;
   if (announcementId || key === "announcement") {
@@ -116,7 +119,18 @@ async function disableTokens(tokenIds: string[]): Promise<void> {
 export async function handlePushDelivery(job: JobContext): Promise<void> {
   const ids = Array.isArray(job.payload.deliveryIds) ? job.payload.deliveryIds.filter((v): v is string => typeof v === "string").slice(0, PUSH_DELIVERIES_PER_JOB) : [];
   if (ids.length === 0) return;
-  const rows = await db.select().from(messageDeliveries).where(and(inArray(messageDeliveries.id, ids), eq(messageDeliveries.channel, "push"), eq(messageDeliveries.status, "queued")));
+  let rows = await db.select().from(messageDeliveries).where(and(inArray(messageDeliveries.id, ids), eq(messageDeliveries.channel, "push"), eq(messageDeliveries.status, "queued")));
+  if (rows.length === 0) return;
+
+  // Send-time re-checks: withdrawn/cancelled announcement, or an opt-out since the delivery was queued.
+  const withdrawn = await withdrawnAnnouncementIds(rows.map((r) => r.announcementId));
+  const optedOut = await optedOutDeliveryIds(rows);
+  const skipWithdrawn = rows.filter((r) => r.announcementId !== null && withdrawn.has(r.announcementId)).map((r) => r.id);
+  const skipOptout = rows.filter((r) => !skipWithdrawn.includes(r.id) && optedOut.has(r.id)).map((r) => r.id);
+  if (skipWithdrawn.length) await db.update(messageDeliveries).set({ status: "skipped", errorCode: "withdrawn" }).where(and(inArray(messageDeliveries.id, skipWithdrawn), eq(messageDeliveries.status, "queued")));
+  if (skipOptout.length) await db.update(messageDeliveries).set({ status: "skipped_optout" }).where(and(inArray(messageDeliveries.id, skipOptout), eq(messageDeliveries.status, "queued")));
+  const skipped = new Set([...skipWithdrawn, ...skipOptout]);
+  rows = rows.filter((r) => !skipped.has(r.id));
   if (rows.length === 0) return;
 
   const userIds = [...new Set(rows.map((r) => r.userId).filter((v): v is string => v !== null))];

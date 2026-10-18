@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { auth } from "../auth/auth.js";
@@ -19,7 +19,8 @@ import { ensureClubFormDefaults } from "./form-defaults.js";
 import { runFormCleanup } from "./form-sweeper.js";
 import { defaultRegistry } from "./jobs/registry.js";
 import { registerAllJobs } from "./jobs/handlers.js";
-import { clearRetentionTasks, deliveryRetentionDays, registerRetentionTask, retentionTasks, runRetention, scrubOldEmailDeliveries, registerRetentionTasks } from "./retention.js";
+import { deleteFinishedJobs } from "./jobs/queue.js";
+import { clearRetentionTasks, deliveryRetentionDays, jobsRetentionDays, scrubOldInboxDeliveries, registerRetentionTask, retentionTasks, runRetention, scrubOldEmailDeliveries, registerRetentionTasks } from "./retention.js";
 import { handleReminder, REMINDER_JOB_TYPE, type ReminderPayload } from "./reminders.js";
 
 /** Wave 9 B13: timed jobs on the queue (age transition, exit effective, form cleanup, delivery retention, retention hook). */
@@ -50,7 +51,7 @@ describe("retention hook point", () => {
     expect(JSON.stringify(results)).not.toContain("secret");
     clearRetentionTasks();
     registerRetentionTasks();
-    expect(retentionTasks().map((t) => t.key)).toEqual(["delivery-retention", "rate-limit-events"]);
+    expect(retentionTasks().map((t) => t.key)).toEqual(["inbox-retention", "jobs-retention", "delivery-retention", "rate-limit-events"]);
   });
 
   it("reads DELIVERY_RETENTION_DAYS with a default of 90", () => {
@@ -85,7 +86,7 @@ describe("timed jobs", () => {
   const jobsOf = async (type: string) => (await db.select().from(jobs).where(and(eq(jobs.type, type), sql`${jobs.payload}->>'clubId' = ${clubId}`))).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   const run = async (job: { id: string; type: string; payload: unknown }, fn: (j: never) => Promise<void>) => fn({ id: job.id, type: job.type, payload: job.payload as Record<string, unknown>, attempt: 1, maxAttempts: 3 } as never);
   const inAppTo = async (refId: string, eventKey?: string) =>
-    (await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, refId), eq(messageDeliveries.channel, "in_app"), eventKey ? eq(messageDeliveries.eventKey, eventKey) : undefined))).map((d) => d.clubMemberId).sort();
+    (await db.select().from(messageDeliveries).where(and(like(messageDeliveries.refId, `${refId}%`), eq(messageDeliveries.channel, "in_app"), eventKey ? eq(messageDeliveries.eventKey, eventKey) : undefined))).map((d) => d.clubMemberId).sort();
 
   beforeAll(async () => {
     const make = async (label: string) => {
@@ -220,7 +221,7 @@ describe("timed jobs", () => {
 
       await run(job!, handleExitEffectiveNotify as never);
       expect(await inAppTo(clubMemberOf.a!, "member.exit_effective")).toEqual([clubMemberOf.keeper]);
-      const [delivery] = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, clubMemberOf.a!), eq(messageDeliveries.channel, "in_app")));
+      const [delivery] = await db.select().from(messageDeliveries).where(and(like(messageDeliveries.refId, `${clubMemberOf.a!}%`), eq(messageDeliveries.channel, "in_app")));
       const content = delivery!.content as { title: string; body: string };
       expect(content.title).toContain("Rückgabe offen");
       expect(content.body).toContain("• Ausleihe: Pavillon");
@@ -308,6 +309,57 @@ describe("timed jobs", () => {
       expect(await scrubOldEmailDeliveries(new Date(), 5)).toBeGreaterThanOrEqual(1);
       expect((await get(youngSent!.id)).address).toBeNull();
       await db.delete(messageDeliveries).where(eq(messageDeliveries.refId, "retention-test"));
+    });
+
+    it("scrubs read in-app and settled push rows, keeps unread inbox rows and queued pushes", async () => {
+      const old = new Date(Date.now() - 100 * DAY);
+      const content = { title: "Hallo", body: "Geheimer Text", template: "announcement", category: "announcements", class: "optional", urgent: false, recipientName: null, ctaLabel: null, ctaUrl: null };
+      const base = { clubId, eventKey: "t.inbox-retention", refId: "inbox-retention-test", content, createdAt: old };
+      const [read, unread, push, queuedPush] = await db
+        .insert(messageDeliveries)
+        .values([
+          { ...base, channel: "in_app", status: "sent", readAt: new Date() },
+          { ...base, channel: "in_app", status: "sent" },
+          { ...base, channel: "push", status: "sent" },
+          { ...base, channel: "push", status: "queued" },
+        ])
+        .returning();
+      const get = async (id: string) => (await db.select().from(messageDeliveries).where(eq(messageDeliveries.id, id)))[0]!;
+      expect(await scrubOldInboxDeliveries(new Date(), 90)).toBeGreaterThanOrEqual(2);
+      expect((await get(read!.id)).content).toEqual({ title: "Hallo", template: "announcement", category: "announcements", class: "optional", scrubbed: true });
+      expect((await get(push!.id)).content).toMatchObject({ scrubbed: true });
+      expect((await get(unread!.id)).content).toEqual(content);
+      expect((await get(queuedPush!.id)).content).toEqual(content);
+      await db.delete(messageDeliveries).where(eq(messageDeliveries.refId, "inbox-retention-test"));
+    });
+  });
+
+  describe("jobs retention", () => {
+    it("deletes done jobs older than the retention (default 14 days) and keeps young, dead and queued ones", async () => {
+      delete process.env.JOBS_RETENTION_DAYS;
+      expect(jobsRetentionDays()).toBe(14);
+      process.env.JOBS_RETENTION_DAYS = "30";
+      expect(jobsRetentionDays()).toBe(30);
+      process.env.JOBS_RETENTION_DAYS = "0";
+      expect(jobsRetentionDays()).toBe(14);
+      delete process.env.JOBS_RETENTION_DAYS;
+
+      const tag = `jobs-retention-${Date.now()}`;
+      const longAgo = new Date(Date.now() - 20 * DAY);
+      const rows = await db
+        .insert(jobs)
+        .values([
+          { type: tag, status: "done", finishedAt: longAgo, dedupeKey: `${tag}:old` },
+          { type: tag, status: "done", finishedAt: new Date(Date.now() - 2 * DAY), dedupeKey: `${tag}:young` },
+          { type: tag, status: "dead", finishedAt: longAgo, dedupeKey: `${tag}:dead` },
+          { type: tag, status: "queued", dedupeKey: `${tag}:queued` },
+        ])
+        .returning();
+      expect(await deleteFinishedJobs(14 * DAY)).toBeGreaterThanOrEqual(1);
+      const left = (await db.select().from(jobs).where(eq(jobs.type, tag))).map((j) => j.dedupeKey).sort();
+      expect(left).toEqual([`${tag}:dead`, `${tag}:queued`, `${tag}:young`]);
+      expect(rows).toHaveLength(4);
+      await db.delete(jobs).where(eq(jobs.type, tag));
     });
   });
 });
