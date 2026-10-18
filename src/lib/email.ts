@@ -29,27 +29,52 @@ interface EmailAttachment {
   cid: string;
 }
 
+/**
+ * `EMAIL_FROM` with a club display name: the ADDRESS always stays the configured one (SPF/DKIM), only the name changes.
+ * CR/LF, quotes and angle brackets are stripped from the name (header injection / spoofing of the address part).
+ */
+export function formatFrom(emailFrom: string, displayName?: string | null): string {
+  const name = displayName?.replace(/[\r\n"<>\\]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 100);
+  if (!name || !emailFrom) return emailFrom;
+  const address = /<([^<>]+)>/.exec(emailFrom)?.[1]?.trim() ?? emailFrom.trim();
+  return `"${name}" <${address}>`;
+}
+
 export async function sendEmail({
   to,
   subject,
   html,
   attachments,
+  fromName,
+  replyTo,
+  headers,
 }: {
   to: string;
   subject: string;
   html: string;
   attachments?: EmailAttachment[];
+  /** Per-club display name; the sender address stays `EMAIL_FROM`. */
+  fromName?: string | null;
+  replyTo?: string | null;
+  /** Extra headers, e.g. `List-Unsubscribe`. */
+  headers?: Record<string, string>;
 }) {
+  const from = formatFrom(process.env.EMAIL_FROM!, fromName);
+  const extras = {
+    ...(replyTo ? { replyTo } : {}),
+    ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
+  };
   if (smtpTransport) {
-    await smtpTransport.sendMail({ from: process.env.EMAIL_FROM!, to, subject, html, attachments });
+    await smtpTransport.sendMail({ from, to, subject, html, attachments, ...extras });
     return;
   }
   if (resend) {
     await resend.emails.send({
-      from: process.env.EMAIL_FROM!,
+      from,
       to,
       subject,
       html,
+      ...extras,
       attachments: attachments?.map(({ filename, path, cid }) => ({ filename, path, contentId: cid })),
     });
     return;

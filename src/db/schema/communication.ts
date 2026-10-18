@@ -75,6 +75,8 @@ export const messageDeliveries = pgTable(
     errorCode: text("error_code"),
     attempts: integer("attempts").notNull().default(0),
     address: text("address"),
+    // Message snapshot (title/body/template/category/class/...) rendered by the channel handlers; see src/lib/notify.
+    content: jsonb("content").$type<Record<string, unknown>>(),
     sentAt: timestamp("sent_at", { withTimezone: true }),
     readAt: timestamp("read_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

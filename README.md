@@ -819,7 +819,7 @@ Schema only (B3); routes follow in later packages. Decisions: [ADR-005](../lpj-i
 |---|---|
 | `jobs` | DB job queue: `type`, `payload` (jsonb, ids only), `run_at`, `status` (`queued`/`running`/`done`/`failed`/`dead`), `attempts`/`max_attempts` (default 5), `locked_by`/`locked_until` (lease), `last_error`, `dedupe_key` (unique, NULL = no dedup), `finished_at`. Indexes `jobs(status, run_at)`, `jobs(type, status)`. Worker: see [Job queue and worker](#job-queue-and-worker-wave-9-b4) |
 | `club_announcements` | Announcement/bulletin board: `club_id`, `author_member_id` (`club_members`, set null), `title`, `body` (plain text), `audience` (jsonb: `all`, `departmentIds`, `roleTypes`, `categoryKeys`, `memberIds`, `includeGuardians`), `channels` (jsonb, default `["in_app"]`), `urgent`, `pinned`, `publish_at`, `expires_at`, `status` (`draft`/`scheduled`/`sending`/`sent`/`cancelled`), `sent_at` |
-| `message_deliveries` | One row per recipient and channel: `club_id` (optional for platform-context mails), `announcement_id` or `event_key` + `ref_id`, `club_member_id`, `user_id` (nullable), `channel`, `status` (`queued`/`sent`/`failed`/`skipped_optout`/`skipped_no_address`/`bounced`), `error_code`, `attempts`, `address` (short-lived snapshot), `sent_at`, `read_at`. Index `(club_id, announcement_id)`; partial unique `(announcement_id, club_member_id, channel)` |
+| `message_deliveries` | One row per recipient and channel: `club_id` (optional for platform-context mails), `announcement_id` or `event_key` + `ref_id`, `club_member_id`, `user_id` (nullable), `channel`, `status` (`queued`/`sent`/`failed`/`skipped_optout`/`skipped_no_address`/`bounced`), `error_code`, `attempts`, `address` (short-lived snapshot), `content` (jsonb message snapshot rendered by the channel handlers, B6), `sent_at`, `read_at`. Index `(club_id, announcement_id)`; partial unique `(announcement_id, club_member_id, channel)` |
 | `push_tokens` | Expo push token per device: `user_id`, `token` (unique), `platform`, `app_version`, `last_seen_at`, `disabled_at` |
 | `notification_preferences` | Opt-in/out per `category` x `channel`; check constraint: exactly one of `user_id` / `club_member_id` (account-less members); partial unique indexes per subject |
 | `events` (extended) | `cancelled_at`, `cancel_reason` (cancellation instead of deletion; existing routes ignore the columns) |
@@ -857,7 +857,29 @@ Tests: `src/lib/jobs/jobs.test.ts` (dedupe incl. parallel enqueue, bucket keys, 
 
 `summarizeAudience(recipients, channels)` returns only numbers (`total`, `reachable`, `inApp`, `email`, `push`, `emailOnly`, `unreachable`, `sharedAddress`). Tests: `src/lib/audience.test.ts` (pure table tests + DB loader).
 
-### Migrations 0014-0031 (Wave 7, Wave 8, Wave 9)
+### Notification dispatcher (Wave 9 B6)
+
+`src/lib/notify/` is the one delivery layer for club communication ([ADR-006](../lpj-its-vault/20_Products/MyVerein/Architecture%20%26%20ADRs/ADR-006%20-%20Kommunikationsmodell.md)); announcements, event changes, reminders and decision mails all go through `notify(...)`. Call it **after** the business transaction committed; `notifySafely` / `notifyInBackground` never throw (log: event key, ids, error class/code, never addresses or message text).
+
+```ts
+notify({ clubId, class: "mandatory" | "optional", eventKey, refId?, announcementId?, audience | recipients, content: { title, body, template?, urgent?, category?, ctaLabel?, ctaUrl? }, channels: ["in_app", "email"] })
+```
+
+| Aspect | Behaviour |
+|---|---|
+| Recipients | Exactly one of `audience` (resolved with the [audience resolver](#audience-resolver-wave-9-b5), needs `clubId`) or `recipients` (`{ userId?, clubMemberId?, name?, email? }`, e.g. an applicant without a `club_members` row; `clubId: null` = platform context) |
+| Deliveries | One `message_deliveries` row per recipient and channel, with the message snapshot in `content`. In-app: the row itself is the inbox record (`status = sent`, account holders only). E-mail: `queued` with the address snapshot, or `skipped_no_address` / `skipped_optout`; a recipient whose shared address is used by another recipient gets no row. Announcements are idempotent through the unique `(announcement_id, club_member_id, channel)`: a repeated call creates neither rows nor jobs. `push` rows belong to the push dispatcher (B8) |
+| Classes | `optional`: per category (`announcements`, `events`, `reminders`; template `reminder` -> `reminders`) `notification_preferences` with `enabled = false` for the account (`user_id`) or the account-less member (`club_member_id`) turn the e-mail off (`skipped_optout`); no row = enabled. In-app copies are always written. `mandatory` (default template `decision`) ignores preferences completely |
+| E-mail job | Job type `notify.email` (registered in `registerAllJobs`), payload `{ deliveryId }` only, dedupe key `notify.email:<deliveryId>`. **One mail per recipient** with a single `to` (never CC/BCC or shared lists). A failing send is retried by the queue with backoff; on the last attempt the delivery becomes `failed` (`error_code`, `attempts`) and the job ends normally. Only a `queued` row is ever sent, so a double run sends nothing twice |
+| Throttle | `MAIL_SEND_RATE` mails per second and process (default `5`, `0` = unthrottled), shared by all concurrent handlers of the process |
+| Sender | Sender address stays `EMAIL_FROM`; the display name is `club_settings.sender_name` (fallback: club name), `reply_to` becomes Reply-To, `signature` is appended to the body (plain text, escaped) |
+| Unsubscribe | `setUnsubscribeUrlProvider(fn)` (installed by B9) returns the signed unsubscribe URL; for `optional` mail it sets `List-Unsubscribe` + `List-Unsubscribe-Post: List-Unsubscribe=One-Click` and a visible link. Default: no link, no header. Never for `mandatory` mail |
+| Templates | `renderNotifyEmail` in the style of `emailTemplate.ts`: `announcement`, `urgent` (subject prefix "[Dringend]", banner), `reminder`, `decision`. User text is escaped, only `http(s)` URLs are linked, the subject is a single line |
+| Test seam | `setMailSender(double)` replaces `sendEmail` in tests |
+
+`sendEmail` gained optional `fromName`, `replyTo` and `headers` (SMTP and Resend); the sender address part is never changeable. Tests: `src/lib/notify/notify.test.ts` (rows per recipient/channel, shared address, preferences, mandatory, retry/failed without address, real worker run, throttle, templates, `List-Unsubscribe`) and `src/lib/email.test.ts`.
+
+### Migrations 0014-0032 (Wave 7, Wave 8, Wave 9)
 
 Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runtime` (Docker boot) or `npm run db:migrate`.
 
@@ -881,6 +903,7 @@ Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runti
 | `0029_calendar-creator-set-null` | `calendars.created_by` and `events.created_by` become nullable and their FK to `user` is `ON DELETE SET NULL` (was `CASCADE`): deleting the creating account (e.g. the founder) no longer deletes calendars or events. No data change |
 | `0030_guardian-entered-via` | Adds nullable `member_field_values.entered_via` (`guardian` for values recorded by a guardian of the child); no backfill (existing values keep `null`) |
 | `0031_communication-and-job-queue` | Wave 9 B3, additive: tables `jobs`, `club_announcements`, `message_deliveries`, `push_tokens`, `notification_preferences` (check `notification_preferences_subject_chk`), `events.cancelled_at/cancel_reason`, `club_settings` sender/reminder/timezone/`age_transition_auto` columns with defaults. No backfill; tested in `src/db/migration-communication.test.ts` |
+| `0032_delivery-content` | Wave 9 B6, additive: `message_deliveries.content` (jsonb message snapshot: title, body, template, category, class, recipient name, call-to-action), nullable |
 
 #### Verifying the Wave 7 migrations (B12)
 
@@ -1315,6 +1338,7 @@ All variables live in `.env.example`. The ones worth calling out specifically:
 | `WORKER_POLL_INTERVAL_MS` / `WORKER_CONCURRENCY` / `WORKER_LEASE_SECONDS` | no | Job worker poll interval (default `2000`), parallel jobs per worker (default `4`), lease before a stuck job is reclaimed (default `300`) |
 | `JOB_MAX_ATTEMPTS` / `JOB_BACKOFF_BASE_SECONDS` | no | Attempts before a job is `dead` (default `5`) and the first retry delay, doubled per attempt up to 1 h (default `30`) |
 | `AUDIENCE_MAX_RECIPIENTS` | no | Hard upper limit of persons in one send / audience snapshot (default `2000`, clamped 1–100000); larger audiences are rejected, not truncated |
+| `MAIL_SEND_RATE` | no | Maximum club-communication e-mails per second and process (default `5`, `0` = unthrottled; `src/lib/notify/mailer.ts`). Each recipient gets their own mail |
 | `MEDIA_UNATTACHED_TTL_HOURS` | no | Hours until an upload that no feature row claimed is swept (default `24`) |
 | `MEDIA_UNATTACHED_MAX_FILES_PER_USER` / `MEDIA_UNATTACHED_MAX_BYTES_PER_USER` | no | Cap on unclaimed uploads per user (defaults `25` files / `52428800` bytes); exceeding it is `422 QUOTA_EXCEEDED` with `details.code = unattached_cap` |
 | `FORM_UPLOADS_PER_HOUR` | no | Per-user limit of file uploads into form submissions per hour (`POST /form-submissions/:id/files`) and, in a separate bucket, of file removals (`DELETE`); default `30`, clamped 1–10000 |

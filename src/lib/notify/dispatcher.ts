@@ -1,0 +1,180 @@
+import { and, eq, inArray, or } from "drizzle-orm";
+
+import { db } from "../../db/client.js";
+import { messageDeliveries, notificationPreferences, type CommunicationChannel } from "../../db/schema/communication.js";
+import { normalizeEmail, resolveClubAudience, type AudienceRecipient } from "../audience.js";
+import { logger } from "../logger.js";
+import { enqueue } from "../jobs/queue.js";
+import { EMAIL_JOB_TYPE, type DeliveryContent, type NotificationCategory, type NotifyInput, type NotifyRecipient, type NotifyResult, type NotifyTemplate } from "./types.js";
+
+/**
+ * Central delivery layer (Wave 9 B6, ADR-006). `notify` writes one `message_deliveries` row per recipient and channel
+ * (the proof of delivery) and schedules one `notify.email` job per queued mail; the in-app copy is the delivery row itself
+ * (inbox). It must be called AFTER the business transaction committed. Use `notifySafely` where a failure must never
+ * surface to the caller.
+ */
+
+const INSERT_CHUNK = 400;
+
+interface Target {
+  key: string;
+  clubMemberId: string | null;
+  userId: string | null;
+  name: string | null;
+  /** Address this target is mailed at (already deduplicated); NULL = none. */
+  email: string | null;
+  /** The only address of the person is used for another recipient, so no row is needed. */
+  emailCovered: boolean;
+  inApp: boolean;
+}
+
+function templateOf(input: NotifyInput): NotifyTemplate {
+  if (input.content.template) return input.content.template;
+  if (input.class === "mandatory") return "decision";
+  return input.content.urgent ? "urgent" : "announcement";
+}
+
+function categoryOf(input: NotifyInput, template: NotifyTemplate): DeliveryContent["category"] {
+  if (input.class === "mandatory") return "decisions";
+  return input.content.category ?? (template === "reminder" ? "reminders" : "announcements");
+}
+
+function targetsFromAudience(recipients: AudienceRecipient[]): Target[] {
+  return recipients.map((r) => ({
+    key: r.key,
+    clubMemberId: r.clubMemberId,
+    userId: r.userId,
+    name: r.firstName?.trim() || r.displayName,
+    email: r.email,
+    emailCovered: r.emailCoveredBy !== null,
+    inApp: r.channels.inApp,
+  }));
+}
+
+function targetsFromRecipients(recipients: NotifyRecipient[]): Target[] {
+  const owners = new Set<string>();
+  return recipients.map((r, i) => {
+    let email = normalizeEmail(r.email);
+    let covered = false;
+    if (email) {
+      if (owners.has(email)) {
+        covered = true;
+        email = null;
+      } else {
+        owners.add(email);
+      }
+    }
+    return { key: r.clubMemberId ?? r.userId ?? `idx:${i}`, clubMemberId: r.clubMemberId ?? null, userId: r.userId ?? null, name: r.name ?? null, email, emailCovered: covered, inApp: !!r.userId };
+  });
+}
+
+/** `${channel}:u:${userId}` / `${channel}:m:${clubMemberId}` for every explicitly disabled combination (default is enabled). */
+async function loadOptOuts(category: string, targets: Target[]): Promise<Set<string>> {
+  const userIds = targets.map((t) => t.userId).filter((v): v is string => v !== null);
+  const memberIds = targets.map((t) => t.clubMemberId).filter((v): v is string => v !== null);
+  if (userIds.length + memberIds.length === 0) return new Set();
+  const subject = [userIds.length ? inArray(notificationPreferences.userId, userIds) : undefined, memberIds.length ? inArray(notificationPreferences.clubMemberId, memberIds) : undefined];
+  const rows = await db
+    .select({ userId: notificationPreferences.userId, clubMemberId: notificationPreferences.clubMemberId, channel: notificationPreferences.channel })
+    .from(notificationPreferences)
+    .where(and(eq(notificationPreferences.category, category), eq(notificationPreferences.enabled, false), or(...subject)));
+  const out = new Set<string>();
+  for (const r of rows) {
+    if (r.userId) out.add(`${r.channel}:u:${r.userId}`);
+    if (r.clubMemberId) out.add(`${r.channel}:m:${r.clubMemberId}`);
+  }
+  return out;
+}
+
+const optedOut = (optOuts: Set<string>, channel: CommunicationChannel, t: Target): boolean =>
+  (t.userId !== null && optOuts.has(`${channel}:u:${t.userId}`)) || (t.clubMemberId !== null && optOuts.has(`${channel}:m:${t.clubMemberId}`));
+
+type DeliveryInsert = typeof messageDeliveries.$inferInsert;
+
+export async function notify(input: NotifyInput): Promise<NotifyResult> {
+  if ((input.audience === undefined) === (input.recipients === undefined)) throw new Error("notify needs exactly one of audience / recipients");
+  if (input.audience !== undefined && input.clubId === null) throw new Error("notify with an audience needs a clubId");
+  if (input.announcementId !== undefined && input.clubId === null) throw new Error("notify for an announcement needs a clubId");
+
+  const template = templateOf(input);
+  const category = categoryOf(input, template);
+  const targets = input.audience !== undefined
+    ? targetsFromAudience((await resolveClubAudience(input.clubId!, input.audience, input.limit === undefined ? {} : { limit: input.limit })).recipients)
+    : targetsFromRecipients(input.recipients ?? []);
+
+  const wantsInApp = input.channels.includes("in_app");
+  const wantsEmail = input.channels.includes("email");
+  // Mandatory messages ignore preferences entirely; optional ones are filtered per channel (in-app is the source of truth and stays on).
+  const optOuts = input.class === "optional" && wantsEmail ? await loadOptOuts(category, targets) : new Set<string>();
+
+  const now = new Date();
+  const rows: DeliveryInsert[] = [];
+  const base = (t: Target, channel: CommunicationChannel): DeliveryInsert => ({
+    clubId: input.clubId,
+    announcementId: input.announcementId ?? null,
+    eventKey: input.eventKey,
+    refId: input.refId ?? null,
+    clubMemberId: t.clubMemberId,
+    userId: t.userId,
+    channel,
+    content: {
+      title: input.content.title,
+      body: input.content.body,
+      template,
+      category,
+      class: input.class,
+      urgent: input.content.urgent === true || template === "urgent",
+      recipientName: t.name,
+      ctaLabel: input.content.ctaLabel ?? null,
+      ctaUrl: input.content.ctaUrl ?? null,
+    } satisfies DeliveryContent,
+  });
+  const result: NotifyResult = { recipients: targets.length, inApp: 0, queuedEmail: 0, skippedOptout: 0, skippedNoAddress: 0, alreadyDelivered: 0 };
+
+  for (const t of targets) {
+    if (wantsInApp && t.inApp) rows.push({ ...base(t, "in_app"), status: "sent", sentAt: now });
+    if (wantsEmail && !t.emailCovered) {
+      if (t.email === null) rows.push({ ...base(t, "email"), status: "skipped_no_address" });
+      else if (optedOut(optOuts, "email", t)) rows.push({ ...base(t, "email"), status: "skipped_optout" });
+      else rows.push({ ...base(t, "email"), status: "queued", address: t.email });
+    }
+  }
+
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
+      const chunk = rows.slice(i, i + INSERT_CHUNK);
+      const inserted = await tx.insert(messageDeliveries).values(chunk).onConflictDoNothing().returning({ id: messageDeliveries.id, channel: messageDeliveries.channel, status: messageDeliveries.status });
+      result.alreadyDelivered += chunk.length - inserted.length;
+      for (const row of inserted) {
+        if (row.channel === "in_app") result.inApp += 1;
+        else if (row.status === "queued") {
+          result.queuedEmail += 1;
+          await enqueue({ type: EMAIL_JOB_TYPE, payload: { deliveryId: row.id }, dedupeKey: `${EMAIL_JOB_TYPE}:${row.id}` }, tx);
+        } else if (row.status === "skipped_optout") result.skippedOptout += 1;
+        else if (row.status === "skipped_no_address") result.skippedNoAddress += 1;
+      }
+    }
+  });
+  return result;
+}
+
+/**
+ * Best effort wrapper for status changes: never throws, logs only ids and the error class (no addresses, no message
+ * text, since provider errors commonly echo the recipient).
+ */
+export async function notifySafely(input: NotifyInput): Promise<NotifyResult | null> {
+  try {
+    return await notify(input);
+  } catch (err) {
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ eventKey: input.eventKey, refId: input.refId, clubId: input.clubId, errName: e?.name, errCode: e?.code }, "[notify] dispatch failed");
+    return null;
+  }
+}
+
+/** Fire-and-forget: schedules `notifySafely` without delaying the HTTP response. */
+export function notifyInBackground(input: NotifyInput): void {
+  void notifySafely(input);
+}
+
+export type { NotificationCategory };

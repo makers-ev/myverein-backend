@@ -16,7 +16,7 @@ export const LOGO_PATH = "./assets/myverein-logo.png";
 // fixed to German -- there's no language on the user record to pick from,
 // and German is this template suite's default (see the website/mobile
 // templates' LanguageContext).
-const BRAND = {
+export const BRAND = {
   primary: primaryColor,
   background: "#f8fafc",
   card: "#ffffff",
@@ -29,7 +29,18 @@ const BRAND = {
 // these emails.
 export const APP_NAME = appName;
 
-function layout({ greeting, bodyHtml, ctaLabel, ctaUrl }: { greeting: string; bodyHtml: string; ctaLabel: string; ctaUrl: string }): string {
+export interface LayoutOptions {
+  greeting: string;
+  bodyHtml: string;
+  ctaLabel: string;
+  ctaUrl: string;
+  /** Optional banner above the greeting (e.g. "Dringend"), already escaped. */
+  bannerHtml?: string;
+  /** Optional extra block below the button (signature, unsubscribe note), already escaped. */
+  extraHtml?: string;
+}
+
+export function layout({ greeting, bodyHtml, ctaLabel, ctaUrl, bannerHtml, extraHtml }: LayoutOptions): string {
   return `<!doctype html>
 <html lang="de">
   <body style="margin:0; padding:0; background-color:${BRAND.background}; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
@@ -53,9 +64,11 @@ function layout({ greeting, bodyHtml, ctaLabel, ctaUrl }: { greeting: string; bo
             </tr>
             <tr>
               <td style="padding:32px;">
+                ${bannerHtml ?? ""}
                 <p style="margin:0 0 16px; font-size:16px; font-weight:600; color:${BRAND.foreground};">${greeting}</p>
                 <p style="margin:0 0 24px; font-size:15px; line-height:1.6; color:${BRAND.foreground};">${bodyHtml}</p>
                 <a href="${ctaUrl}" style="display:inline-block; background-color:${BRAND.primary}; color:#ffffff; font-size:14px; font-weight:600; text-decoration:none; padding:12px 24px; border-radius:10px;">${ctaLabel}</a>
+                ${extraHtml ?? ""}
               </td>
             </tr>
             <tr>
