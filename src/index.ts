@@ -9,7 +9,6 @@ import { closeDatabase } from "./db/client.js";
 import { AppError, toAppError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
 import { registerAllJobs, startJobWorker, workerEnabled } from "./lib/jobs/index.js";
-import { startFormDraftSweeper } from "./lib/form-sweeper.js";
 import { startMediaSweeper } from "./lib/media.js";
 import { type LoggerEnv, requestId } from "./middleware/request-id.js";
 import { adminClubRegistrationRoutes } from "./routes/admin-club-registrations.js";
@@ -132,8 +131,7 @@ const hostname = process.env.BIND_HOST ?? "127.0.0.1";
 
 // Unused uploads (POST /media files no feature row claimed) are removed after MEDIA_UNATTACHED_TTL_HOURS.
 const stopMediaSweeper = startMediaSweeper();
-// Abandoned application drafts (and their files) are removed after FORM_DRAFT_TTL_DAYS of inactivity.
-const stopFormDraftSweeper = startFormDraftSweeper();
+// Abandoned application drafts (and their files) are removed by the job `form_cleanup_sweep` (see registerAllJobs).
 
 // DB job queue worker (ADR-005): in-process unless WORKER_ENABLED=false (then run dist/worker.js separately).
 registerAllJobs();
@@ -146,7 +144,6 @@ const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
 async function shutdown(signal: string) {
   logger.info(`[shutdown] received ${signal}, closing server`);
   stopMediaSweeper();
-  stopFormDraftSweeper();
   server.close(async () => {
     await jobWorker?.stop();
     await closeDatabase();

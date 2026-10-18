@@ -38,7 +38,7 @@ export const REMINDER_JOB_TYPE = "notify_reminder";
 export const LOAN_OVERDUE_STEPS = [1, 4, 7] as const;
 const MAX_LIST = 15;
 
-export type ReminderKind = "event" | "loan_due" | "loan_overdue" | "maintenance" | "rsvp";
+export type ReminderKind = "event" | "loan_due" | "loan_overdue" | "maintenance" | "rsvp" | "age_transition";
 
 /** Payload of `notify_reminder`: the prepared message and its audience (ids and club text only). */
 export interface ReminderPayload extends Record<string, unknown> {

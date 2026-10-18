@@ -208,14 +208,13 @@ export function scheduleLazyCleanup(scope: { userId?: string; clubId?: string })
   void run.finally(() => lazyPending.delete(run));
 }
 
-/** Starts the sweep now and then hourly (like `startMediaSweeper`); the timer does not keep the process alive. */
-export function startFormDraftSweeper(intervalMs = 60 * 60 * 1000): () => void {
-  const run = () =>
-    Promise.all([sweepStaleFormDrafts(), sweepRejectedFormFiles(), sweepRejectedChildAnswers()])
-      .then(([r, expired, erased]) => (r.drafts + r.orphans + expired + erased > 0 ? logger.info({ ...r, expiredRejectedFiles: expired, erasedChildAnswers: erased }, "[forms] swept stale drafts and expired data") : undefined))
-      .catch((err) => logger.error({ err }, "[forms] draft sweep failed"));
-  void run();
-  const timer = setInterval(run, intervalMs);
-  timer.unref();
-  return () => clearInterval(timer);
+/**
+ * One cleanup round of the stale-draft / expired-data sweeps (Wave 9 B13: runs as the recurring job `form_cleanup_sweep`,
+ * see `registerAllJobs`; the in-process hourly timer of Wave 8 is gone). Returns the counts for the log.
+ */
+export async function runFormCleanup(now = Date.now()): Promise<{ drafts: number; orphans: number; expiredRejectedFiles: number; erasedChildAnswers: number }> {
+  const [r, expiredRejectedFiles, erasedChildAnswers] = await Promise.all([sweepStaleFormDrafts(now), sweepRejectedFormFiles(now), sweepRejectedChildAnswers(now)]);
+  const result = { ...r, expiredRejectedFiles, erasedChildAnswers };
+  if (r.drafts + r.orphans + expiredRejectedFiles + erasedChildAnswers > 0) logger.info(result, "[forms] swept stale drafts and expired data");
+  return result;
 }
