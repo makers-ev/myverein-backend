@@ -31,8 +31,8 @@ import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, Valida
 import { logger } from "../lib/logger.js";
 import { cleanText, isCleanText } from "../lib/text-policy.js";
 import { createInvite, previewInvite, acceptInvite, unlinkAccount } from "../lib/member-invites.js";
-import { sendEmail } from "../lib/email.js";
-import { APP_NAME, buildMemberInviteEmail, LOGO_CID, LOGO_PATH, SITE_URL } from "../lib/emailTemplate.js";
+import { APP_NAME, buildMemberInviteEmail, SITE_URL } from "../lib/emailTemplate.js";
+import { notify } from "../lib/notify/dispatcher.js";
 import { clubMemberInvites, type ClubMemberInviteRow } from "../db/schema/club-member-invites.js";
 import { effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
 import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "../lib/member-read-scope.js";
@@ -1648,23 +1648,40 @@ function shapeInvite(invite: ClubMemberInviteRow) {
   return { id: invite.id, clubMemberId: invite.clubMemberId, email: invite.email, status, expiresAt: invite.expiresAt, acceptedAt: invite.acceptedAt, createdAt: invite.createdAt };
 }
 
-/** Mail problems never block an invite (the board sees emailSent=false and can resend); the address is not logged. */
+/**
+ * Mail problems never block an invite (the board sees emailSent=false and can resend); the address is not logged. The mail
+ * goes through the dispatcher (Wave 9 B11, class `mandatory`, sent inline so the outcome is known); the link is wiped from
+ * the delivery row after sending (`sensitive`).
+ */
 async function sendInviteMail(clubId: string, target: { id: string; displayName: string }, invite: ClubMemberInviteRow, token: string, email: string): Promise<boolean> {
   try {
     const club = await db.query.organization.findFirst({ where: eq(organization.id, clubId) });
     const clubName = club?.name ?? "deinem Verein";
-    await sendEmail({
-      to: email,
-      subject: `Einladung von ${clubName.replace(/[\r\n]+/g, " ")} zu ${APP_NAME}`,
-      html: buildMemberInviteEmail({
-        name: target.displayName,
-        clubName,
-        url: `${SITE_URL}/einladung?token=${encodeURIComponent(token)}`,
-        expiresOn: invite.expiresAt.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }),
-      }),
-      attachments: [{ filename: "logo.png", path: LOGO_PATH, cid: LOGO_CID }],
+    const subject = `Einladung von ${clubName.replace(/[\r\n]+/g, " ")} zu ${APP_NAME}`;
+    const result = await notify({
+      clubId,
+      class: "mandatory",
+      eventKey: "member_invite.created",
+      refId: invite.id,
+      recipients: [{ clubMemberId: target.id, name: target.displayName, email }],
+      content: {
+        title: subject,
+        body: "Einladung zur Verknüpfung deines Mitglieds-Kontos",
+        rendered: {
+          subject,
+          html: buildMemberInviteEmail({
+            name: target.displayName,
+            clubName,
+            url: `${SITE_URL}/einladung?token=${encodeURIComponent(token)}`,
+            expiresOn: invite.expiresAt.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }),
+          }),
+        },
+        sensitive: true,
+      },
+      channels: ["email"],
+      immediate: true,
     });
-    return true;
+    return result.sentEmail > 0;
   } catch (err) {
     logger.error({ errorName: err instanceof Error ? err.name : "unknown", clubMemberId: target.id, inviteId: invite.id }, "[club-members] invite e-mail could not be sent");
     return false;

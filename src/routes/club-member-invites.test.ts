@@ -10,6 +10,7 @@ import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubMemberInvites } from "../db/schema/club-member-invites.js";
 import { clubMembers, clubMemberStatusHistory } from "../db/schema/club-members.js";
+import { messageDeliveries } from "../db/schema/communication.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { toAppError } from "../lib/errors.js";
@@ -176,6 +177,13 @@ describe("account linking by invitation (B4)", () => {
       const audit = await db.select().from(auditLog).where(eq(auditLog.subjectId, c.id));
       expect(audit.some((a) => a.eventType === "club_member.invite")).toBe(true);
       expect(JSON.stringify(audit)).not.toContain("invitee-mail");
+
+      // dispatcher proof of delivery (B11): mandatory, sent inline, and the link is wiped from the stored content afterwards
+      const deliveries = await db.select().from(messageDeliveries).where(eq(messageDeliveries.refId, out.id));
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]).toMatchObject({ clubId: club, eventKey: "member_invite.created", channel: "email", status: "sent" });
+      expect((deliveries[0]!.content as { class: string }).class).toBe("mandatory");
+      expect(JSON.stringify(deliveries)).not.toContain(token);
     });
 
     it("a new invitation replaces the open one (one open invite per member); the old token dies", async () => {

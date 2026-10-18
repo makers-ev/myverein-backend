@@ -10,6 +10,7 @@ import { member, organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubExitRequests } from "../db/schema/club-exit-requests.js";
+import { messageDeliveries } from "../db/schema/communication.js";
 import { clubMembers, clubMemberStatusHistory } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubSettings } from "../db/schema/club-settings.js";
@@ -193,6 +194,10 @@ describe("exit workflow (B6)", () => {
       expect(res.status).toBe(201);
       created = await data(res);
       expect(created).toMatchObject({ kind: "cancellation", status: "pending", clubMemberId: m1.clubMemberId, requestedOn: today(), desiredEffectiveOn: today(), effectiveOn: null, earliestEffectiveOn: earliest, proposedEffectiveOn: earliest, adjustedToEarliest: true, reason: "Umzug nach Hamburg" });
+      // B11: receipt confirmation (mandatory) to the member
+      const receipt = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, created.id), eq(messageDeliveries.eventKey, "exit.received")));
+      expect(receipt.map((m) => m.channel).sort()).toEqual(["email", "in_app"]);
+      expect((receipt[0]!.content as { class: string }).class).toBe("mandatory");
       // the member keeps full access while the request is open
       expect((await call(m1, "/club-members/me")).status).toBe(200);
       expect((await stored(m1.clubMemberId)).leftAt).toBeNull();
@@ -272,6 +277,9 @@ describe("exit workflow (B6)", () => {
       const approved = await body(res);
       expect(approved.data).toMatchObject({ status: "approved", effectiveOn: earliest, decisionNote: "Schade, alles Gute", decidedBy: founder.memberId });
       expect(approved.transition).toMatchObject({ kind: "scheduled_exit", toStatus: "ausgetreten", effectiveOn: earliest });
+      const accepted = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, created.id), eq(messageDeliveries.eventKey, "exit.accepted")));
+      expect(accepted.map((m) => m.channel).sort()).toEqual(["email", "in_app"]);
+      expect((accepted[0]!.content as { body: string }).body).toContain(`${earliest.slice(8, 10)}.${earliest.slice(5, 7)}.${earliest.slice(0, 4)}`);
       const row = await stored(m1.clubMemberId);
       expect(row).toMatchObject({ status: "aktiv", leftAt: earliest, exitReason: "Umzug nach Hamburg" });
       expect((await call(m1, "/club-members/me")).status).toBe(200);
@@ -314,6 +322,9 @@ describe("exit workflow (B6)", () => {
       const res = await call(founder, `/club-exit-requests/${req.id}/reject`, { method: "POST", body: { note: "Bitte erst Schluessel abgeben" } });
       expect(res.status).toBe(200);
       expect((await data(res)).status).toBe("rejected");
+      const rejectedMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, req.id), eq(messageDeliveries.eventKey, "exit.rejected")));
+      expect(rejectedMsgs).toHaveLength(2);
+      expect((rejectedMsgs[0]!.content as { body: string }).body).toContain("Bitte erst Schluessel abgeben");
       expect(await stored(m.clubMemberId)).toMatchObject({ status: "aktiv", leftAt: null });
       expect((await call(m, "/club-members/me")).status).toBe(200);
     });
@@ -456,6 +467,9 @@ describe("exit workflow (B6)", () => {
       const out = await body(res);
       expect(out.data).toMatchObject({ kind: "exclusion", status: "approved", effectiveOn: today(), earliestEffectiveOn: null });
       expect(out.transition).toMatchObject({ kind: "status", toStatus: "ausgeschlossen" });
+      const exclusionMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, out.data.id), eq(messageDeliveries.eventKey, "exit.exclusion")));
+      expect(exclusionMsgs.map((m) => m.channel).sort()).toEqual(["email", "in_app"]);
+      expect((exclusionMsgs[0]!.content as { body: string }).body).toContain("Vereinsschaedigung");
       expect(await stored(victim.clubMemberId)).toMatchObject({ status: "ausgeschlossen", leftAt: today(), exitReason: "Vereinsschaedigung" });
       expect((await call(victim, "/club-members/me")).status).toBe(404);
       const superseded = await db.query.clubExitRequests.findFirst({ where: eq(clubExitRequests.id, pending.id) });

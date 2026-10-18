@@ -5,6 +5,7 @@ import { messageDeliveries, notificationPreferences, type CommunicationChannel }
 import { normalizeEmail, resolveClubAudience, type AudienceRecipient } from "../audience.js";
 import { logger } from "../logger.js";
 import { enqueue } from "../jobs/queue.js";
+import { handleEmailDelivery } from "./email-job.js";
 import { EMAIL_JOB_TYPE, type DeliveryContent, type NotificationCategory, type NotifyInput, type NotifyRecipient, type NotifyResult, type NotifyTemplate } from "./types.js";
 
 /**
@@ -127,9 +128,11 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
       recipientName: t.name,
       ctaLabel: input.content.ctaLabel ?? null,
       ctaUrl: input.content.ctaUrl ?? null,
+      ...(input.content.rendered ? { rendered: input.content.rendered } : {}),
+      ...(input.content.sensitive ? { sensitive: true } : {}),
     } satisfies DeliveryContent,
   });
-  const result: NotifyResult = { recipients: targets.length, inApp: 0, queuedEmail: 0, skippedOptout: 0, skippedNoAddress: 0, alreadyDelivered: 0 };
+  const result: NotifyResult = { recipients: targets.length, inApp: 0, queuedEmail: 0, sentEmail: 0, skippedOptout: 0, skippedNoAddress: 0, alreadyDelivered: 0 };
 
   for (const t of targets) {
     if (wantsInApp && t.inApp) rows.push({ ...base(t, "in_app"), status: "sent", sentAt: now });
@@ -140,6 +143,7 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
     }
   }
 
+  const immediateIds: string[] = [];
   await db.transaction(async (tx) => {
     for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
       const chunk = rows.slice(i, i + INSERT_CHUNK);
@@ -149,12 +153,18 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
         if (row.channel === "in_app") result.inApp += 1;
         else if (row.status === "queued") {
           result.queuedEmail += 1;
-          await enqueue({ type: EMAIL_JOB_TYPE, payload: { deliveryId: row.id }, dedupeKey: `${EMAIL_JOB_TYPE}:${row.id}` }, tx);
+          if (input.immediate) immediateIds.push(row.id);
+          else await enqueue({ type: EMAIL_JOB_TYPE, payload: { deliveryId: row.id }, dedupeKey: `${EMAIL_JOB_TYPE}:${row.id}` }, tx);
         } else if (row.status === "skipped_optout") result.skippedOptout += 1;
         else if (row.status === "skipped_no_address") result.skippedNoAddress += 1;
       }
     }
   });
+  for (const deliveryId of immediateIds) {
+    await handleEmailDelivery({ id: deliveryId, type: EMAIL_JOB_TYPE, payload: { deliveryId }, attempt: 1, maxAttempts: 1 });
+    const [row] = await db.select({ status: messageDeliveries.status }).from(messageDeliveries).where(eq(messageDeliveries.id, deliveryId));
+    if (row?.status === "sent") result.sentEmail += 1;
+  }
   return result;
 }
 

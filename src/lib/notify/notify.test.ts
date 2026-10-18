@@ -285,6 +285,8 @@ describe("email delivery job", () => {
     const eventKey = `t-worker-${sfx}`;
     // earlier tests of this file leave queued rows/jobs behind; only this event's mails may go out through the worker
     await db.update(messageDeliveries).set({ status: "failed" }).where(and(eq(messageDeliveries.clubId, clubId), eq(messageDeliveries.status, "queued")));
+    // other test files leave queued notify.email jobs in the shared table; park them so this worker only drains its own
+    await db.update(jobs).set({ status: "dead" }).where(and(eq(jobs.type, EMAIL_JOB_TYPE), eq(jobs.status, "queued")));
     await notify({ ...base, eventKey, audience: { memberIds: [ids.anna!, ids.ben!, ids.kid!], includeGuardians: false } });
     const rows = await emailRows(eventKey);
     const registry = new JobRegistry();
@@ -302,8 +304,10 @@ describe("email delivery job", () => {
       await worker.stop();
     }
     expect((await emailRows(eventKey)).map((r) => r.status)).toEqual(rows.map(() => "sent"));
-    expect(sent.map((m) => m.to).sort()).toEqual(rows.map((r) => r.address!).sort());
-    expect(new Set(sent.map((m) => m.to)).size).toBe(3);
+    // the shared jobs table may hold queued mails of other test files, which the worker also drains
+    const own = sent.filter((m) => rows.some((r) => r.address === m.to));
+    expect(own.map((m) => m.to).sort()).toEqual(rows.map((r) => r.address!).sort());
+    expect(new Set(own.map((m) => m.to)).size).toBe(3);
   });
 
   it("registerAllJobs installs the handler on the default registry", () => {

@@ -16,7 +16,7 @@ import {
   type RegistrationDocumentKind,
 } from "../db/schema/club-registrations.js";
 import { slugifyClubName, uniqueClubSlug } from "../lib/club-slug.js";
-import { inBackground, sendRegistrationReceivedMail, sendRegistrationReviewNotifyMail } from "../lib/club-registration-mail.js";
+import { inBackground, sendRegistrationReceivedMail, sendRegistrationReviewNotifyMail } from "../lib/club-registration-notify.js";
 import {
   documentResponse,
   findDocument,

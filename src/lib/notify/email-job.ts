@@ -55,7 +55,7 @@ export async function handleEmailDelivery(job: JobContext): Promise<void> {
   const unsubscribeUrl =
     content.class === "optional" ? unsubscribeUrlFor({ clubId: delivery.clubId, userId: delivery.userId, clubMemberId: delivery.clubMemberId, category: content.category }) : null;
 
-  const { subject, html } = renderNotifyEmail({
+  const { subject, html } = content.rendered ?? renderNotifyEmail({
     template: content.template,
     title: content.title,
     body: content.body,
@@ -87,7 +87,10 @@ export async function handleEmailDelivery(job: JobContext): Promise<void> {
       .where(and(eq(messageDeliveries.id, deliveryId), eq(messageDeliveries.status, "queued")));
     // Never log the address or the raw error (SMTP errors echo the recipient).
     logger.error({ deliveryId, eventKey: delivery.eventKey, attempt: job.attempt, errCode: code, final }, "[notify] failed to send email");
-    if (final) return;
+    if (final) {
+      if (content.sensitive) await scrubContent(deliveryId, content);
+      return;
+    }
     // Deliberately no `cause`: the provider error usually echoes the recipient address and ends up in jobs.last_error.
     // eslint-disable-next-line preserve-caught-error
     throw new Error(`mail delivery failed (${code})`);
@@ -96,4 +99,11 @@ export async function handleEmailDelivery(job: JobContext): Promise<void> {
     .update(messageDeliveries)
     .set({ status: "sent", sentAt: new Date(), attempts: job.attempt, errorCode: null })
     .where(and(eq(messageDeliveries.id, deliveryId), eq(messageDeliveries.status, "queued")));
+  if (content.sensitive) await scrubContent(deliveryId, content);
+}
+
+/** Wipes secrets (invite link) from the proof-of-delivery row; title and the fact of delivery stay. */
+async function scrubContent(deliveryId: string, content: DeliveryContent): Promise<void> {
+  const scrubbed: Record<string, unknown> = { ...content, body: "", ctaUrl: null, rendered: null };
+  await db.update(messageDeliveries).set({ content: scrubbed }).where(eq(messageDeliveries.id, deliveryId));
 }

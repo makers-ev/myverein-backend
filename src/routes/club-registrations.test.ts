@@ -15,6 +15,7 @@ import { calendars } from "../db/schema/calendars.js";
 import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrationDocuments, clubRegistrations } from "../db/schema/club-registrations.js";
+import { messageDeliveries } from "../db/schema/communication.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { encodeRfc5987 } from "../lib/club-registrations.js";
 import { toAppError } from "../lib/errors.js";
@@ -504,11 +505,14 @@ describe("club registrations (Wave 6)", () => {
       expect(((await (await req(second, `/club-registrations/${b.id}`)).json()) as { data: { registration: Reg } }).data.registration.status).toBe("draft");
     });
 
-    it("never fails the status change when mail sending fails", async () => {
+    it("queues the registration mails through the dispatcher and never fails the status change when mail sending fails", async () => {
       vi.mocked(sendEmail).mockClear();
       const who = await applicant("mailfail");
       const reg = await submitted(who, `Mailfehler Verein ${suffix}`);
-      await vi.waitFor(() => expect(vi.mocked(sendEmail)).toHaveBeenCalled());
+      await vi.waitFor(async () => {
+        const rows = await db.select().from(messageDeliveries).where(eq(messageDeliveries.refId, reg.id));
+        expect(rows.some((r) => r.eventKey === "club_registration.received" && r.clubId === null && r.status === "queued")).toBe(true);
+      });
       expect((await decide(reg.id, "approve")).status).toBe(200);
     });
   });

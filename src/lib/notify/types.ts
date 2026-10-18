@@ -22,6 +22,13 @@ export interface NotifyContent {
   category?: NotificationCategory;
   ctaLabel?: string;
   ctaUrl?: string;
+  /**
+   * Pre-rendered mail (subject + html) that is sent as is instead of the generic layout. Only for the migrated
+   * platform/invite mails whose wording must stay byte-identical; `title`/`body` remain the in-app text.
+   */
+  rendered?: { subject: string; html: string };
+  /** The content carries a secret (e.g. an invite link): it is wiped from the delivery row once the mail is sent or failed for good. */
+  sensitive?: boolean;
 }
 
 /** An explicitly addressed recipient (e.g. the applicant of a decision mail, who may have no club_members row). */
@@ -48,12 +55,19 @@ export interface NotifyInput {
   channels: CommunicationChannel[];
   /** Overrides the audience size limit. */
   limit?: number;
+  /**
+   * Send the queued e-mails inline (one attempt, no job) so an interactive caller learns the outcome (invite: `emailSent`).
+   * A failed attempt ends as `failed` instead of being retried. Default: scheduled as `notify.email` jobs.
+   */
+  immediate?: boolean;
 }
 
 export interface NotifyResult {
   recipients: number;
   inApp: number;
   queuedEmail: number;
+  /** Only with `immediate`: mails actually handed to the transport. */
+  sentEmail: number;
   skippedOptout: number;
   skippedNoAddress: number;
   /** Rows that already existed for this announcement (idempotent re-send). */
@@ -71,6 +85,8 @@ export interface DeliveryContent {
   recipientName: string | null;
   ctaLabel: string | null;
   ctaUrl: string | null;
+  rendered?: { subject: string; html: string } | null;
+  sensitive?: boolean;
 }
 
 export const EMAIL_JOB_TYPE = "notify.email";

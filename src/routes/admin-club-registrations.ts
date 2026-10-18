@@ -16,7 +16,7 @@ import {
   sendRegistrationApprovedMail,
   sendRegistrationNeedsInfoMail,
   sendRegistrationRejectedMail,
-} from "../lib/club-registration-mail.js";
+} from "../lib/club-registration-notify.js";
 import { documentResponse, findDocument, isUuid, recordAdminDocumentAccess, registerKey, registerKeyMatches, shapeRegistration, shapeRegistrations } from "../lib/club-registrations.js";
 import { assertValidClubSlug, slugifyClubName, uniqueClubSlug } from "../lib/club-slug.js";
 import { ConflictError, InternalError, NotFoundError, ValidationError } from "../lib/errors.js";

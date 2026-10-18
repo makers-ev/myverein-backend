@@ -18,6 +18,7 @@ import { formVersions, formSubmissions } from "../db/schema/forms.js";
 import type { FormField } from "../lib/form-schema.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { notifyApplicationApproved, notifyApplicationRejected } from "../lib/decision-notify.js";
 import { applyAcceptance, compensateAbortedApproval, asDecisionBusy, assertSubmissionDecidable, consentEvidence, lockDecisionSubmission, rejectSubmission, type DecisionContext, type MappingReport } from "../lib/form-applications.js";
 import { purgeMediaFile } from "../lib/media.js";
 import { buildApplicationReview, listExtras } from "../lib/application-review.js";
@@ -295,6 +296,8 @@ clubApplicationRoutes.post("/:id/approve", decisionBodyLimit, async (c) => {
     });
     await Promise.all(result.purge.map((key) => purgeMediaFile(key)));
 
+    await notifyApplicationApproved({ clubId, applicationId: application.id, userId: application.userId, clubMemberId: result.clubMember.id, memberNumber: result.clubMember.memberNumber });
+
     // `membership` is the pre-Wave-7 shape (deprecated, kept for existing clients); `clubMember` is the canonical row.
     const { clubMember } = result;
     const membership = {
@@ -398,6 +401,7 @@ async function approveChild(clubId: string, application: typeof clubApplications
       return { application: finalApplication!, clubMember: applied.clubMember, mapping: applied.mapping, purge: applied.purge, linked: link.linked };
     });
     await Promise.all(result.purge.map((key) => purgeMediaFile(key)));
+    await notifyApplicationApproved({ clubId, applicationId: application.id, userId: application.userId, clubMemberId: result.clubMember.id, memberNumber: result.clubMember.memberNumber, childName: result.clubMember.displayName });
     return {
       application: result.application,
       // The child has no account; the parent's account membership is reported under `guardian`.
@@ -500,6 +504,7 @@ async function readmit(
     });
     await Promise.all(result.purge.map((key) => purgeMediaFile(key)));
     const { clubMember } = result;
+    await notifyApplicationApproved({ clubId, applicationId: application.id, userId: application.userId, clubMemberId: clubMember.id, memberNumber: clubMember.memberNumber });
     // The category the member actually has now (board override / mapped answer / unchanged), not the applicant's request.
     const actual = clubMember.categoryId ? await db.query.memberCategories.findFirst({ where: (t, { eq: same }) => same(t.id, clubMember.categoryId!), columns: { key: true } }) : undefined;
     return {
@@ -532,6 +537,18 @@ async function readmit(
   }
 }
 
+/** Name of the child a guardian application is for (from the pinned form version and answers); null when unknown. */
+async function childNameOf(application: typeof clubApplications.$inferSelect): Promise<string | null> {
+  if (!application.formSubmissionId) return null;
+  const [pinned] = await db
+    .select({ fields: formVersions.fields, answers: formSubmissions.answers })
+    .from(formSubmissions)
+    .innerJoin(formVersions, eq(formVersions.id, formSubmissions.formVersionId))
+    .where(eq(formSubmissions.id, application.formSubmissionId))
+    .limit(1);
+  return pinned ? childDisplayName(planAcceptance(pinned.fields as FormField[], pinned.answers)) : null;
+}
+
 clubApplicationRoutes.post("/:id/reject", decisionBodyLimit, async (c) => {
   const clubId = c.get("clubId");
   const decider = c.get("membership");
@@ -539,6 +556,8 @@ clubApplicationRoutes.post("/:id/reject", decisionBodyLimit, async (c) => {
   const { note, applicantMessage } = await readOptionalBody(c, rejectBodySchema);
   const application = await loadPendingApplication(c.req.param("id"), clubId);
   await assertSubmissionDecidable(db, application);
+  // Read before the decision: rejecting may purge the child's answers (retention).
+  const childName = application.onBehalfOf === "guardian" ? await childNameOf(application) : null;
 
   try {
     const decided = await db.transaction(async (tx) => {
@@ -559,6 +578,7 @@ clubApplicationRoutes.post("/:id/reject", decisionBodyLimit, async (c) => {
       });
       return row;
     });
+    await notifyApplicationRejected({ clubId, applicationId: application.id, userId: application.userId, applicantMessage, childName });
     return c.json({ data: { application: decided } });
   } catch (err) {
     throw asDecisionBusy(err);
