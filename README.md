@@ -11,6 +11,7 @@ Clone it, set three environment variables, run `docker compose up`, and you have
 - [Getting started](#getting-started)
 - [Architecture](#architecture)
 - [Data model](#data-model)
+- [Notification catalog](#notification-catalog)
 - [API reference](#api-reference)
 - [Rights and read scoping](#rights-and-read-scoping-wave-7-b7b8)
 - [Adding a new API route](#adding-a-new-api-route)
@@ -1055,6 +1056,107 @@ diff before.txt after.txt                 # only the new tables and the Wave 7 c
 ```
 
 The script runs in a `READ ONLY` transaction and prints only table names, counts and flags (`OK`/`FAIL`), never names, e-mail addresses or member numbers, so the output can be pasted into a ticket. Checks (all must be `OK`, exit code 0): every `member` has its `club_members` row, no duplicate `member_id`, linked rows match the account's club, no `ausgetreten` without `left_at`, every linked member has a category and `last_user_id`, no umlaut/unnormalised category keys and all five default categories per club, no dangling `guardian_links` ward and the legacy `ward_member_id` column gone, no foreign/external/traversal `photo_key`, every key holder covered by a history entry, no `open` wifi with a password, `meetings.type` within the controlled set, no unvalidated constraint. Informational lines (not failures): duplicate member-number groups (legacy data), `aktiv` members with a future `left_at`, cross-club guardian links. The script needs `tsx`, i.e. host mode (a checkout), not the production container.
+
+## Notification catalog
+
+Complete inventory of everything MyVerein sends or schedules by itself, read from the code (Wave 9, branch `feature/communication`). One row per trigger. German long form with gaps and silent states: vault `Technical Reference - Benachrichtigungs-Katalog`. **Keep this table in sync**: every new `notify(...)`, `notifySafely(...)`, `sendEmail(...)` or `enqueue(...)` that reaches a person needs a row in the same commit (find them with `grep -rnE "notify\(|notifySafely|notifyInBackground|sendEmail\(|REMINDER_JOB_TYPE" src --include=*.ts`).
+
+Legend. **M** = `mandatory` (ignores preferences, no unsubscribe link, cannot be switched off), **O(cat)** = `optional` in category `announcements` / `events` / `reminders` (e-mail and push can be switched off per account in `/settings`, in-app copy is always written, unsubscribe link in every mail). Channels: **in-app** = `message_deliveries` row (account holders only; shown in the club inbox), **mail**, **push**. "Delivery dedupe" = unique index `message_deliveries_system_event_uidx` on (event key, `ref_id`, channel, member or user) resp. the announcement indexes; mails are additionally keyed `notify.email:<deliveryId>`. Every mail honours `club_settings` sender name, reply-to and signature (club context only). Recipients are always resolved through the audience resolver unless stated: left, dormant (`ruhend`) and deceased members never receive anything, a shared address gets one mail, account-less members are reachable by their contact e-mail only (no in-app, no push), `includeGuardians` adds the guardians of matched wards.
+
+### A. Announcements (manual, club context)
+
+| # | Trigger (exact state or transition) | Key / job | Recipients | Class, channels | Dedupe | Suppressed when, setting | Text | Authored at, seen at |
+|---|---|---|---|---|---|---|---|---|
+| 1 | `POST /club-announcements/:id/send` on a `draft`/`scheduled` announcement without `publishAt` (claims `sending`, then `sent`) | `announcement` | Audience snapshot at send time (all, departments, role types, categories, members; guardians unless switched off) | O(announcements); channels chosen by the author (default in-app; mail, push optional; urgent + push adds mail) | Announcement unique indexes (announcement, member or user, channel); status claim `FOR UPDATE`; resend after crash is a no-op for existing rows | Opt-out of mail/push (checked at write time and again at send time); no address → `skipped_no_address`; withdrawn/cancelled/expired before the mail job runs → `skipped`; limits refuse the send, announcement stays draft (`ANNOUNCEMENT_MAX_PER_CLUB_DAY` 20, `..._PER_AUTHOR_HOUR` 10, `..._URGENT_PER_DAY` 3, `..._MAX_RECIPIENTS` 1000, confirmation from `ANNOUNCEMENT_CONFIRM_THRESHOLD` 50, duplicate window 10 min); department authors: own departments only, never urgent | Free text of the author; urgent: subject `[Dringend] ...` + banner; template `announcement`/`urgent` | Website `/mitteilungen` tab "Verfassen" (`announcements:write`, or `announcements:write_department`); not in the app. Seen: website `/mitteilungen` "Schwarzes Brett" + badge, app tab Mitteilungen + badge, mail. Push: backend ready, app has no registration yet |
+| 2 | `POST /club-announcements/:id/send` with `publishAt` → status `scheduled` → job at `publishAt` | `announcement.publish` → same send path as #1 | as #1 (snapshot at publish time) | as #1 | Job key `announcement.publish:<id>:<publishAt ms>` + as #1 | Stale job (rescheduled, cancelled, edited, no longer `scheduled`) is a no-op; author lost the right to address the audience → announcement `cancelled` + audit `send_denied`; limit or audience cap hit at run time → back to `draft`, nothing sent | as #1 | Website "Verfassen" (schedule). Seen as #1 |
+| 3 | `POST /club-announcements/:id/resend-failed` (status `sent`, not expired) | `notify.email` | Recipients whose mail delivery is `failed` | as #1 (mail only; failed push is not resent) | Job key `notify.email:<deliveryId>:retry:<ms>` | Opted out since → `skipped_optout`; withdrawn/expired → refused (409) | Same snapshot as the original | Website "Verlauf" tab, button "Fehlgeschlagene erneut senden". Seen: mail |
+
+### B. Event and meeting changes (author action, `notify` switch)
+
+| # | Trigger | Key / job | Recipients | Class, channels | Dedupe | Suppressed when, setting | Text | Authored at, seen at |
+|---|---|---|---|---|---|---|---|---|
+| 4 | `PATCH /events/:id` changes `startsAt`, `endsAt` or `locationId` of an event that is not cancelled | `event.changed` via job `notify_event_changed` | Attendees with RSVP `angemeldet` or `warteliste` (accounts); no guardians | O(events); in-app + mail | Job key `notify_event_changed:event:<id>:<updatedAt ms>`; delivery `ref_id` `<id>#<ms>` | Body `notify:false` (nothing sent, audit `event.notify_suppressed`); nobody has an RSVP; only title, description, category or capacity changed; event already cancelled; opt-out of mail | `Terminänderung: <title>`; old and new time (club time zone), old and new place | Website `/kalender` event modal, switch "Mitglieder benachrichtigen" (default on); app event edit has no switch and always announces (`calendars:write`). Seen: inbox, mail |
+| 5 | `POST /events/:id/cancel` on an uncancelled event, or `DELETE /events/:id` of an uncancelled event that has RSVP rows | `event.cancelled` via `notify_event_changed` | Attendees + waitlist; for a department calendar additionally all department members and their guardians | O(events); in-app + mail | as #4 (version = update time) | `notify:false` (`?notify=false` on DELETE); delete without RSVP rows sends nothing (not even to the department); already cancelled → 409; opt-out of mail | `Abgesagt: <title>`, "Geplant war", place, reason | Website `/kalender` dialog "Termin absagen" (reason, switch); app only has delete (no reason, no switch). Seen as #4 |
+| 6 | `PATCH /meetings/:id`: status is not `abgesagt`, `scheduledAt` is set and differs (also first date after a Terminfindung) | `meeting.changed` via `notify_event_changed` | All invitees, whatever their answer; no guardians | O(events); in-app + mail | Job key `notify_event_changed:meeting:<id>:<updatedAt ms>` | `notify:false` (API only, the Treffen UI has no switch); no invitees; `scheduledAt` cleared | `Treffen verschoben: <title>`, Bisher/Neu | Website `/kalender` tab "Treffen" (`meetings:write`). Seen as #4 |
+| 7 | `PATCH /meetings/:id` sets status `abgesagt` (from another status) | `meeting.cancelled` via `notify_event_changed` | as #6 | as #6 | as #6 | as #6 | `Abgesagt: <title>` | as #6 |
+
+### C. Reminders (automatic, worker)
+
+Recurring job `reminder-sweep` (every 15 min) → one `notify_reminder` job per due reminder, job key `reminder:<kind>:<ref>:<date>` (exactly once across sweeps and instances); the job calls the dispatcher with `ref_id` `<ref>#<date>`, class O(reminders), channels in-app + mail (**never push**). "Day" is the calendar day in `club_settings.timezone`; date-based kinds go out from `REMINDER_DIGEST_HOUR` (default 8) club time. All are authored automatically; the club switches them in website `/verein` → Einstellungen → "Erinnerungen und Automatik" (`members:write`).
+
+| # | Trigger | Key / job | Recipients | Suppressed when, setting | Text |
+|---|---|---|---|---|---|
+| 8 | Event not cancelled, `startsAt` in (now, now + lead] | `reminder.event`, key `...:event:<eventId>:<local start date>` | Attendees `angemeldet` (accounts, no guardians) | `reminder_event_enabled`, `reminder_event_lead_hours` (24); waitlist, no RSVP: nothing; moving the event to another day can remind again (new date in the key) | `Erinnerung: <title>`, "Du hast ... zugesagt", when |
+| 9 | Open loan with `dueAt`, from `reminder_loan_lead_days` (1) before the due day until the due day | `reminder.loan_due`, key `...:loan_due:<loanId>:<due date>` | The borrower (needs a `club_members` row) | `reminder_loan_enabled`, `reminder_loan_lead_days`; returned or no due date | `Rückgabe fällig: <item>` |
+| 10 | Open loan overdue (`isLoanOverdue`) on day 1, 4 and 7 after the due day (after downtime only the latest missed step), then never again | `reminder.loan_overdue`, key `...:<loanId>:<due date + step>` | The borrower | `reminder_loan_enabled` | `Rückgabe überfällig: <item>` |
+| 11 | Items with a maintenance interval whose due date is within `reminder_maintenance_lead_days` (7) or overdue; one digest per club and day | `reminder.maintenance`, key `...:maintenance:<clubId>:<date>` | Everyone with `inventory:write` (by role) | `reminder_maintenance_enabled`, `..._lead_days`; nothing due → nothing | `Wartung fällig: n Gegenstände`, list (max 15) |
+| 12 | Meeting `geplant` with a date, invitees with response `ausstehend`, from `reminder_rsvp_lead_days` (3) days before the meeting day | `reminder.rsvp`, key `...:rsvp:<meetingId>:<meeting date>` | Pending invitees only | `reminder_rsvp_enabled`, `reminder_rsvp_lead_days`; already answered → not included | `Bitte antworten: <title>` |
+
+Seen at: inbox (website `/mitteilungen`, app tab Mitteilungen), mail with unsubscribe link (category `reminders`).
+
+### D. Timed jobs that tell the leadership (automatic, worker)
+
+| # | Trigger | Key / job | Recipients | Class, channels | Dedupe | Suppressed when, setting | Text | Seen at |
+|---|---|---|---|---|---|---|---|---|
+| 13 | Hourly `age_transition_sweep` applied at least one move in a club (`club_settings.age_transition_auto`) | `reminder.age_transition` via `notify_reminder`, enqueued in the same transaction as the moves | Roles with `members:write`, no guardians | O(reminders); in-app + mail | Job key `reminder:age_transition:<clubId>:<date>:<first moved member id>` | `age_transition_auto = false` (default); no member older than the category's `max_age`; leadership mail opt-out. The moved members are **not** told | `Altersübergang: n Mitglieder verschoben`, counts per category move, no names | Inbox, mail |
+| 14 | `exit_effective_sweep` (hourly): member with stored non-left status and `left_at` = today (club zone, from digest hour, up to 3 missed days caught up) | `member.exit_effective` via `exit_effective_notify` | Roles with `members:write`, no guardians | O(reminders); in-app + mail | Job key `exit_effective:<clubMemberId>:<left_at>`; delivery `ref_id` `<id>#<left_at>` | Exit revoked or date moved before the job runs; exit booked directly (status already stored); audience too large (logged) | `Austritt wirksam: <name>` or `... – Rückgabe offen: <name>` + open loans and keys | Inbox, mail |
+
+### E. Decisions about a person's own request (mandatory, after commit, best effort via `notifySafely`)
+
+All: class **M**, in-app (if account) + mail, no preference applies, no unsubscribe link. A failing dispatch is logged (ids only) and never changes the HTTP result. In-app copies sit in the club inbox, which needs club access (`clubGuard`): a rejected applicant and a member whose exit is already effective cannot open it, so **mail is the only reliable channel** there.
+
+| # | Trigger | Key (`ref_id`) | Recipient | Dedupe | Text |
+|---|---|---|---|---|---|
+| 15 | `POST /club-applications/:id/approve` (new member, re-admission, child application) | `application.approved` (application id) | The applicant's account (parent for a child); fallback: contact e-mail of the created member | Delivery unique (key, application, channel, user) | `Dein Aufnahmeantrag bei <club> wurde angenommen` (child: `Aufnahme von <child> ... angenommen`), member number, button to the club |
+| 16 | `POST /club-applications/:id/reject` | `application.rejected` | as #15 | as #15 | `... wurde abgelehnt`; quotes only the applicant message, never the internal note |
+| 17 | Member files an exit request (`POST /club-exit-requests`, self-cancellation) | `exit.received` (request id) | The member: own account e-mail, else contact e-mail, else the guardians (only if the member has no own address) | Delivery unique | `Deine Austrittsanfrage bei <club> ist eingegangen`, earliest exit date after notice period |
+| 18 | Board approves a request or books a cancellation (`.../approve`, board path of `POST`) | `exit.accepted` | as #17 | Delivery unique | `Dein Austritt bei <club> wurde angenommen`, "wird zum DD.MM.YYYY wirksam" or "ist seit ... wirksam", note |
+| 19 | Board excludes a member (exclusion path) | `exit.exclusion` | as #17 | Delivery unique | `Ausschluss aus <club>`, reason |
+| 20 | `POST /club-exit-requests/:id/reject` | `exit.rejected` | as #17 | Delivery unique | `Deine Austrittsanfrage bei <club> wurde abgelehnt`, board note, "Du bleibst Mitglied" |
+
+Authored by: website `/verein` (Mitglieder tab for applications, Austritte tab for exit requests; `members:write`) and the app (applications screen for the board, own exit request for the member); the recipient does not compose anything. Seen: mail, plus inbox where reachable.
+
+### F. Invitations, registrations, account mails
+
+| # | Trigger | Key / job | Recipient | Class, channels | Dedupe | Suppressed when | Text | Authored at, seen at |
+|---|---|---|---|---|---|---|---|---|
+| 21 | `POST /club-members/:id/invite` or `/invite/resend` (member has no account; 20/h/user) | `member_invite.created` (invite id), sent **inline** | The invited address (account-less member) | M; mail only; link wiped from the delivery row after sending | Delivery unique per invite id; every resend is a new invite | A failed mail does not block: response `emailSent:false`, board can resend | `Einladung von <club> zu MyVerein`, link with expiry date | Website `/verein` member form, section account (`members:write`). Seen: mail → `/einladung` |
+| 22 | `POST /club-registrations/:id/submit` (draft or needs_info → pending) | `club_registration.received` | The applicant | M; mail only; platform context (no club signature) | None at delivery level (recipient has neither user nor member id, so the unique index does not apply); once per submit through the status transition | Best effort, failure only logged | `Dein Antrag zur Vereinsgründung ist eingegangen` | Website/app club founding. Seen: mail |
+| 23 | Same submit, at most once per hour per registration | `club_registration.review-notify` | Each address in `CLUB_REVIEW_NOTIFY_EMAIL` | M; mail only | as #22 | `CLUB_REVIEW_NOTIFY_EMAIL` unset → warning in the log, nobody notified | `Neuer Vereinsantrag: <club>` | Seen: mail (reviewers) |
+| 24 | Platform admin requests info (`.../request-info`) | `club_registration.needs-info` | The applicant | M; mail only | as #22 | Applicant not found → logged | `Rückfrage zu deinem Vereinsantrag`, note | Admin `/club-registrations`. Seen: mail |
+| 25 | Platform admin rejects a registration | `club_registration.rejected` | The applicant | M; mail only | as #22 | as #24 | `Dein Vereinsantrag wurde abgelehnt`, note | as #24 |
+| 26 | Platform admin approves a registration (club created) | `club_registration.approved` | The applicant | M; mail only | as #22 | as #24 | `Dein Verein ist freigeschaltet`, slug | as #24 |
+| 27 | Sign-up with unverified e-mail, sign-in attempt while unverified, or admin `POST /admin/send-verification-email` (Better Auth `emailVerification`, `requireEmailVerification`) | direct `sendEmail`, not via the dispatcher | The account's e-mail | Account security (mandatory, outside the preference system); mail only | None (Better Auth); no `message_deliveries` row, no retry, no proof | Dev without SMTP/Resend: logged instead of sent | `E-Mail-Adresse bestätigen` | Website/app sign-up; admin dashboard "Resend verification email" |
+| 28 | Password reset requested (Better Auth `sendResetPassword`) | direct `sendEmail` | The account's e-mail | as #27 | as #27 | as #27 | `Passwort zurücksetzen` | "Forgot password" on website/app |
+| 29 | A pending member invite is accepted (`acceptInvite`, after the lock is released, fire and forget, 10 s timeout) | direct `sendEmail` ("account linked") | The inviter, only if still an active member with `members:write` and a verified e-mail | as #27; mail only, no names beyond member and club | None; not retried | No `createdBy`; inviter is the accepting user, a guest, left, unverified or lacks `members:write` | `<member> hat ein Konto bei MyVerein verknüpft` | Seen: mail only |
+
+### G. Platform notifications ("bell", table `notification`, not club messages)
+
+| # | Trigger | Key / job | Recipient | Channels | Dedupe | Text | Authored at, seen at |
+|---|---|---|---|---|---|---|---|
+| 30 | A user is created (Better Auth `databaseHooks.user.create.after`) | `translationKey notification.welcome` (kind `system`) | The new user | Bell only, no mail, no push | One insert per user creation | `Willkommen bei MyVerein!` (client-rendered in the viewer's language; an admin override in `notification_template` replaces it; admin page `/notifications/templates`) | Automatic. Seen: website/app bell (`/notifications`), separate from the club inbox |
+| 31 | Platform admin creates a notification (`POST /admin/notifications`, `targetUserId` or broadcast to everyone) | kind `admin` | One user or all users | Bell only, no mail, no push | None | Pre-translated `translations` (de and en required), `deletable` flag | Admin `/notifications/new`. Seen: bell |
+
+**31 triggers.** Delivery infrastructure (not triggers, send what the rows above queued): `notify.email` (one mail per delivery, retry with backoff, throttle `MAIL_SEND_RATE`), `notify.push` and `notify.push_receipts` (Expo, payload without text or personal data), recurring `notify.reap_dead_deliveries` (every 10 min: `queued`/`sending` rows whose job is `dead` become `failed`). Jobs that run but send nothing: `form_cleanup_sweep`, `retention_sweep` (tasks `jobs-retention`, `inbox-retention`, `delivery-retention`, `rate-limit-events`).
+
+### States that deliberately send nothing
+
+Event created; event edit that changes only title, description, category or capacity; change of an already cancelled event; delete of an event without RSVP rows; `notify:false` (audited); RSVP, cancel of an RSVP (audit only); meeting created, invitees added, answer given, meeting deleted; announcement draft, cancelled, withdrawn (no retraction notice, the entry just disappears from the inbox); member status changes, role and guardian-link changes, loan created or returned, key handed out, profile edits, imports; direct exits (booked by the board) at the effective day; dormant, left and deceased members as audience; empty audience; mandatory classes never get an unsubscribe link; account-less members get no in-app and no push.
+
+### Gaps (states that arguably should notify but do not)
+
+1. **New application and new exit request:** the leadership is not told (only a badge in `/verein` when opened); the applicant gets no receipt (the exit requester does, #17).
+2. **Meetings:** no message when someone is invited or a Terminfindung starts; deleting a meeting tells nobody (events with RSVPs do).
+3. **Waitlist promotion** (`event_attendee.promote`) is audit-only; the promoted person is not told.
+4. **Push reaches nobody yet:** the app has no token registration (M2) and no deep links (M3). Even then only announcements can choose push; event changes, reminders and decisions never use it.
+5. **Guardians:** event changes (non-cancellation) and all reminders skip guardians; children without an account get no reminders; an exit decision goes to the guardians only if the child has no own address.
+6. **Deadlines:** no reminder for a pending invitation or an expiring invitation link (the reserved class `invitation_deadlines` sends nothing yet); no expiry reminders for qualifications (Wave 11/12 and a follow-up).
+7. **Loans and keys:** handing out, returning or extending is silent; only the due and overdue reminders exist.
+8. **Account mails** are direct and outside the dispatcher (no retry, no proof, not in the inbox); there is no mail for a changed password, changed e-mail, 2FA change or deleted account.
+9. **Registrations:** without `CLUB_REVIEW_NOTIFY_EMAIL` nobody is told; platform admins get no bell entry for new registrations. Registration mails have no delivery-level dedupe.
+10. **Age transition:** the affected members (and guardians) are not told; leadership summaries of #13/#14 are category `reminders`, so the mail can be switched off by the very people who must act.
+11. **Author UI:** the app edits and deletes events without a "notify" switch and cannot cancel with a reason; the Treffen UI has no "notify" switch; there is no audience preview before cancelling (open item).
+12. **Locale and scope:** all texts are German; preferences are per account, not per club.
 
 ## API reference
 
