@@ -8,6 +8,7 @@ import { auth } from "./auth/auth.js";
 import { closeDatabase } from "./db/client.js";
 import { AppError, toAppError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
+import { registerAllJobs, startJobWorker, workerEnabled } from "./lib/jobs/index.js";
 import { startFormDraftSweeper } from "./lib/form-sweeper.js";
 import { startMediaSweeper } from "./lib/media.js";
 import { type LoggerEnv, requestId } from "./middleware/request-id.js";
@@ -128,6 +129,10 @@ const stopMediaSweeper = startMediaSweeper();
 // Abandoned application drafts (and their files) are removed after FORM_DRAFT_TTL_DAYS of inactivity.
 const stopFormDraftSweeper = startFormDraftSweeper();
 
+// DB job queue worker (ADR-005): in-process unless WORKER_ENABLED=false (then run dist/worker.js separately).
+registerAllJobs();
+const jobWorker = workerEnabled() ? startJobWorker() : null;
+
 const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
   logger.info(`Server is running on http://${hostname}:${info.port}`);
 });
@@ -137,6 +142,7 @@ async function shutdown(signal: string) {
   stopMediaSweeper();
   stopFormDraftSweeper();
   server.close(async () => {
+    await jobWorker?.stop();
     await closeDatabase();
     process.exit(0);
   });
