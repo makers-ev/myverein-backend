@@ -10,6 +10,7 @@ import { auditLog } from "../db/schema/audit-log.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
 import { MEETING_TYPES, meetingAttendance, meetingInvitees, meetingResolutions, meetings } from "../db/schema/meetings.js";
 import { computeAvailability, type AvailabilityInput } from "../lib/availability-match.js";
+import { clubTimezone, composeEventMessage, locationName, meetingAudience, scheduleEventChanged } from "../lib/event-notify.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
@@ -134,7 +135,12 @@ const updateMeetingSchema = z.object({
   agenda: z.string().nullable().optional(),
   status: z.string().min(1).optional(),
   minutes: z.string().nullable().optional(),
+  /** `false` saves a reschedule / cancellation without telling the invitees (audited). */
+  notify: z.boolean().optional(),
 });
+
+/** `status` value that marks a cancelled meeting (free-text column; the invitees are told when it is set). */
+const CANCELLED_MEETING_STATUS = "abgesagt";
 
 meetingRoutes.patch(
   "/:id",
@@ -148,8 +154,8 @@ meetingRoutes.patch(
       throw new ForbiddenError("Missing meetings:write permission");
     }
     const id = c.req.param("id");
-    const body = c.req.valid("json");
-    await loadClubMeeting(c, id);
+    const { notify: notifyFlag, ...body } = c.req.valid("json");
+    const existing = await loadClubMeeting(c, id);
 
     const [row] = await db
       .update(meetings)
@@ -161,7 +167,30 @@ meetingRoutes.patch(
       .where(eq(meetings.id, id))
       .returning();
 
-    await db.insert(auditLog).values({ eventType: "meeting.update", subjectId: id, payload: { clubId, changes: body } });
+    await db.insert(auditLog).values({ eventType: "meeting.update", subjectId: id, payload: { clubId, changes: body, ...(notifyFlag === false ? { notify: false } : {}) } });
+
+    // A moved or cancelled meeting is announced to the invitees (B10).
+    const cancelled = row!.status === CANCELLED_MEETING_STATUS && existing.status !== CANCELLED_MEETING_STATUS;
+    const moved = existing.status !== CANCELLED_MEETING_STATUS && row!.scheduledAt !== null && row!.scheduledAt.getTime() !== existing.scheduledAt?.getTime();
+    if (cancelled || moved) {
+      try {
+        const audience = await meetingAudience(clubId, id);
+        const timezone = await clubTimezone(clubId);
+        const place = await locationName(clubId, row!.locationId);
+        const message = composeEventMessage({
+          noun: "Treffen",
+          title: row!.title,
+          timezone,
+          before: { startsAt: existing.scheduledAt, endsAt: null, place },
+          after: { startsAt: row!.scheduledAt, endsAt: null, place },
+          cancelled,
+        });
+        const payload = { clubId, kind: "meeting" as const, refId: id, version: row!.updatedAt.getTime(), cancelled, ...message, audience: audience ?? { memberIds: [], includeGuardians: false } };
+        if (notifyFlag === false || audience !== null) await scheduleEventChanged(payload, { suppressed: notifyFlag === false, actor: c.get("user").id });
+      } catch {
+        // Best effort: the meeting itself is already saved.
+      }
+    }
 
     return c.json({ data: row });
   },

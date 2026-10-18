@@ -10,6 +10,7 @@ export interface IcsEventInput {
   description?: string | null;
   startsAt: Date;
   endsAt?: Date | null;
+  cancelled?: boolean;
 }
 
 /** Backslash-escapes `,`/`;` and turns a real newline into a literal `\n`, per RFC 5545 §3.3.11. */
@@ -31,6 +32,7 @@ export function buildIcs(events: IcsEventInput[]): string {
     lines.push(`DTSTAMP:${now}`);
     lines.push(`DTSTART:${formatIcsDateTime(event.startsAt)}`);
     if (event.endsAt) lines.push(`DTEND:${formatIcsDateTime(event.endsAt)}`);
+    if (event.cancelled) lines.push("STATUS:CANCELLED");
     lines.push(`SUMMARY:${escapeIcsText(event.title)}`);
     if (event.description) lines.push(`DESCRIPTION:${escapeIcsText(event.description)}`);
     lines.push("END:VEVENT");
