@@ -1,0 +1,95 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+import { z } from "zod";
+
+import { NOTIFICATION_CATEGORIES, type NotificationCategory } from "./types.js";
+import { setUnsubscribeUrlProvider, type UnsubscribeSubject } from "./unsubscribe.js";
+
+/**
+ * Signed unsubscribe tokens (Wave 9 B9, ADR-006). A token is `base64url(json).base64url(hmac)`; the HMAC-SHA256 covers the
+ * payload (person + category + club + expiry) under a namespace prefix, is compared in constant time and the token stops
+ * working at its expiry. The subject is the account (`u`, `notification_preferences.user_id`) or, for members without an
+ * account, the `club_members` row (`m`). Tokens can be used several times: unsubscribing is idempotent, so a reuse changes nothing.
+ * The key is `UNSUBSCRIBE_SECRET` (falls back to `BETTER_AUTH_SECRET`).
+ */
+
+const DEFAULT_TTL_DAYS = 180;
+const MAX_TOKEN_LENGTH = 700;
+
+function secret(): string {
+  const value = process.env.UNSUBSCRIBE_SECRET || process.env.BETTER_AUTH_SECRET;
+  if (!value) throw new Error("UNSUBSCRIBE_SECRET or BETTER_AUTH_SECRET must be set to sign unsubscribe tokens");
+  return value;
+}
+
+/** Token validity in milliseconds (`UNSUBSCRIBE_TOKEN_TTL_DAYS`, default 180, clamped to 1..730 days). */
+export function unsubscribeTtlMs(): number {
+  const n = Number(process.env.UNSUBSCRIBE_TOKEN_TTL_DAYS);
+  const days = Number.isFinite(n) && n > 0 ? n : DEFAULT_TTL_DAYS;
+  return Math.min(Math.max(days, 1), 730) * 24 * 60 * 60 * 1000;
+}
+
+export interface UnsubscribePayload {
+  /** `u` = `user.id`, `m` = `club_members.id`. */
+  s: "u" | "m";
+  /** Subject id. */
+  p: string;
+  c: NotificationCategory;
+  /** Club the mail came from (NULL: platform context). Display only; the preference itself is not club-specific. */
+  k: string | null;
+  /** Expiry, epoch milliseconds. */
+  e: number;
+}
+
+const payloadSchema = z.object({
+  s: z.enum(["u", "m"]),
+  p: z.string().min(1).max(100),
+  c: z.enum(NOTIFICATION_CATEGORIES),
+  k: z.string().min(1).max(100).nullable(),
+  e: z.number().int().positive(),
+});
+
+const sign = (encoded: string): Buffer => createHmac("sha256", secret()).update(`unsubscribe:v1:${encoded}`).digest();
+
+export function createUnsubscribeToken(subject: UnsubscribeSubject, now = Date.now(), ttlMs = unsubscribeTtlMs()): string | null {
+  if (!(NOTIFICATION_CATEGORIES as readonly string[]).includes(subject.category)) return null; // mandatory classes have no link
+  const kind = subject.userId ? "u" : subject.clubMemberId ? "m" : null;
+  if (!kind) return null;
+  const payload: UnsubscribePayload = { s: kind, p: (kind === "u" ? subject.userId : subject.clubMemberId)!, c: subject.category as NotificationCategory, k: subject.clubId, e: now + ttlMs };
+  const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${encoded}.${sign(encoded).toString("base64url")}`;
+}
+
+/** The payload of a genuine, unexpired token, else NULL. Callers must not tell the reasons apart (no oracle). Never throws on garbage. */
+export function verifyUnsubscribeToken(token: string, now = Date.now()): UnsubscribePayload | null {
+  if (typeof token !== "string" || token.length > MAX_TOKEN_LENGTH) return null;
+  const parts = token.split(".");
+  if (parts.length !== 2) return null;
+  const [encoded, sig] = parts as [string, string];
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded) || !/^[A-Za-z0-9_-]{43}$/.test(sig)) return null;
+  const expected = sign(encoded);
+  const given = Buffer.from(sig, "base64url");
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
+  try {
+    const parsed = payloadSchema.safeParse(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")));
+    if (!parsed.success || parsed.data.e <= now) return null;
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+
+function backendBase(): string {
+  return (process.env.BACKEND_URL ?? "http://localhost:3000").replace(/\/+$/, "");
+}
+
+/** `https://<BACKEND_URL>/unsubscribe/<token>`: POST = RFC 8058 one-click, GET = confirmation. NULL if the subject cannot unsubscribe. */
+export function unsubscribeUrlForSubject(subject: UnsubscribeSubject): string | null {
+  const token = createUnsubscribeToken(subject);
+  return token ? `${backendBase()}/unsubscribe/${token}` : null;
+}
+
+/** Wires the token links into `notify` (called by `registerAllJobs`, i.e. by both entry points). */
+export function installUnsubscribeProvider(): void {
+  setUnsubscribeUrlProvider(unsubscribeUrlForSubject);
+}

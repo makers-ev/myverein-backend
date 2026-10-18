@@ -19,6 +19,7 @@ import { adminClubRoutes } from "./admin-clubs.js";
 import { clubStatsRoutes } from "./club-stats.js";
 import { clubExitRequestRoutes } from "./club-exit-requests.js";
 import { clubAnnouncementRoutes, clubInboxRoutes } from "./club-announcements.js";
+import { notificationPreferenceRoutes, unsubscribeRoutes } from "./notification-preferences.js";
 import { clubSettingsRoutes } from "./club-settings.js";
 import { adminEmailRoutes } from "./admin-emails.js";
 import { adminNotificationRoutes } from "./admin-notifications.js";
@@ -68,6 +69,8 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/club-exit-requests", "clubExitRequestRoutes", clubExitRequestRoutes],
   ["/club-announcements", "clubAnnouncementRoutes", clubAnnouncementRoutes],
   ["/club-inbox", "clubInboxRoutes", clubInboxRoutes],
+  ["/notification-preferences", "notificationPreferenceRoutes", notificationPreferenceRoutes],
+  ["/unsubscribe", "unsubscribeRoutes", unsubscribeRoutes],
   ["/notifications", "notificationRoutes", notificationRoutes],
   ["/admin/notifications", "adminNotificationRoutes", adminNotificationRoutes],
   ["/admin/notification-templates", "adminNotificationTemplateRoutes", adminNotificationTemplateRoutes],
@@ -139,6 +142,8 @@ const SELF_SERVICE: Record<string, string> = {
   "DELETE /form-submissions/:id": "discarding the own draft (ownership checked, foreign ids are 404; only status draft)",
   "POST /form-submissions/:id/submit": "submitting the own draft (ownership checked)",
   "POST /form-submissions/:id/withdraw": "withdrawing the own application (ownership checked)",
+  "PUT /notification-preferences": "own notification preferences (user-level; mandatory classes are refused with 422)",
+  "POST /unsubscribe/:token": "public one-click unsubscribe (RFC 8058): no session, authorized by the HMAC-signed token itself; invalid/expired tokens are 404",
   "POST /club-inbox/:id/read": "own in-app message (bound to user and club; foreign ids are 404)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
 };

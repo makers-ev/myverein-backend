@@ -7,6 +7,7 @@ export { handleEmailDelivery } from "./email-job.js";
 export { getMailSender, mailSendRate, resetMailThrottle, setMailSender, waitForMailSlot, type MailSender } from "./mailer.js";
 export { renderNotifyEmail, textToHtml, type RenderMailInput } from "./templates.js";
 export { setUnsubscribeUrlProvider, unsubscribeHeaders, unsubscribeUrlFor, type UnsubscribeSubject, type UnsubscribeUrlProvider } from "./unsubscribe.js";
+export { createUnsubscribeToken, installUnsubscribeProvider, unsubscribeUrlForSubject, verifyUnsubscribeToken, type UnsubscribePayload } from "./unsubscribe-token.js";
 export * from "./types.js";
 
 /** Registers the channel job handlers of the dispatcher (called from `registerAllJobs`). */

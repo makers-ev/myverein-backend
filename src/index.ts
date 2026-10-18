@@ -41,6 +41,7 @@ import { memberFieldRoutes } from "./routes/member-fields.js";
 import { meetingRoutes } from "./routes/meetings.js";
 import { myClubRoutes } from "./routes/my-clubs.js";
 import { internalStatsRoutes } from "./routes/internal-stats.js";
+import { notificationPreferenceRoutes, unsubscribeRoutes } from "./routes/notification-preferences.js";
 import { notificationRoutes } from "./routes/notifications.js";
 import { trustedOrigins } from "./lib/trusted-origins.js";
 
@@ -105,6 +106,8 @@ app.route("/club-settings", clubSettingsRoutes);
 app.route("/club-exit-requests", clubExitRequestRoutes);
 app.route("/club-announcements", clubAnnouncementRoutes);
 app.route("/club-inbox", clubInboxRoutes);
+app.route("/notification-preferences", notificationPreferenceRoutes);
+app.route("/unsubscribe", unsubscribeRoutes);
 app.route("/club-applications", clubApplicationRoutes);
 app.route("/forms", formRoutes);
 app.route("/member-fields", memberFieldRoutes);

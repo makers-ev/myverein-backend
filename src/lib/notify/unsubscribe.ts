@@ -1,6 +1,6 @@
 /**
- * Stub interface for the abmelde link (B9 installs the HMAC token implementation). Until then no link and no
- * `List-Unsubscribe` header is produced, which is the safe default.
+ * Seam for the unsubscribe link. `installUnsubscribeProvider` (unsubscribe-token.ts) installs the HMAC token links; without
+ * a provider no link and no `List-Unsubscribe` header is produced, which is the safe default.
  */
 export interface UnsubscribeSubject {
   clubId: string | null;

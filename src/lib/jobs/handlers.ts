@@ -1,5 +1,6 @@
 import { handlePublishAnnouncement, PUBLISH_JOB_TYPE } from "../announcements.js";
 import { registerNotifyJobs } from "../notify/index.js";
+import { installUnsubscribeProvider } from "../notify/unsubscribe-token.js";
 import { registerJob } from "./registry.js";
 
 /**
@@ -13,5 +14,6 @@ export function registerAllJobs(): void {
   if (registered) return;
   registered = true;
   registerNotifyJobs();
+  installUnsubscribeProvider();
   registerJob(PUBLISH_JOB_TYPE, handlePublishAnnouncement);
 }
