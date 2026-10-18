@@ -33,9 +33,21 @@ export function envInt(name: string, fallback: number, min = 1, max = 1_000_000)
   return Number.isInteger(n) && n >= min && n <= max ? n : fallback;
 }
 
-/** Salted hash of the client IP (first `x-forwarded-for` entry): the table never stores a raw address. */
+/**
+ * Client IP from `x-forwarded-for`. The first entry is client-controlled (a proxy only APPENDS), so it is never used:
+ * `TRUSTED_PROXY_HOPS` (default 1) names how many entries our own proxies appended; the client address is the entry that
+ * many positions from the right (1 = the last entry). Fewer entries than hops: the first one. No header: `unknown`.
+ */
+export function clientIp(c: Context): string {
+  const entries = (c.req.header("x-forwarded-for") ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+  if (entries.length === 0) return "unknown";
+  const hops = envInt("TRUSTED_PROXY_HOPS", 1, 1, 10);
+  return entries[Math.max(0, entries.length - hops)]!;
+}
+
+/** Salted hash of the client IP (`clientIp`): the table never stores a raw address. */
 export function ipSubject(c: Context): string {
-  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  const forwarded = clientIp(c);
   const secret = process.env.UNSUBSCRIBE_SECRET || process.env.BETTER_AUTH_SECRET || "rate-limit";
   return createHmac("sha256", secret).update(`rate-limit-ip:${forwarded}`).digest("hex").slice(0, 32);
 }

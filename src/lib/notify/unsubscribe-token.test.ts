@@ -1,15 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { createUnsubscribeToken, unsubscribeUrlForSubject, verifyUnsubscribeToken } from "./unsubscribe-token.js";
+import { createUnsubscribeToken, installUnsubscribeProvider, unsubscribeUrlForSubject, verifyUnsubscribeToken } from "./unsubscribe-token.js";
 
 const subject = { clubId: "club-1", userId: "user-1", clubMemberId: "11111111-1111-4111-8111-111111111111", category: "announcements" };
 
 describe("unsubscribe tokens (B9)", () => {
-  const original = { secret: process.env.UNSUBSCRIBE_SECRET, url: process.env.BACKEND_URL, ttl: process.env.UNSUBSCRIBE_TOKEN_TTL_DAYS };
+  const original = { node: process.env.NODE_ENV, auth: process.env.BETTER_AUTH_SECRET, secret: process.env.UNSUBSCRIBE_SECRET, url: process.env.BACKEND_URL, ttl: process.env.UNSUBSCRIBE_TOKEN_TTL_DAYS };
   beforeEach(() => {
     process.env.UNSUBSCRIBE_SECRET = "unit-test-secret-aaaaaaaaaaaaaaaaaaaaaaaa";
   });
   afterEach(() => {
+    process.env.NODE_ENV = original.node;
+    if (original.auth === undefined) delete process.env.BETTER_AUTH_SECRET;
+    else process.env.BETTER_AUTH_SECRET = original.auth;
     for (const [key, value] of [["UNSUBSCRIBE_SECRET", original.secret], ["BACKEND_URL", original.url], ["UNSUBSCRIBE_TOKEN_TTL_DAYS", original.ttl]] as const) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -21,6 +24,18 @@ describe("unsubscribe tokens (B9)", () => {
     expect(verifyUnsubscribeToken(token)).toMatchObject({ s: "u", p: "user-1", c: "announcements", k: "club-1" });
     const accountless = createUnsubscribeToken({ ...subject, userId: null })!;
     expect(verifyUnsubscribeToken(accountless)).toMatchObject({ s: "m", p: subject.clubMemberId });
+  });
+
+  it("requires a dedicated UNSUBSCRIBE_SECRET in production, with no BETTER_AUTH_SECRET fallback (fallback stays for dev/test)", () => {
+    delete process.env.UNSUBSCRIBE_SECRET;
+    process.env.BETTER_AUTH_SECRET = "session-secret-bbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    process.env.NODE_ENV = "development";
+    expect(createUnsubscribeToken(subject)).not.toBeNull();
+    process.env.NODE_ENV = "production";
+    expect(() => createUnsubscribeToken(subject)).toThrow(/UNSUBSCRIBE_SECRET/);
+    expect(() => installUnsubscribeProvider()).toThrow(/UNSUBSCRIBE_SECRET/);
+    process.env.UNSUBSCRIBE_SECRET = "unit-test-secret-aaaaaaaaaaaaaaaaaaaaaaaa";
+    expect(createUnsubscribeToken(subject)).not.toBeNull();
   });
 
   it("refuses mandatory classes and subjects without a person", () => {

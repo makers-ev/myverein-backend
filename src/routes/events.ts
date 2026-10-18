@@ -14,6 +14,7 @@ import { buildIcs } from "../lib/ics.js";
 import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { logger } from "../lib/logger.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -90,8 +91,10 @@ async function announceEventChange(args: {
     const payload = { clubId, kind: "event" as const, refId: before.id, version: after.updatedAt.getTime(), cancelled: args.cancelled, ...message, audience: audience ?? { memberIds: [], includeGuardians: false } };
     if (!args.suppress && audience === null) return;
     await scheduleEventChanged(payload, { suppressed: args.suppress, actor: args.actor });
-  } catch {
-    // Best effort: the change itself is already committed.
+  } catch (err) {
+    // Best effort: the change itself is already committed. Class and event id only (no message text, no addresses).
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ eventId: args.before.id, errName: e?.name, errCode: e?.code }, "[events] could not announce event change");
   }
 }
 

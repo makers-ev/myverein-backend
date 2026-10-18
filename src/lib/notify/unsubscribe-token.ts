@@ -10,14 +10,18 @@ import { setUnsubscribeUrlProvider, type UnsubscribeSubject } from "./unsubscrib
  * payload (person + category + club + expiry) under a namespace prefix, is compared in constant time and the token stops
  * working at its expiry. The subject is the account (`u`, `notification_preferences.user_id`) or, for members without an
  * account, the `club_members` row (`m`). Tokens can be used several times: unsubscribing is idempotent, so a reuse changes nothing.
- * The key is `UNSUBSCRIBE_SECRET` (falls back to `BETTER_AUTH_SECRET`).
+ * The key is `UNSUBSCRIBE_SECRET` (outside production it falls back to `BETTER_AUTH_SECRET`; production refuses to start without it).
  */
 
 const DEFAULT_TTL_DAYS = 180;
 const MAX_TOKEN_LENGTH = 700;
 
+/** Production needs a dedicated key (no sharing with session signing); elsewhere `BETTER_AUTH_SECRET` is a convenient fallback. */
 function secret(): string {
-  const value = process.env.UNSUBSCRIBE_SECRET || process.env.BETTER_AUTH_SECRET;
+  const dedicated = process.env.UNSUBSCRIBE_SECRET;
+  if (dedicated) return dedicated;
+  if (process.env.NODE_ENV === "production") throw new Error("UNSUBSCRIBE_SECRET must be set in production");
+  const value = process.env.BETTER_AUTH_SECRET;
   if (!value) throw new Error("UNSUBSCRIBE_SECRET or BETTER_AUTH_SECRET must be set to sign unsubscribe tokens");
   return value;
 }
@@ -79,17 +83,19 @@ export function verifyUnsubscribeToken(token: string, now = Date.now()): Unsubsc
   }
 }
 
-function backendBase(): string {
+/** Base of the real links (`BACKEND_URL`); the mail preview uses the same base so it shows what recipients get. */
+export function unsubscribeBaseUrl(): string {
   return (process.env.BACKEND_URL ?? "http://localhost:3000").replace(/\/+$/, "");
 }
 
 /** `https://<BACKEND_URL>/unsubscribe/<token>`: POST = RFC 8058 one-click, GET = confirmation. NULL if the subject cannot unsubscribe. */
 export function unsubscribeUrlForSubject(subject: UnsubscribeSubject): string | null {
   const token = createUnsubscribeToken(subject);
-  return token ? `${backendBase()}/unsubscribe/${token}` : null;
+  return token ? `${unsubscribeBaseUrl()}/unsubscribe/${token}` : null;
 }
 
 /** Wires the token links into `notify` (called by `registerAllJobs`, i.e. by both entry points). */
 export function installUnsubscribeProvider(): void {
+  secret(); // fail fast at startup (production without UNSUBSCRIBE_SECRET) instead of silently sending mails without links
   setUnsubscribeUrlProvider(unsubscribeUrlForSubject);
 }

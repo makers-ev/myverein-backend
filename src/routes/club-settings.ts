@@ -10,8 +10,8 @@ import { auditLog } from "../db/schema/audit-log.js";
 import { clubSettings, NOTICE_MODES } from "../db/schema/club-settings.js";
 import { normalizeEmail } from "../lib/audience.js";
 import { formatFrom } from "../lib/email.js";
-import { LOGO_CID, SITE_URL } from "../lib/emailTemplate.js";
-import { NOTIFY_TEMPLATES, renderNotifyEmail } from "../lib/notify/index.js";
+import { LOGO_CID } from "../lib/emailTemplate.js";
+import { NOTIFY_TEMPLATES, renderNotifyEmail, unsubscribeBaseUrl } from "../lib/notify/index.js";
 import { cleanText } from "../lib/text-policy.js";
 import { isValidTimezone } from "../lib/club-time.js";
 import { loadClubSettings } from "../lib/club-settings.js";
@@ -178,7 +178,7 @@ clubSettingsRoutes.post("/mail-preview", previewLimit, zValidator("json", previe
     ctaLabel: null,
     ctaUrl: null,
     signature,
-    unsubscribeUrl: input.template === "decision" ? null : `${SITE_URL}/unsubscribe/beispiel`,
+    unsubscribeUrl: input.template === "decision" ? null : `${unsubscribeBaseUrl()}/unsubscribe/beispiel`,
   });
   const from = formatFrom(process.env.EMAIL_FROM ?? "", senderName?.trim() || clubName);
   c.header("Cache-Control", "private, no-store");
