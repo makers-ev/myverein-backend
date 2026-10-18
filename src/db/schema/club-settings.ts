@@ -15,6 +15,22 @@ export const clubSettings = pgTable("club_settings", {
   noticeMode: text("notice_mode"),
   memberNumberPrefix: text("member_number_prefix"),
   allowSelfLoans: boolean("allow_self_loans").notNull().default(true),
+  // Club mail template (Wave 9). The sender ADDRESS stays EMAIL_FROM (SPF/DKIM), only name/signature/reply-to are per club.
+  senderName: text("sender_name"),
+  signature: text("signature"),
+  replyTo: text("reply_to"),
+  // IANA zone the club's time-based logic (reminders, sweeps) is computed in; instants are stored as UTC.
+  timezone: text("timezone").notNull().default("Europe/Berlin"),
+  reminderEventEnabled: boolean("reminder_event_enabled").notNull().default(true),
+  reminderEventLeadHours: integer("reminder_event_lead_hours").notNull().default(24),
+  reminderLoanEnabled: boolean("reminder_loan_enabled").notNull().default(true),
+  reminderLoanLeadDays: integer("reminder_loan_lead_days").notNull().default(1),
+  reminderMaintenanceEnabled: boolean("reminder_maintenance_enabled").notNull().default(true),
+  reminderMaintenanceLeadDays: integer("reminder_maintenance_lead_days").notNull().default(7),
+  reminderRsvpEnabled: boolean("reminder_rsvp_enabled").notNull().default(true),
+  reminderRsvpLeadDays: integer("reminder_rsvp_lead_days").notNull().default(3),
+  // Apply the age transition (member categories) automatically instead of only suggesting it. Default off.
+  ageTransitionAuto: boolean("age_transition_auto").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
