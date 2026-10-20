@@ -17,6 +17,7 @@ import {
   sendRegistrationReceivedMail,
   sendRegistrationRejectedMail,
   sendRegistrationReviewNotifyMail,
+  transitionOf,
 } from "./club-registration-notify.js";
 import { EMAIL_JOB_TYPE } from "./notify/index.js";
 
@@ -175,5 +176,22 @@ describe("no CLUB_REVIEW_NOTIFY_EMAIL (G9)", () => {
     const admin = await mkUser("admin-env", { role: "admin" });
     await sendRegistrationReviewNotifyMail(applicant, "TV Env", `${prefix}-env-${randomUUID()}`, T);
     expect(await bell(admin)).toHaveLength(0);
+  });
+});
+
+describe("transition timestamp (idempotency of the ref_id)", () => {
+  it("uses the committed DB timestamp and never invents a 'now' (a missing one fails closed and is logged)", () => {
+    const stamped = new Date(T);
+    expect(transitionOf("reg-1", stamped, "reviewedAt")).toBe(stamped);
+    const error = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    try {
+      expect(transitionOf("reg-2", null, "submittedAt")).toBeNull();
+      expect(transitionOf("reg-3", undefined, "reviewedAt")).toBeNull();
+      expect(transitionOf("reg-4", new Date(Number.NaN), "reviewedAt")).toBeNull();
+      expect(error).toHaveBeenCalledTimes(3);
+      expect(JSON.stringify(error.mock.calls)).not.toContain("@"); // ids and field names only, no address
+    } finally {
+      error.mockRestore();
+    }
   });
 });

@@ -16,6 +16,7 @@ import {
   sendRegistrationApprovedMail,
   sendRegistrationNeedsInfoMail,
   sendRegistrationRejectedMail,
+  transitionOf,
 } from "../lib/club-registration-notify.js";
 import { documentResponse, findDocument, isUuid, recordAdminDocumentAccess, registerKey, registerKeyMatches, shapeRegistration, shapeRegistrations } from "../lib/club-registrations.js";
 import { assertValidClubSlug, slugifyClubName, uniqueClubSlug } from "../lib/club-slug.js";
@@ -206,8 +207,9 @@ async function decideWithNote(c: { get: (k: "user") => { id: string } }, id: str
     logger.error({ err, registrationId: decided.id }, "[admin-club-registrations] could not load applicant for notification mail");
     return null;
   });
-  if (applicant) {
-    inBackground(status === "needs_info" ? sendRegistrationNeedsInfoMail(applicant, decided.clubName, note, decided.id, decided.reviewedAt ?? new Date()) : sendRegistrationRejectedMail(applicant, decided.clubName, note, decided.id, decided.reviewedAt ?? new Date()));
+  const transition = transitionOf(decided.id, decided.reviewedAt, "reviewedAt");
+  if (applicant && transition) {
+    inBackground(status === "needs_info" ? sendRegistrationNeedsInfoMail(applicant, decided.clubName, note, decided.id, transition) : sendRegistrationRejectedMail(applicant, decided.clubName, note, decided.id, transition));
   }
   return decided;
 }
@@ -332,7 +334,8 @@ adminClubRegistrationRoutes.post("/:id/approve", async (c) => {
     logger.error({ err, registrationId: result.registration.id }, "[admin-club-registrations] could not load applicant for approval mail");
     return null;
   });
-  if (applicant) inBackground(sendRegistrationApprovedMail(applicant, result.club.name, result.club.slug, result.registration.id, result.registration.reviewedAt ?? new Date()));
+  const approvedAt = transitionOf(result.registration.id, result.registration.reviewedAt, "reviewedAt");
+  if (applicant && approvedAt) inBackground(sendRegistrationApprovedMail(applicant, result.club.name, result.club.slug, result.registration.id, approvedAt));
 
   return c.json({ data: { registration: await shapeRegistration(result.registration), club: result.club } });
 });

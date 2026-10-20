@@ -37,6 +37,17 @@ interface Applicant {
 export type RegistrationTransition = Date | number;
 const stamp = (transition: RegistrationTransition): number => (transition instanceof Date ? transition.getTime() : transition);
 
+/**
+ * The transition moment for a registration mail, taken from the committed row (`submittedAt` / `reviewedAt` set by the
+ * transaction). There is deliberately NO `?? new Date()` fallback: a made-up "now" would differ on every call, break the
+ * idempotency of `ref_id` and could double-send. A missing timestamp is a data error: fail closed (no mail), log it.
+ */
+export function transitionOf(registrationId: string, stampedAt: Date | null | undefined, field: "submittedAt" | "reviewedAt"): Date | null {
+  if (stampedAt instanceof Date && !Number.isNaN(stampedAt.getTime())) return stampedAt;
+  logger.error({ registrationId, field }, "[club-registration-mail] the registration row has no transition timestamp -- mail skipped (would not be idempotent)");
+  return null;
+}
+
 type RegistrationMailKind = "received" | "review-notify" | "needs-info" | "rejected" | "approved";
 
 function queue(kind: RegistrationMailKind, registrationId: string, transition: RegistrationTransition, to: Applicant | string, title: string, html: string, toName: string | null): Promise<unknown> {
