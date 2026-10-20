@@ -296,6 +296,29 @@ describe("inventory-items routes", () => {
       expect(res.status).toBe(409);
     });
 
+    it("rejects an oversized PATCH body (Content-Length and streamed without it) before reading it", async () => {
+      const big = JSON.stringify({ dueAt: "x".repeat(2000) });
+      const declared = await app.request(`/inventory-items/${itemId}/loans/${loan1Id}?clubId=${clubAId}`, {
+        method: "PATCH",
+        headers: { cookie: cookieBoard, "content-type": "application/json", "content-length": String(big.length) },
+        body: big,
+      });
+      expect(declared.status).toBe(422);
+      const streamed = await app.request(`/inventory-items/${itemId}/loans/${loan1Id}?clubId=${clubAId}`, {
+        method: "PATCH",
+        headers: { cookie: cookieBoard, "content-type": "application/json" },
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(big));
+            controller.close();
+          },
+        }),
+        // @ts-expect-error Node fetch requires duplex for streamed bodies
+        duplex: "half",
+      });
+      expect(streamed.status).toBe(422);
+    });
+
     it("returns 404 for a loan id that doesn't belong to this item", async () => {
       const otherItemRes = await app.request(`/inventory-items?clubId=${clubAId}`, {
         method: "POST",

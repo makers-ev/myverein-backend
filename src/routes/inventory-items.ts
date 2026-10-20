@@ -1,6 +1,7 @@
 import { zValidator } from "@hono/zod-validator";
 import { and, eq, isNull } from "drizzle-orm";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
@@ -240,7 +241,16 @@ inventoryItemRoutes.post(
 /** Body of `PATCH /:id/loans/:loanId`: empty = return the loan, `{ dueAt }` = extend the return date (needs `inventory:write`). */
 const extendLoanSchema = z.object({ dueAt: z.string().datetime({ offset: true }).optional() }).strict();
 
-inventoryItemRoutes.patch("/:id/loans/:loanId", async (c) => {
+// The size cap is enforced by the middleware (Content-Length up front, counted while streaming when absent or untrue), so an
+// oversized body is rejected before it is buffered, not after `c.req.text()` already read all of it.
+const loanPatchBodyLimit = bodyLimit({
+  maxSize: 1024,
+  onError: () => {
+    throw new ValidationError("Request body too large");
+  },
+});
+
+inventoryItemRoutes.patch("/:id/loans/:loanId", loanPatchBodyLimit, async (c) => {
   const clubId = c.get("clubId");
   const roleTypes = c.get("clubRoleTypes");
   const membership = c.get("membership");
@@ -254,7 +264,6 @@ inventoryItemRoutes.patch("/:id/loans/:loanId", async (c) => {
 
   // Optional tiny JSON body: only `{ dueAt }` (extension). No body = the classic "mark returned".
   const raw = await c.req.text();
-  if (raw.length > 1024) throw new ValidationError("Request body too large");
   let extension: { dueAt: string } | null = null;
   if (raw.trim() !== "") {
     let parsed: unknown;
