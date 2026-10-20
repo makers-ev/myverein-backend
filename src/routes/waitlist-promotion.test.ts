@@ -88,7 +88,7 @@ describe("waitlist promotion notification (G3)", () => {
     const event = await newEvent();
     await fillAndFree(event.id, "m2");
     const rows = await deliveries(event.id);
-    expect(rows.map((r) => `${r.channel}:${r.clubMemberId}`).sort()).toEqual([`email:${people.m2!.clubMemberId}`, `in_app:${people.m2!.clubMemberId}`].sort());
+    expect(rows.map((r) => `${r.channel}:${r.clubMemberId}`).sort()).toEqual([`email:${people.m2!.clubMemberId}`, `in_app:${people.m2!.clubMemberId}`, `push:${people.m2!.clubMemberId}`].sort());
     expect(rows[0]!.content).toMatchObject({ class: "optional", category: "events", title: "Du bist nachgerückt: Training" });
     expect(await db.select().from(auditLog).where(and(eq(auditLog.subjectId, event.id), eq(auditLog.eventType, "event_attendee.promote")))).toHaveLength(1);
   });

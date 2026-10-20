@@ -6,7 +6,7 @@ import { DELIVERY_REAPER_INTERVAL_MS, DELIVERY_REAPER_JOB_TYPE, EMAIL_JOB_TYPE, 
 export { notify, notifyInBackground, notifySafely } from "./dispatcher.js";
 export { handleEmailDelivery, reapDeadDeliveries } from "./email-job.js";
 export { getMailSender, mailSendRate, resetMailThrottle, setMailSender, waitForMailSlot, type MailSender } from "./mailer.js";
-export { handlePushDelivery, handlePushReceipts, pushDataFor, setPushFetch, type PushFetch } from "./push.js";
+export { genericPushText, handlePushDelivery, handlePushReceipts, pushDataFor, setPushFetch, type PushFetch } from "./push.js";
 export { renderNotifyEmail, textToHtml, type RenderMailInput } from "./templates.js";
 export { setUnsubscribeUrlProvider, unsubscribeHeaders, unsubscribeUrlFor, type UnsubscribeSubject, type UnsubscribeUrlProvider } from "./unsubscribe.js";
 export { createUnsubscribeToken, installUnsubscribeProvider, unsubscribeBaseUrl, unsubscribeUrlForSubject, verifyUnsubscribeToken, type UnsubscribePayload } from "./unsubscribe-token.js";

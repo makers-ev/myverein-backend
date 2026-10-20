@@ -17,6 +17,9 @@ import type { NotifyRecipient } from "./notify/types.js";
  * committed; a failing dispatch never changes the HTTP result. Left members are addressed explicitly (the audience resolver
  * deliberately skips them), so the recipient is resolved here.
  *
+ * Decisions (approved, rejected, exit accepted/rejected/exclusion) also go out as push (G4): mandatory + push always carries the
+ * in-app copy and the mail too, the payload is the generic inbox deep link without ids of the person's request.
+ *
  * Intake notices (G1): a new admission application or exit request tells the people who review them (`members:write`, class
  * `optional`, category `reminders`, in-app + mail, switch `club_settings.notify_board_requests`); the applicant gets a
  * mandatory receipt on application intake (the exit receipt is `exit.received`).
@@ -104,7 +107,7 @@ export async function notifyApplicationApproved(d: ApplicationDecision): Promise
       ctaLabel: "Zum Verein",
       ctaUrl: SITE_URL,
     },
-    channels: ["in_app", "email"],
+    channels: ["in_app", "email", "push"],
   });
 }
 
@@ -121,7 +124,7 @@ export async function notifyApplicationRejected(d: ApplicationDecision): Promise
       title: d.childName ? `Aufnahme von ${d.childName} bei ${clubName} abgelehnt` : `Dein Aufnahmeantrag bei ${clubName} wurde abgelehnt`,
       body: `${d.childName ? `Der Aufnahmeantrag für ${d.childName}` : "Dein Aufnahmeantrag"} bei ${clubName} wurde leider abgelehnt.${message}`,
     },
-    channels: ["in_app", "email"],
+    channels: ["in_app", "email", "push"],
   });
 }
 
@@ -175,7 +178,7 @@ export async function notifyExitDecision(d: ExitDecision): Promise<void> {
     refId: d.requestId,
     recipients: await recipientsForClubMember(d.clubMemberId),
     content: { title, body },
-    channels: ["in_app", "email"],
+    channels: d.kind === "received" ? ["in_app", "email"] : ["in_app", "email", "push"],
   });
 }
 

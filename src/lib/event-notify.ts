@@ -194,7 +194,7 @@ export async function notifyWaitlistPromoted(args: { clubId: string; event: Pick
         category: "events",
         template: "announcement",
       },
-      channels: ["in_app", "email"],
+      channels: ["in_app", "email", "push"],
     });
   } catch (err) {
     const e = err as { name?: string; code?: unknown } | undefined;
@@ -262,7 +262,8 @@ export async function handleEventChanged(job: JobContext): Promise<void> {
       refId: `${p.refId}#${p.discriminator ?? p.version ?? ""}`,
       audience: p.audience,
       content: { title: p.title, body: p.body, category: "events", template: "announcement" },
-      channels: ["in_app", "email"],
+      // Push on top (never alone): the app opens the event / the calendar.
+      channels: ["in_app", "email", "push"],
     });
   } catch (err) {
     // Too many recipients cannot succeed on a retry; everything else (database, ...) is retried by the queue.

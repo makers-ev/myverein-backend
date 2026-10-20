@@ -41,6 +41,9 @@ export const REMINDER_SWEEP_JOB_TYPE = "reminder-sweep";
 export const REMINDER_SWEEP_INTERVAL_MS = 15 * 60 * 1000;
 export const REMINDER_JOB_TYPE = "notify_reminder";
 
+/** Reminders that also go out as push (personal, time-critical); board digests (maintenance, age transition, expiry notices) stay in-app + mail. */
+export const PUSH_REMINDER_KINDS: readonly ReminderKind[] = ["event", "rsvp", "loan_due", "loan_overdue"];
+
 /** Days after the due date on which an overdue loan is reminded again (limited repeats: three reminders, then silence). */
 export const LOAN_OVERDUE_STEPS = [1, 4, 7] as const;
 const MAX_LIST = 15;
@@ -416,7 +419,7 @@ export async function handleReminder(job: JobContext): Promise<void> {
       refId: `${p.refId}#${p.date ?? ""}`,
       audience: p.audience,
       content: { title: p.title, body: p.body, template: "reminder", category: "reminders" },
-      channels: ["in_app", "email"],
+      channels: PUSH_REMINDER_KINDS.includes(p.kind) ? ["in_app", "email", "push"] : ["in_app", "email"],
     });
   } catch (err) {
     if (err instanceof AudienceLimitError) {

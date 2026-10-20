@@ -7,7 +7,7 @@ import { logger } from "../logger.js";
 import { enqueue } from "../jobs/queue.js";
 import { handleEmailDelivery } from "./email-job.js";
 import { PUSH_DELIVERIES_PER_JOB } from "./push.js";
-import { EMAIL_JOB_TYPE, PUSH_JOB_TYPE, type DeliveryContent, type NotificationCategory, type NotifyInput, type NotifyRecipient, type NotifyResult, type NotifyTemplate } from "./types.js";
+import { EMAIL_JOB_TYPE, NOTIFICATION_CATEGORIES, PUSH_JOB_TYPE, type DeliveryContent, type NotificationCategory, type NotifyInput, type NotifyRecipient, type NotifyResult, type NotifyTemplate } from "./types.js";
 
 /**
  * Central delivery layer (Wave 9 B6, ADR-006). `notify` writes one `message_deliveries` row per recipient and channel
@@ -70,17 +70,31 @@ function targetsFromRecipients(recipients: NotifyRecipient[]): Target[] {
   });
 }
 
-/** `${channel}:u:${userId}` / `${channel}:m:${clubMemberId}` for every explicitly disabled combination (default is enabled). */
-async function loadOptOuts(category: string, targets: Target[]): Promise<Set<string>> {
+/**
+ * `${channel}:u:${userId}` / `${channel}:m:${clubMemberId}` for every explicitly disabled combination (default is enabled).
+ * With `pushOnlyIfAllOff` (mandatory messages) only the push channel counts, and only for people who switched push off in EVERY
+ * category: a clear "no push at all" is honoured even for decisions, while the in-app copy and the mail stay mandatory.
+ */
+async function loadOptOuts(category: string, targets: Target[], pushOnlyIfAllOff = false): Promise<Set<string>> {
   const userIds = targets.map((t) => t.userId).filter((v): v is string => v !== null);
   const memberIds = targets.map((t) => t.clubMemberId).filter((v): v is string => v !== null);
   if (userIds.length + memberIds.length === 0) return new Set();
   const subject = [userIds.length ? inArray(notificationPreferences.userId, userIds) : undefined, memberIds.length ? inArray(notificationPreferences.clubMemberId, memberIds) : undefined];
   const rows = await db
-    .select({ userId: notificationPreferences.userId, clubMemberId: notificationPreferences.clubMemberId, channel: notificationPreferences.channel })
+    .select({ userId: notificationPreferences.userId, clubMemberId: notificationPreferences.clubMemberId, channel: notificationPreferences.channel, category: notificationPreferences.category })
     .from(notificationPreferences)
-    .where(and(eq(notificationPreferences.category, category), eq(notificationPreferences.enabled, false), or(...subject)));
+    .where(and(pushOnlyIfAllOff ? eq(notificationPreferences.channel, "push") : eq(notificationPreferences.category, category), eq(notificationPreferences.enabled, false), or(...subject)));
   const out = new Set<string>();
+  if (pushOnlyIfAllOff) {
+    const seen = new Map<string, Set<string>>();
+    for (const r of rows) {
+      for (const key of [r.userId ? `u:${r.userId}` : null, r.clubMemberId ? `m:${r.clubMemberId}` : null]) {
+        if (key) seen.set(key, (seen.get(key) ?? new Set()).add(r.category));
+      }
+    }
+    for (const [key, categories] of seen) if (NOTIFICATION_CATEGORIES.every((c) => categories.has(c))) out.add(`push:${key}`);
+    return out;
+  }
   for (const r of rows) {
     if (r.userId) out.add(`${r.channel}:u:${r.userId}`);
     if (r.clubMemberId) out.add(`${r.channel}:m:${r.clubMemberId}`);
@@ -102,12 +116,12 @@ async function loadPushUsers(targets: Target[]): Promise<Set<string>> {
   return out;
 }
 
-/** Push never stands alone: the in-app copy is the source of truth, and an urgent message always has the e-mail fallback (ADR-006, O1). */
+/** Push never stands alone: the in-app copy is the source of truth, and an urgent or mandatory message always has the e-mail fallback (ADR-006, O1). */
 function effectiveChannels(input: NotifyInput, template: NotifyTemplate): CommunicationChannel[] {
   const channels = new Set<CommunicationChannel>(input.channels);
   if (channels.has("push")) {
     channels.add("in_app");
-    if (input.content.urgent === true || template === "urgent") channels.add("email");
+    if (input.class === "mandatory" || input.content.urgent === true || template === "urgent") channels.add("email");
   }
   return [...channels];
 }
@@ -132,8 +146,13 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
   const wantsInApp = channels.includes("in_app");
   const wantsEmail = channels.includes("email");
   const wantsPush = channels.includes("push");
-  // Mandatory messages ignore preferences entirely; optional ones are filtered per channel (in-app is the source of truth and stays on).
-  const optOuts = input.class === "optional" && (wantsEmail || wantsPush) ? await loadOptOuts(category, targets) : new Set<string>();
+  // Mandatory messages ignore preferences (except "push off everywhere"); optional ones are filtered per channel (in-app is the source of truth and stays on).
+  const optOuts =
+    input.class === "optional" && (wantsEmail || wantsPush)
+      ? await loadOptOuts(category, targets)
+      : input.class === "mandatory" && wantsPush
+        ? await loadOptOuts(category, targets, true)
+        : new Set<string>();
 
   const pushUsers = wantsPush ? await loadPushUsers(targets) : new Set<string>();
 

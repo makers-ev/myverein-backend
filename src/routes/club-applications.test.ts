@@ -199,7 +199,7 @@ describe("club-applications decision queue", () => {
 
     // B11: the applicant is told about the decision (mandatory, in-app + e-mail, with the member number)
     const approvedMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, idOne), eq(messageDeliveries.eventKey, "application.approved")));
-    expect(approvedMsgs.map((m) => m.channel).sort()).toEqual(["email", "in_app"]);
+    expect(approvedMsgs.map((m) => m.channel).sort()).toEqual(["email", "in_app", "push"]); // G4: push on top (no device token here)
     expect(approvedMsgs.every((m) => m.userId === one.userId && (m.content as { class: string }).class === "mandatory")).toBe(true);
     expect((approvedMsgs[0]!.content as { body: string }).body).toContain(bodyOne.data.membership.memberNumber);
     expect(approvedMsgs.find((m) => m.channel === "email")).toMatchObject({ status: "queued", address: expect.stringContaining("@") });
@@ -235,7 +235,7 @@ describe("club-applications decision queue", () => {
     expect(data.application.decidedBy).toBe(boardAMemberId);
     expect(data.application.decidedAt).toBeTruthy();
     const rejectedMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, id), eq(messageDeliveries.eventKey, "application.rejected")));
-    expect(rejectedMsgs.map((m) => m.channel).sort()).toEqual(["email", "in_app"]);
+    expect(rejectedMsgs.map((m) => m.channel).sort()).toEqual(["email", "in_app", "push"]);
     expect((rejectedMsgs[0]!.content as { class: string }).class).toBe("mandatory");
 
     const memberRow = await db.query.member.findFirst({

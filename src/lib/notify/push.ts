@@ -77,14 +77,15 @@ export function pushDataFor(eventKey: string | null, refId: string | null, annou
   // `refId` may carry a `#discriminator` suffix (idempotency, see dispatcher); the deep link only wants the id.
   refId = refId ? refId.split("#")[0]! : refId;
   const data: Record<string, string | boolean> = { type: "message", urgent };
-  if (clubId) data.clubId = clubId;
+  // Decisions about a person's own request: the app opens the inbox (type `message`); the person may no longer have access to the club, so no club id.
+  if (clubId && !key.startsWith("application.") && !key.startsWith("exit.")) data.clubId = clubId;
   if (announcementId || key === "announcement") {
     data.type = "announcement";
     if (announcementId) data.announcementId = announcementId;
-  } else if (key.startsWith("event.") || key === "reminder.event" || key === "reminder.rsvp") {
+  } else if (key.startsWith("event.") || key === "reminder.event") {
     data.type = "event";
     if (refId) data.eventId = refId;
-  } else if (key.startsWith("meeting.")) {
+  } else if (key.startsWith("meeting.") || key === "reminder.rsvp") {
     data.type = "meeting";
     if (refId) data.meetingId = refId;
   } else if (key.startsWith("reminder.")) {
@@ -99,6 +100,24 @@ const GENERIC_TEXT: Record<DeliveryContent["template"], string> = {
   reminder: "Neue Erinnerung",
   decision: "Neuigkeit zu deinem Antrag",
 };
+
+/** Generic push text (no titles, names or dates): by event key first, then by layout template. */
+const GENERIC_TEXT_BY_KEY: Record<string, string> = {
+  "event.changed": "Terminänderung",
+  "event.cancelled": "Termin abgesagt",
+  "event.promoted": "Du bist nachgerückt",
+  "meeting.changed": "Treffen verschoben",
+  "meeting.cancelled": "Treffen abgesagt",
+  "meeting.invited": "Einladung zu einem Treffen",
+  "reminder.event": "Erinnerung an einen Termin",
+  "reminder.rsvp": "Bitte antworten",
+  "reminder.loan_due": "Rückgabe fällig",
+  "reminder.loan_overdue": "Rückgabe überfällig",
+};
+
+export function genericPushText(eventKey: string | null, template: DeliveryContent["template"]): string {
+  return (eventKey ? GENERIC_TEXT_BY_KEY[eventKey] : undefined) ?? GENERIC_TEXT[template] ?? GENERIC_TEXT.announcement;
+}
 
 interface PendingDelivery {
   id: string;
@@ -157,7 +176,7 @@ export async function handlePushDelivery(job: JobContext): Promise<void> {
         message: {
           to: t.token,
           title: (row.clubId ? clubName.get(row.clubId) : null) ?? "MyVerein",
-          body: GENERIC_TEXT[template] ?? GENERIC_TEXT.announcement,
+          body: genericPushText(row.eventKey, template),
           data: pushDataFor(row.eventKey, row.refId, row.announcementId, row.clubId, urgent),
           priority: urgent ? "high" : "default",
           channelId: urgent ? "urgent" : "default",

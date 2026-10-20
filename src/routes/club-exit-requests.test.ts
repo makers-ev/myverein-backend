@@ -316,7 +316,7 @@ describe("exit workflow (B6)", () => {
       expect(approved.data).toMatchObject({ status: "approved", effectiveOn: earliest, decisionNote: "Schade, alles Gute", decidedBy: founder.memberId });
       expect(approved.transition).toMatchObject({ kind: "scheduled_exit", toStatus: "ausgetreten", effectiveOn: earliest });
       const accepted = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, created.id), eq(messageDeliveries.eventKey, "exit.accepted")));
-      expect(accepted.map((m) => m.channel).sort()).toEqual(["email", "in_app"]);
+      expect(accepted.map((m) => m.channel).sort()).toEqual(["email", "in_app", "push"]); // G4: decisions also go out as push
       expect((accepted[0]!.content as { body: string }).body).toContain(`${earliest.slice(8, 10)}.${earliest.slice(5, 7)}.${earliest.slice(0, 4)}`);
       const row = await stored(m1.clubMemberId);
       expect(row).toMatchObject({ status: "aktiv", leftAt: earliest, exitReason: "Umzug nach Hamburg" });
@@ -361,7 +361,7 @@ describe("exit workflow (B6)", () => {
       expect(res.status).toBe(200);
       expect((await data(res)).status).toBe("rejected");
       const rejectedMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, req.id), eq(messageDeliveries.eventKey, "exit.rejected")));
-      expect(rejectedMsgs).toHaveLength(2);
+      expect(rejectedMsgs).toHaveLength(3); // in-app, mail and push
       expect((rejectedMsgs[0]!.content as { body: string }).body).toContain("Bitte erst Schluessel abgeben");
       expect(await stored(m.clubMemberId)).toMatchObject({ status: "aktiv", leftAt: null });
       expect((await call(m, "/club-members/me")).status).toBe(200);
@@ -506,7 +506,7 @@ describe("exit workflow (B6)", () => {
       expect(out.data).toMatchObject({ kind: "exclusion", status: "approved", effectiveOn: today(), earliestEffectiveOn: null });
       expect(out.transition).toMatchObject({ kind: "status", toStatus: "ausgeschlossen" });
       const exclusionMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, out.data.id), eq(messageDeliveries.eventKey, "exit.exclusion")));
-      expect(exclusionMsgs.map((m) => m.channel).sort()).toEqual(["email", "in_app"]);
+      expect(exclusionMsgs.map((m) => m.channel).sort()).toEqual(["email", "in_app", "push"]);
       expect((exclusionMsgs[0]!.content as { body: string }).body).toContain("Vereinsschaedigung");
       expect(await stored(victim.clubMemberId)).toMatchObject({ status: "ausgeschlossen", leftAt: today(), exitReason: "Vereinsschaedigung" });
       expect((await call(victim, "/club-members/me")).status).toBe(404);
