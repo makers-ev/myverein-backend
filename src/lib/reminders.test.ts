@@ -186,7 +186,7 @@ describe("reminder-sweep", () => {
     expect(await count("loan_overdue")).toBe(3);
 
     const [overdue] = (await reminderJobs("loan_overdue", loan!.id)).sort((x, y) => String(x.dedupeKey).localeCompare(String(y.dedupeKey)));
-    expect((overdue!.payload as ReminderPayload).audience).toEqual({ memberIds: [clubMemberOf.a], includeGuardians: false });
+    expect((overdue!.payload as ReminderPayload).audience).toEqual({ memberIds: [clubMemberOf.a], includeGuardians: true });
     await deliver(overdue!);
     expect(await inAppTo(loan!.id)).toEqual([clubMemberOf.a]);
   });
@@ -249,7 +249,7 @@ describe("reminder-sweep", () => {
     expect((await sweep("2026-03-29T06:00:00Z")).scheduled).toBe(0); // switch day, same key
     const [job] = await reminderJobs("rsvp", meeting!.id);
     expect(job!.dedupeKey).toBe(reminderDedupeKey("rsvp", meeting!.id, "2026-03-30"));
-    expect((job!.payload as ReminderPayload).audience).toEqual({ memberIds: [clubMemberOf.a], includeGuardians: false });
+    expect((job!.payload as ReminderPayload).audience).toEqual({ memberIds: [clubMemberOf.a], includeGuardians: true });
     await deliver(job!);
     expect(await inAppTo(meeting!.id)).toEqual([clubMemberOf.a]);
   });

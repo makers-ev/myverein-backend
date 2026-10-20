@@ -87,8 +87,8 @@ export async function clubMemberIdsOf(clubId: string, accountMemberIds: string[]
 }
 
 /**
- * Audience of an event change: everyone who answered with yes or sits on the waitlist; on a cancellation additionally the
- * members of the calendar's department and their guardians.
+ * Audience of an event change: everyone who answered with yes or sits on the waitlist, plus their guardians (any change);
+ * on a cancellation additionally the members of the calendar's department and their guardians.
  */
 export async function eventAudience(clubId: string, eventId: string, departmentId: string | null, cancelled: boolean): Promise<AnnouncementAudience | null> {
   const rows = await db
@@ -98,7 +98,8 @@ export async function eventAudience(clubId: string, eventId: string, departmentI
   const memberIds = await clubMemberIdsOf(clubId, rows.map((r) => r.memberId));
   const departmentIds = cancelled && departmentId ? [departmentId] : [];
   if (memberIds.length === 0 && departmentIds.length === 0) return null;
-  return { ...(departmentIds.length ? { departmentIds } : {}), ...(memberIds.length ? { memberIds } : {}), includeGuardians: cancelled && departmentIds.length > 0 };
+  // Guardians are told about every change: the child's attendance is also the parent's schedule.
+  return { ...(departmentIds.length ? { departmentIds } : {}), ...(memberIds.length ? { memberIds } : {}), includeGuardians: true };
 }
 
 export async function meetingAudience(clubId: string, meetingId: string): Promise<AnnouncementAudience | null> {

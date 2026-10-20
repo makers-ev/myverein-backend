@@ -25,7 +25,9 @@ import { notify } from "./notify/dispatcher.js";
  * due per club (switches and lead times from `club_settings`, calendar days in the club time zone) and schedules one
  * `notify_reminder` job per reminder under the dedupe key `reminder:<kind>:<ref>:<date>`. The key makes every reminder
  * exactly-once: later sweeps, a double run or several instances find the key taken. The `notify_reminder` job hands the
- * prepared message to the dispatcher (class `optional`, category `reminders`, so members can switch it off).
+ * prepared message to the dispatcher (class `optional`, category `reminders`, so members can switch it off). The reminders
+ * about a person's own commitments (event, loan, RSVP) also reach the guardians of that person (`includeGuardians`), so the
+ * texts are written neutrally ("liegt eine Zusage vor"), not "du".
  * Time-of-day: events use an absolute lead (hours before the start); everything date based (loans, maintenance, RSVP)
  * goes out from `REMINDER_DIGEST_HOUR` (default 8) club time on.
  */
@@ -159,8 +161,8 @@ export async function collectEventReminders(clubs: Map<string, ReminderClub>, no
       date: localDate(ev.startsAt, club.timezone),
       clubId: ev.clubId,
       title: `Erinnerung: ${ev.title}`,
-      body: `Du hast für „${ev.title}“ zugesagt.\nWann: ${formatWhen(ev.startsAt, club.timezone, ev.endsAt)}`,
-      audience: { memberIds, includeGuardians: false },
+      body: `Für „${ev.title}“ liegt eine Zusage vor.\nWann: ${formatWhen(ev.startsAt, club.timezone, ev.endsAt)}`,
+      audience: { memberIds, includeGuardians: true },
     });
   }
   return out;
@@ -190,10 +192,10 @@ export async function collectLoanReminders(clubs: Map<string, ReminderClub>, now
     if (!memberId) continue;
     // `isLoanOverdue` (inventory-status.ts) is the single definition of "overdue"; the repeat schedule counts calendar days.
     const overdueDays = isLoanOverdue(row, now) ? daysBetween(due, today) : 0;
-    const audience: AnnouncementAudience = { memberIds: [memberId], includeGuardians: false };
+    const audience: AnnouncementAudience = { memberIds: [memberId], includeGuardians: true };
     if (overdueDays <= 0) {
       const when = today === due ? "heute" : `am ${dateDe(due)}`;
-      out.push({ kind: "loan_due", refId: row.id, date: due, clubId: row.clubId, title: `Rückgabe fällig: ${row.itemName}`, body: `Bitte gib „${row.itemName}“ ${when} zurück.`, audience });
+      out.push({ kind: "loan_due", refId: row.id, date: due, clubId: row.clubId, title: `Rückgabe fällig: ${row.itemName}`, body: `„${row.itemName}“ ist ${when} zurückzugeben.`, audience });
       continue;
     }
     const step = [...LOAN_OVERDUE_STEPS].reverse().find((s) => s <= overdueDays);
@@ -274,8 +276,8 @@ export async function collectRsvpReminders(clubs: Map<string, ReminderClub>, now
       date: day,
       clubId: row.clubId,
       title: `Bitte antworten: ${row.title}`,
-      body: `Für das Treffen „${row.title}“ fehlt noch deine Antwort.\nWann: ${formatWhen(row.scheduledAt, club.timezone)}\nBitte sag zu oder ab.`,
-      audience: { memberIds, includeGuardians: false },
+      body: `Für das Treffen „${row.title}“ fehlt noch eine Antwort.\nWann: ${formatWhen(row.scheduledAt, club.timezone)}\nBitte sag zu oder ab.`,
+      audience: { memberIds, includeGuardians: true },
     });
   }
   return out;

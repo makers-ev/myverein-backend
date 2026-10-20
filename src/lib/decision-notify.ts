@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { member, organization, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
@@ -33,12 +33,14 @@ async function clubNameOf(clubId: string): Promise<string> {
 }
 
 /**
- * The person affected by a decision: their account (e-mail of the account, in-app) or, without an account, the contact
- * e-mail of the member record; a member without any own address falls back to the guardians (children).
+ * The people a decision about a club member reaches: the member themselves (account e-mail and in-app copy, or the contact
+ * e-mail of an account-less member) AND the guardians of the member (children), also when the child has an own address.
+ * Everybody is listed once: by account, by club member and by e-mail address (a family address gets one mail, the dispatcher
+ * covers the second person with the first one's mail).
  */
 export async function recipientsForClubMember(clubMemberId: string): Promise<NotifyRecipient[]> {
   const [row] = await db
-    .select({ id: clubMembers.id, displayName: clubMembers.displayName, firstName: clubMembers.firstName, contactEmail: clubMembers.contactEmail, accountMemberId: clubMembers.memberId, userId: member.userId, userEmail: user.email })
+    .select({ id: clubMembers.id, clubId: clubMembers.clubId, displayName: clubMembers.displayName, firstName: clubMembers.firstName, contactEmail: clubMembers.contactEmail, accountMemberId: clubMembers.memberId, userId: member.userId, userEmail: user.email })
     .from(clubMembers)
     .leftJoin(member, eq(member.id, clubMembers.memberId))
     .leftJoin(user, eq(user.id, member.userId))
@@ -46,15 +48,21 @@ export async function recipientsForClubMember(clubMemberId: string): Promise<Not
   if (!row) return [];
   const name = row.firstName?.trim() || row.displayName;
   const own = row.userEmail ?? row.contactEmail;
-  if (own || row.userId) return [{ clubMemberId: row.id, userId: row.userId, name, email: own }];
+  const out: NotifyRecipient[] = own || row.userId ? [{ clubMemberId: row.id, userId: row.userId, name, email: own }] : [];
   const guardians = await db
     .select({ clubMemberId: clubMembers.id, userId: member.userId, name: user.name, email: user.email })
     .from(guardianLinks)
     .innerJoin(member, eq(member.id, guardianLinks.guardianMemberId))
     .innerJoin(user, eq(user.id, member.userId))
-    .leftJoin(clubMembers, eq(clubMembers.memberId, member.id))
+    .leftJoin(clubMembers, and(eq(clubMembers.memberId, member.id), eq(clubMembers.clubId, row.clubId)))
     .where(eq(guardianLinks.wardClubMemberId, clubMemberId));
-  return guardians.map((g) => ({ clubMemberId: g.clubMemberId, userId: g.userId, name: g.name, email: g.email }));
+  const seenUsers = new Set(out.map((r) => r.userId).filter((v): v is string => !!v));
+  for (const g of guardians) {
+    if (seenUsers.has(g.userId)) continue;
+    seenUsers.add(g.userId);
+    out.push({ clubMemberId: g.clubMemberId, userId: g.userId, name: g.name, email: g.email });
+  }
+  return out;
 }
 
 async function recipientForUser(userId: string, fallbackClubMemberId: string | null): Promise<NotifyRecipient[]> {
