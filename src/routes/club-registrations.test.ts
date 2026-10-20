@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { rm, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, like } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -510,10 +510,17 @@ describe("club registrations (Wave 6)", () => {
       const who = await applicant("mailfail");
       const reg = await submitted(who, `Mailfehler Verein ${suffix}`);
       await vi.waitFor(async () => {
-        const rows = await db.select().from(messageDeliveries).where(eq(messageDeliveries.refId, reg.id));
-        expect(rows.some((r) => r.eventKey === "club_registration.received" && r.clubId === null && r.status === "queued")).toBe(true);
+        const rows = await db.select().from(messageDeliveries).where(like(messageDeliveries.refId, `${reg.id}#%`));
+        const received = rows.filter((r) => r.eventKey === "club_registration.received" && r.clubId === null && r.status === "queued");
+        expect(received).toHaveLength(1);
+        // delivery-level dedupe: the ref_id carries the transition, the row the applicant's account
+        expect(received[0]!.userId).not.toBeNull();
       });
       expect((await decide(reg.id, "approve")).status).toBe(200);
+      await vi.waitFor(async () => {
+        const rows = await db.select().from(messageDeliveries).where(and(like(messageDeliveries.refId, `${reg.id}#%`), eq(messageDeliveries.eventKey, "club_registration.approved")));
+        expect(rows).toHaveLength(1);
+      });
     });
   });
 

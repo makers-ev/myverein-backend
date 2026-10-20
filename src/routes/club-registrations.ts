@@ -396,12 +396,14 @@ clubRegistrationRoutes.post("/:id/submit", submitLimiter, async (c) => {
   });
 
   // After commit, best effort: a failing mail must never undo the status change.
-  const applicant = { name: currentUser.name, email: currentUser.email };
-  inBackground(sendRegistrationReceivedMail(applicant, submitted.row.clubName, submitted.row.id));
+  const applicant = { name: currentUser.name, email: currentUser.email, userId: currentUser.id };
+  // The transition stamp (`submittedAt`) keys the mails: a re-submit after `needs_info` is a new transition, a repeated call is not.
+  const transition = submitted.row.submittedAt ?? new Date();
+  inBackground(sendRegistrationReceivedMail(applicant, submitted.row.clubName, submitted.row.id, transition));
   // Throttle reviewer mails per registration so needs_info -> submit cycles can't flood the reviewers.
   const prev = submitted.previousSubmittedAt;
   if (!prev || Date.now() - prev.getTime() >= REVIEWER_MAIL_THROTTLE_MS) {
-    inBackground(sendRegistrationReviewNotifyMail(applicant, submitted.row.clubName, submitted.row.id));
+    inBackground(sendRegistrationReviewNotifyMail(applicant, submitted.row.clubName, submitted.row.id, transition));
   }
 
   return c.json({ data: { registration: await shapeRegistration(submitted.row) } });

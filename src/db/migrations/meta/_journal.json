@@ -281,6 +281,13 @@
       "when": 1792482132945,
       "tag": "0039_notify-handover",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1792484059682,
+      "tag": "0040_registration-dedupe",
+      "breakpoints": true
     }
   ]
 }

@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { pgTable, text, timestamp, uuid, boolean, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { user } from "../../auth/auth-schema.js";
@@ -21,8 +22,14 @@ export const notification = pgTable("notification", {
   translations: jsonb("translations").$type<Record<string, { title: string; body: string }>>(),
   deletable: boolean("deletable").notNull().default(true),
   createdByAdminId: text("created_by_admin_id").references(() => user.id, { onDelete: "set null" }),
+  // Idempotency for notifications raised by the system (e.g. new club registration -> platform admins): one row per (user, key).
+  dedupeKey: text("dedupe_key"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  uniqueIndex("notification_target_dedupe_uidx")
+    .on(table.targetUserId, table.dedupeKey)
+    .where(sql`${table.dedupeKey} IS NOT NULL`),
+]);
 
 /**
  * Lazy per-user state (ADR-006): no row here means "unread, not deleted" for

@@ -97,6 +97,11 @@ export const messageDeliveries = pgTable(
     uniqueIndex("message_deliveries_system_event_uidx")
       .on(table.eventKey, table.refId, table.channel, sql`coalesce(${table.clubMemberId}::text, ${table.userId})`)
       .where(sql`${table.announcementId} IS NULL`),
+    // Recipients with neither account nor member row (e-mail addresses of the review team, ...): dedupe by address. Only new-style
+    // references (`<id>#<transition>`) are covered, so rows written before this index cannot make the migration fail.
+    uniqueIndex("message_deliveries_address_event_uidx")
+      .on(table.eventKey, table.refId, table.channel, table.address)
+      .where(sql`${table.announcementId} IS NULL AND ${table.clubMemberId} IS NULL AND ${table.userId} IS NULL AND ${table.address} IS NOT NULL AND ${table.refId} LIKE '%#%'`),
   ],
 );
 
