@@ -1,4 +1,4 @@
-import { and, eq, gt, inArray, isNotNull, isNull, lte } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
@@ -6,13 +6,18 @@ import { calendars } from "../db/schema/calendars.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import type { AnnouncementAudience } from "../db/schema/communication.js";
+import { clubMemberInvites } from "../db/schema/club-member-invites.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
 import { events } from "../db/schema/events.js";
+import { memberFieldDefinitions, memberFieldValues } from "../db/schema/forms.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { meetingInvitees, meetings } from "../db/schema/meetings.js";
 import { roleTypesWithPermission } from "./club-permissions.js";
 import { addDays, daysBetween, digestHour, isDigestTime, localDate, safeTimezone } from "./club-time.js";
 import { AudienceLimitError } from "./audience.js";
+import { credentialExpiry } from "./credentials.js";
+import { canGuardianRead } from "./custom-field-access.js";
+import { effectiveStatus, isLeftStatus } from "./member-lifecycle.js";
 import { formatWhen } from "./event-notify.js";
 import { isLoanOverdue, maintenanceDueDate } from "./inventory-status.js";
 import { enqueue } from "./jobs/queue.js";
@@ -40,7 +45,10 @@ export const REMINDER_JOB_TYPE = "notify_reminder";
 export const LOAN_OVERDUE_STEPS = [1, 4, 7] as const;
 const MAX_LIST = 15;
 
-export type ReminderKind = "event" | "loan_due" | "loan_overdue" | "maintenance" | "rsvp" | "age_transition";
+/** How long after the due day an expired invitation / credential is still worth one message (older ones stay silent). */
+export const EXPIRED_NOTICE_DAYS = 7;
+
+export type ReminderKind = "event" | "loan_due" | "loan_overdue" | "maintenance" | "rsvp" | "age_transition" | "invite_expiring" | "invite_expired" | "credential_expiring" | "credential_expired";
 
 /** Payload of `notify_reminder`: the prepared message and its audience (ids and club text only). */
 export interface ReminderPayload extends Record<string, unknown> {
@@ -65,6 +73,10 @@ export interface ReminderClub {
   maintenanceLeadDays: number;
   rsvpEnabled: boolean;
   rsvpLeadDays: number;
+  invitationEnabled: boolean;
+  invitationLeadDays: number;
+  credentialEnabled: boolean;
+  credentialLeadDays: number;
 }
 
 export interface ReminderSweepResult {
@@ -94,6 +106,10 @@ async function loadClubs(onlyClubId?: string): Promise<Map<string, ReminderClub>
         maintenanceLeadDays: s?.reminderMaintenanceLeadDays ?? 7,
         rsvpEnabled: s?.reminderRsvpEnabled ?? true,
         rsvpLeadDays: s?.reminderRsvpLeadDays ?? 3,
+        invitationEnabled: s?.reminderInvitationEnabled ?? true,
+        invitationLeadDays: s?.reminderInvitationLeadDays ?? 3,
+        credentialEnabled: s?.reminderCredentialEnabled ?? true,
+        credentialLeadDays: s?.reminderCredentialLeadDays ?? 30,
       } satisfies ReminderClub,
     ]),
   );
@@ -283,6 +299,84 @@ export async function collectRsvpReminders(clubs: Map<string, ReminderClub>, now
   return out;
 }
 
+/**
+ * Member invitations (G6): an open invitation (not accepted, member still without account, not left) that expires within
+ * `invitationLeadDays` gets ONE reminder (`invite_expiring`), and ONE notice (`invite_expired`) when it ran out unaccepted
+ * (up to `EXPIRED_NOTICE_DAYS` after the expiry day, older ones stay silent). Recipients: the roles with `members:write`,
+ * i.e. everybody who may send the invitation again. Keys use the expiry day, so a re-sent invitation (new row, new
+ * expiry) is reminded on its own. The text names the member, never the invited address.
+ */
+export async function collectInvitationReminders(clubs: Map<string, ReminderClub>, now: Date): Promise<DueReminder[]> {
+  const rows = await db
+    .select({ id: clubMemberInvites.id, expiresAt: clubMemberInvites.expiresAt, clubId: clubMembers.clubId, name: clubMembers.displayName, status: clubMembers.status, leftAt: clubMembers.leftAt })
+    .from(clubMemberInvites)
+    .innerJoin(clubMembers, eq(clubMembers.id, clubMemberInvites.clubMemberId))
+    .where(and(isNull(clubMemberInvites.acceptedAt), isNull(clubMembers.memberId)));
+  const out: DueReminder[] = [];
+  for (const row of rows) {
+    const club = clubs.get(row.clubId);
+    if (!club?.invitationEnabled || !isDigestTime(now, club.timezone)) continue;
+    const today = localDate(now, club.timezone);
+    if (isLeftStatus(effectiveStatus({ status: row.status, leftAt: row.leftAt }, today))) continue;
+    const expiryDay = localDate(row.expiresAt, club.timezone);
+    const expired = row.expiresAt.getTime() <= now.getTime();
+    if (expired ? daysBetween(expiryDay, today) > EXPIRED_NOTICE_DAYS : expiryDay > addDays(today, club.invitationLeadDays)) continue;
+    out.push({
+      kind: expired ? "invite_expired" : "invite_expiring",
+      refId: row.id,
+      date: expiryDay,
+      clubId: row.clubId,
+      title: expired ? `Einladung abgelaufen: ${row.name}` : `Einladung läuft ab: ${row.name}`,
+      body: expired
+        ? `Die Einladung zu MyVerein für ${row.name} wurde nicht angenommen und ist am ${dateDe(expiryDay)} abgelaufen.\nDu kannst unter Verein, Mitglieder, Konto eine neue Einladung senden.`
+        : `Die Einladung zu MyVerein für ${row.name} wurde noch nicht angenommen und läuft am ${dateDe(expiryDay)} ab.\nDu kannst unter Verein, Mitglieder, Konto die Einladung erneut senden oder die Person daran erinnern.`,
+      audience: { roleTypes: roleTypesWithPermission("members:write"), includeGuardians: false },
+    });
+  }
+  return out;
+}
+
+/**
+ * Credentials (G6; custom fields of type `credential` with a `validUntil`, see `credentials.ts`): the holder is reminded once
+ * when the credential is `expiring` (valid through `validUntil`, within `credentialLeadDays`), and once more when it ran out
+ * (`credential_expired`, up to `EXPIRED_NOTICE_DAYS` after). Guardians are included only where a guardian may read the field
+ * at all (`canGuardianRead`); **sensitive fields never trigger a reminder** (the message names the credential, so the mail would
+ * leak it to a shared address). Archived definitions and members who left are skipped. The key is the value row plus the
+ * `validUntil` day, so renewing the credential (a new date) starts a new cycle.
+ */
+export async function collectCredentialReminders(clubs: Map<string, ReminderClub>, now: Date): Promise<DueReminder[]> {
+  const rows = await db
+    .select({ id: memberFieldValues.id, value: memberFieldValues.value, label: memberFieldDefinitions.label, visibleTo: memberFieldDefinitions.visibleTo, editableBy: memberFieldDefinitions.editableBy, clubMemberId: clubMembers.id, name: clubMembers.displayName, clubId: clubMembers.clubId, status: clubMembers.status, leftAt: clubMembers.leftAt })
+    .from(memberFieldValues)
+    .innerJoin(memberFieldDefinitions, eq(memberFieldDefinitions.id, memberFieldValues.fieldId))
+    .innerJoin(clubMembers, eq(clubMembers.id, memberFieldValues.clubMemberId))
+    .where(and(eq(memberFieldDefinitions.fieldType, "credential"), eq(memberFieldDefinitions.sensitive, false), isNull(memberFieldDefinitions.archivedAt), sql`${memberFieldValues.value}->>'validUntil' IS NOT NULL`));
+  const out: DueReminder[] = [];
+  for (const row of rows) {
+    const club = clubs.get(row.clubId);
+    if (!club?.credentialEnabled || !isDigestTime(now, club.timezone)) continue;
+    const today = localDate(now, club.timezone);
+    if (isLeftStatus(effectiveStatus({ status: row.status, leftAt: row.leftAt }, today))) continue;
+    const expiry = credentialExpiry(row.value, today, club.credentialLeadDays);
+    if (expiry.validUntil === null || expiry.daysLeft === null) continue;
+    const expired = expiry.status === "expired";
+    if (expired ? expiry.daysLeft < -EXPIRED_NOTICE_DAYS : expiry.status !== "expiring") continue;
+    const guardians = canGuardianRead({ visibleTo: row.visibleTo, editableBy: row.editableBy, sensitive: false, archivedAt: null });
+    out.push({
+      kind: expired ? "credential_expired" : "credential_expiring",
+      refId: row.id,
+      date: expiry.validUntil,
+      clubId: row.clubId,
+      title: expired ? `Qualifikation abgelaufen: ${row.label}` : `Qualifikation läuft ab: ${row.label}`,
+      body: expired
+        ? `Die Qualifikation „${row.label}“ von ${row.name} war nur bis zum ${dateDe(expiry.validUntil)} gültig und ist abgelaufen.\nBitte erneuern und im Profil aktualisieren.`
+        : `Die Qualifikation „${row.label}“ von ${row.name} ist noch bis zum ${dateDe(expiry.validUntil)} gültig.\nBitte rechtzeitig erneuern und im Profil aktualisieren.`,
+      audience: { memberIds: [row.clubMemberId], includeGuardians: guardians },
+    });
+  }
+  return out;
+}
+
 /** One sweep: schedules every reminder that is due and not yet scheduled. Safe to run any number of times. */
 export async function runReminderSweep(now: Date = new Date(), scope: { clubId?: string } = {}): Promise<ReminderSweepResult> {
   const clubs = await loadClubs(scope.clubId);
@@ -291,6 +385,8 @@ export async function runReminderSweep(now: Date = new Date(), scope: { clubId?:
     ...(await collectLoanReminders(clubs, now)),
     ...(await collectMaintenanceReminders(clubs, now)),
     ...(await collectRsvpReminders(clubs, now)),
+    ...(await collectInvitationReminders(clubs, now)),
+    ...(await collectCredentialReminders(clubs, now)),
   ];
   const result: ReminderSweepResult = { scheduled: 0, alreadyScheduled: 0 };
   for (const r of due) {

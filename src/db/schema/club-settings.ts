@@ -38,6 +38,12 @@ export const clubSettings = pgTable("club_settings", {
   reminderMaintenanceLeadDays: integer("reminder_maintenance_lead_days").notNull().default(7),
   reminderRsvpEnabled: boolean("reminder_rsvp_enabled").notNull().default(true),
   reminderRsvpLeadDays: integer("reminder_rsvp_lead_days").notNull().default(3),
+  // Tell the reviewers (`members:write`) that a member invitation is about to expire / expired unaccepted.
+  reminderInvitationEnabled: boolean("reminder_invitation_enabled").notNull().default(true),
+  reminderInvitationLeadDays: integer("reminder_invitation_lead_days").notNull().default(3),
+  // Tell holders (and guardians) that a credential (custom field type `credential`, `validUntil`) is about to expire / expired.
+  reminderCredentialEnabled: boolean("reminder_credential_enabled").notNull().default(true),
+  reminderCredentialLeadDays: integer("reminder_credential_lead_days").notNull().default(30),
   // Apply the age transition (member categories) automatically instead of only suggesting it. Default off.
   ageTransitionAuto: boolean("age_transition_auto").notNull().default(false),
   // Tell the members who review requests (`members:write`) about a new admission application / exit request (default on).

@@ -24,6 +24,10 @@ export interface EffectiveClubSettings {
   reminderMaintenanceLeadDays: number;
   reminderRsvpEnabled: boolean;
   reminderRsvpLeadDays: number;
+  reminderInvitationEnabled: boolean;
+  reminderInvitationLeadDays: number;
+  reminderCredentialEnabled: boolean;
+  reminderCredentialLeadDays: number;
   /** Apply the age transition automatically (job `age_transition_sweep`) instead of only suggesting it. */
   ageTransitionAuto: boolean;
   /** Tell the `members:write` roles about a new admission application or exit request (optional message, in-app + mail). */
@@ -55,6 +59,10 @@ export async function loadClubSettings(executor: DbExecutor, clubId: string): Pr
     reminderMaintenanceLeadDays: row?.reminderMaintenanceLeadDays ?? 7,
     reminderRsvpEnabled: row?.reminderRsvpEnabled ?? true,
     reminderRsvpLeadDays: row?.reminderRsvpLeadDays ?? 3,
+    reminderInvitationEnabled: row?.reminderInvitationEnabled ?? true,
+    reminderInvitationLeadDays: row?.reminderInvitationLeadDays ?? 3,
+    reminderCredentialEnabled: row?.reminderCredentialEnabled ?? true,
+    reminderCredentialLeadDays: row?.reminderCredentialLeadDays ?? 30,
     ageTransitionAuto: row?.ageTransitionAuto ?? false,
     notifyBoardRequests: row?.notifyBoardRequests ?? true,
     notifyMeetingInvites: row?.notifyMeetingInvites ?? true,

@@ -267,6 +267,13 @@
       "when": 1792481450420,
       "tag": "0037_notify-meeting-invites",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1792481884239,
+      "tag": "0038_reminder-invitations-credentials",
+      "breakpoints": true
     }
   ]
 }
