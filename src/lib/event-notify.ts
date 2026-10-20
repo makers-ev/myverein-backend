@@ -6,6 +6,7 @@ import { clubMembers } from "../db/schema/club-members.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import type { AnnouncementAudience } from "../db/schema/communication.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
+import type { EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
 import { meetingInvitees, type MeetingInviteeRow, type MeetingRow } from "../db/schema/meetings.js";
 import { AudienceLimitError } from "./audience.js";
@@ -13,7 +14,7 @@ import { loadClubSettings } from "./club-settings.js";
 import { enqueue } from "./jobs/queue.js";
 import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
-import { notify } from "./notify/dispatcher.js";
+import { notify, notifySafely } from "./notify/dispatcher.js";
 
 /**
  * Notifications about changed or cancelled events and meetings (Wave 9 B10). The route detects an essential change
@@ -162,6 +163,41 @@ export async function scheduleEventChanged(
     const e = err as { name?: string; code?: unknown } | undefined;
     logger.error({ kind: payload.kind, refId: payload.refId, errName: e?.name, errCode: e?.code }, "[event-notify] could not schedule notification");
     return "failed";
+  }
+}
+
+/**
+ * A waitlisted person moved up to a confirmed seat (event key `event.promoted`, optional, category events, in-app + mail;
+ * the audit entry `event_attendee.promote` stays). Called after the RSVP transaction committed; never throws. Nothing is
+ * sent for a cancelled or already started event. The delivery `ref_id` carries the `respondedAt` of the waitlist row, so a
+ * person who leaves and joins the waitlist again can be told again, while a repeated call is the same delivery.
+ * Guardians of a child are told too.
+ */
+export async function notifyWaitlistPromoted(args: { clubId: string; event: Pick<EventRow, "id" | "title" | "startsAt" | "endsAt" | "locationId" | "cancelledAt">; accountMemberId: string; respondedAt: Date }): Promise<void> {
+  try {
+    const { clubId, event } = args;
+    if (event.cancelledAt !== null || event.startsAt.getTime() <= Date.now()) return;
+    const [clubMemberId] = await clubMemberIdsOf(clubId, [args.accountMemberId]);
+    if (!clubMemberId) return;
+    const timezone = await clubTimezone(clubId);
+    const place = await locationName(clubId, event.locationId);
+    await notifySafely({
+      clubId,
+      class: "optional",
+      eventKey: "event.promoted",
+      refId: `${event.id}#${args.respondedAt.getTime()}`,
+      audience: { memberIds: [clubMemberId], includeGuardians: true },
+      content: {
+        title: `Du bist nachgerückt: ${event.title}`,
+        body: `Für „${event.title}“ ist ein Platz frei geworden. Du stehst jetzt nicht mehr auf der Warteliste, sondern bist angemeldet.\nWann: ${formatWhen(event.startsAt, timezone, event.endsAt)}${place ? `\nOrt: ${place}` : ""}\nWenn du nicht kommen kannst, sag bitte ab, damit der Platz weitergegeben wird.`,
+        category: "events",
+        template: "announcement",
+      },
+      channels: ["in_app", "email"],
+    });
+  } catch (err) {
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ eventId: args.event.id, errName: e?.name, errCode: e?.code }, "[event-notify] could not announce waitlist promotion");
   }
 }
 

@@ -9,7 +9,7 @@ import { calendars } from "../db/schema/calendars.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
 import { events, type EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
-import { clubTimezone, composeEventMessage, essentialDiff, eventAudience, locationName, scheduleEventChanged } from "../lib/event-notify.js";
+import { clubTimezone, composeEventMessage, essentialDiff, eventAudience, locationName, notifyWaitlistPromoted, scheduleEventChanged } from "../lib/event-notify.js";
 import { buildIcs } from "../lib/ics.js";
 import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
@@ -357,7 +357,7 @@ eventRoutes.delete("/:id/rsvp", async (c) => {
 
   const { event } = await loadVisibleEvent(id, clubId, membership.id, roleTypes);
 
-  await db.transaction(async (tx) => {
+  const promoted = await db.transaction(async (tx): Promise<{ memberId: string; respondedAt: Date } | null> => {
     // Same lock as the RSVP handler -- without it, two concurrent
     // cancellations can both pick the same waitlisted row to promote (each
     // reads "next in line" before the other commits), leaving one freed
@@ -390,9 +390,13 @@ eventRoutes.delete("/:id/rsvp", async (c) => {
           subjectId: id,
           payload: { clubId, memberId: nextInLine.memberId },
         });
+        return { memberId: nextInLine.memberId, respondedAt: nextInLine.respondedAt };
       }
     }
+    return null;
   });
+  // After the commit: tell the person who moved up (best effort, in addition to the audit entry).
+  if (promoted !== null) await notifyWaitlistPromoted({ clubId, event, accountMemberId: promoted.memberId, respondedAt: promoted.respondedAt });
 
   return c.body(null, 204);
 });
