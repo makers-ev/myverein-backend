@@ -182,7 +182,16 @@ export function buildRegistrationApprovedEmail({ name, clubName, slug, url }: { 
 
 // --- Wave 7 B4: Einladung eines Mitglieds ohne Konto -----------------------------
 
-export function buildMemberInviteEmail({ name, clubName, url, expiresOn }: { name: string; clubName: string; url: string; expiresOn: string }): string {
+export function buildMemberInviteEmail({ name, clubName, url, expiresOn, lang = "de" }: { name: string; clubName: string; url: string; expiresOn: string; lang?: "de" | "en" }): string {
+  if (lang === "en") {
+    return layout({
+      greeting: `Hello ${escapeHtml(name)},`,
+      bodyHtml: `<strong>${escapeHtml(clubName)}</strong> invites you to create or link your member account at ${escapeHtml(APP_NAME)}. There you see the events, meetings and news of your club. Sign up with this e-mail address, or sign in with it and confirm the invitation. The link is valid until ${escapeHtml(expiresOn)} and can only be used once. If you do not know the club, you can ignore this e-mail.`,
+      ctaLabel: "Accept invitation",
+      ctaUrl: escapeHtml(url),
+      lang,
+    });
+  }
   return layout({
     greeting: `Hallo ${escapeHtml(name)},`,
     bodyHtml: `<strong>${escapeHtml(clubName)}</strong> lädt dich ein, dein Mitglieds-Konto bei ${escapeHtml(APP_NAME)} anzulegen oder zu verknüpfen. Dort siehst du Termine, Treffen und Neuigkeiten deines Vereins. Registriere dich mit dieser E-Mail-Adresse oder melde dich damit an und bestätige die Einladung. Der Link ist bis zum ${escapeHtml(expiresOn)} gültig und kann nur einmal verwendet werden. Falls du den Verein nicht kennst, kannst du diese E-Mail ignorieren.`,

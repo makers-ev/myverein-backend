@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 
 import { clubSettings, type ClubTextBlock } from "../db/schema/club-settings.js";
 import type { DbExecutor } from "./club-members.js";
+import { DEFAULT_MAIL_LANGUAGE, isMailLanguage, type MailLanguage } from "./notify/i18n.js";
 
 export interface EffectiveClubSettings {
   noticePeriodDays: number | null;
@@ -38,6 +39,8 @@ export interface EffectiveClubSettings {
   notifyAgeTransition: boolean;
   /** Tell the borrower / key holder when a loan or key is handed out, returned or a loan extended (optional message). */
   notifyHandover: boolean;
+  /** Language of the system texts of club mails and pushes (decisions, reminders, event changes, invitations); text written by a person stays as written. */
+  mailLanguage: MailLanguage;
 }
 
 export const DEFAULT_CLUB_TIMEZONE = "Europe/Berlin";
@@ -72,5 +75,12 @@ export async function loadClubSettings(executor: DbExecutor, clubId: string): Pr
     notifyMeetingInvites: row?.notifyMeetingInvites ?? true,
     notifyAgeTransition: row?.notifyAgeTransition ?? true,
     notifyHandover: row?.notifyHandover ?? true,
+    mailLanguage: isMailLanguage(row?.mailLanguage) ? row.mailLanguage : DEFAULT_MAIL_LANGUAGE,
   };
+}
+
+/** The club's mail language (`de` without a settings row). */
+export async function clubMailLanguage(executor: DbExecutor, clubId: string): Promise<MailLanguage> {
+  const row = await executor.query.clubSettings.findFirst({ where: eq(clubSettings.clubId, clubId), columns: { mailLanguage: true } });
+  return isMailLanguage(row?.mailLanguage) ? row.mailLanguage : DEFAULT_MAIL_LANGUAGE;
 }

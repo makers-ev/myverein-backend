@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
+import { clubMailLanguage } from "../lib/club-settings.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
 import { MEETING_TYPES, meetingAttendance, meetingInvitees, meetingResolutions, meetings } from "../db/schema/meetings.js";
@@ -178,6 +179,7 @@ meetingRoutes.patch(
         const timezone = await clubTimezone(clubId);
         const place = await locationName(clubId, row!.locationId);
         const message = composeEventMessage({
+          lang: await clubMailLanguage(db, clubId),
           noun: "Treffen",
           title: row!.title,
           timezone,
@@ -216,6 +218,7 @@ meetingRoutes.delete("/:id", async (c) => {
     try {
       const timezone = await clubTimezone(clubId);
       const message = composeEventMessage({
+        lang: await clubMailLanguage(db, clubId),
         noun: "Treffen",
         title: existing.title,
         timezone,

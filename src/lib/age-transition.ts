@@ -16,6 +16,7 @@ import { AudienceLimitError } from "./audience.js";
 import { notify } from "./notify/dispatcher.js";
 import { REMINDER_JOB_TYPE, reminderDedupeKey, type ReminderPayload } from "./reminders.js";
 import type { DbExecutor } from "./club-members.js";
+import { tr } from "./notify/i18n.js";
 
 /**
  * Age transition as a job (Wave 9 B13, formerly only suggested -- `GET /club-members/transition-suggestions`). The recurring
@@ -103,17 +104,22 @@ export async function applyAgeTransitionsForClub(clubId: string, today: string):
 
     const counts = new Map<string, number>();
     for (const m of moves) counts.set(`${m.fromId}>${m.toId}`, (counts.get(`${m.fromId}>${m.toId}`) ?? 0) + 1);
+    const lang = (await loadClubSettings(tx, clubId)).mailLanguage;
     const lines = [...counts].map(([k, n]) => {
       const [from, to] = k.split(">") as [string, string];
-      return `• ${n} ${n === 1 ? "Mitglied" : "Mitglieder"}: ${byId.get(from)?.name ?? "?"} → ${byId.get(to)?.name ?? "?"}`;
+      return `• ${n} ${n === 1 ? tr(lang, "Mitglied", "member") : tr(lang, "Mitglieder", "members")}: ${byId.get(from)?.name ?? "?"} → ${byId.get(to)?.name ?? "?"}`;
     });
     const payload: ReminderPayload = {
       clubId,
       kind: "age_transition",
       refId: clubId,
       date: `${today}:${moves[0]!.id}`,
-      title: moves.length === 1 ? "Altersübergang: 1 Mitglied verschoben" : `Altersübergang: ${moves.length} Mitglieder verschoben`,
-      body: `Wegen des Alters wurden automatisch neue Kategorien zugewiesen:\n${lines.join("\n")}\nDie Änderungen stehen im Verlauf der Mitglieder (Urheber: System).`,
+      title: moves.length === 1 ? tr(lang, "Altersübergang: 1 Mitglied verschoben", "Age transition: 1 member moved") : tr(lang, `Altersübergang: ${moves.length} Mitglieder verschoben`, `Age transition: ${moves.length} members moved`),
+      body: tr(
+        lang,
+        `Wegen des Alters wurden automatisch neue Kategorien zugewiesen:\n${lines.join("\n")}\nDie Änderungen stehen im Verlauf der Mitglieder (Urheber: System).`,
+        `New categories were assigned automatically because of age:\n${lines.join("\n")}\nThe changes are listed in the members' history (author: system).`,
+      ),
       audience: { roleTypes: roleTypesWithPermission("members:write"), includeGuardians: false },
     };
     // One summary per run: the first moved member makes the key unique (a member moves once per category).
@@ -158,7 +164,9 @@ export async function handleAgeTransitionMemberNotify(job: JobContext): Promise<
   const p = job.payload as { clubId?: unknown; clubMemberId?: unknown; fromCategoryId?: unknown; toCategoryId?: unknown; date?: unknown };
   if (![p.clubId, p.clubMemberId, p.fromCategoryId, p.toCategoryId, p.date].every((v) => typeof v === "string" && v)) return;
   const { clubId, clubMemberId, fromCategoryId, toCategoryId, date } = p as Record<"clubId" | "clubMemberId" | "fromCategoryId" | "toCategoryId" | "date", string>;
-  if (!(await loadClubSettings(db, clubId)).notifyAgeTransition) return;
+  const settings = await loadClubSettings(db, clubId);
+  if (!settings.notifyAgeTransition) return;
+  const lang = settings.mailLanguage;
   const [row] = await db.select({ name: clubMembers.displayName, categoryId: clubMembers.categoryId }).from(clubMembers).where(and(eq(clubMembers.id, clubMemberId), eq(clubMembers.clubId, clubId)));
   if (!row || row.categoryId !== toCategoryId) return;
   const names = await db.select({ id: memberCategories.id, name: memberCategories.name }).from(memberCategories).where(and(eq(memberCategories.clubId, clubId), inArray(memberCategories.id, [fromCategoryId, toCategoryId])));
@@ -173,8 +181,13 @@ export async function handleAgeTransitionMemberNotify(job: JobContext): Promise<
       refId: `${clubMemberId}#${date}:${toCategoryId}`,
       audience: { memberIds: [clubMemberId], includeGuardians: true },
       content: {
-        title: `Neue Mitgliedskategorie: ${to}`,
-        body: `Für ${row.name} wurde die Mitgliedskategorie geändert: von „${from}“ zu „${to}“.\nGrund: Die Altersgrenze der bisherigen Kategorie ist erreicht.\nBei Fragen melde dich beim Vorstand.`,
+        title: tr(lang, `Neue Mitgliedskategorie: ${to}`, `New membership category: ${to}`),
+        body: tr(
+          lang,
+          `Für ${row.name} wurde die Mitgliedskategorie geändert: von „${from}“ zu „${to}“.\nGrund: Die Altersgrenze der bisherigen Kategorie ist erreicht.\nBei Fragen melde dich beim Vorstand.`,
+          `The membership category of ${row.name} was changed from “${from}” to “${to}”.\nReason: the age limit of the previous category has been reached.\nIf you have questions, please contact the board.`,
+        ),
+        lang,
         category: "announcements",
         template: "announcement",
       },

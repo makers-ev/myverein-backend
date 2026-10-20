@@ -1,11 +1,14 @@
-import { and, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 
 import { db } from "../../db/client.js";
-import { messageDeliveries, notificationPreferences, pushTokens, type CommunicationChannel } from "../../db/schema/communication.js";
+import { messageDeliveries, pushTokens, type CommunicationChannel } from "../../db/schema/communication.js";
 import { normalizeEmail, resolveClubAudience, type AudienceRecipient } from "../audience.js";
 import { logger } from "../logger.js";
 import { enqueue } from "../jobs/queue.js";
 import { handleEmailDelivery } from "./email-job.js";
+import { clubMailLanguage } from "../club-settings.js";
+import { DEFAULT_MAIL_LANGUAGE } from "./i18n.js";
+import { loadPrefResolver } from "./preferences.js";
 import { PUSH_DELIVERIES_PER_JOB } from "./push.js";
 import { CORE_NOTIFICATION_CATEGORIES, EMAIL_JOB_TYPE, PUSH_JOB_TYPE, type DeliveryContent, type NotificationCategory, type NotifyInput, type NotifyRecipient, type NotifyResult, type NotifyTemplate } from "./types.js";
 
@@ -70,36 +73,22 @@ function targetsFromRecipients(recipients: NotifyRecipient[]): Target[] {
   });
 }
 
+type OptOut = (channel: CommunicationChannel, t: Target) => boolean;
+const NEVER: OptOut = () => false;
+
 /**
- * `${channel}:u:${userId}` / `${channel}:m:${clubMemberId}` for every explicitly disabled combination (default is enabled).
- * With `pushOnlyIfAllOff` (mandatory messages) only the push channel counts, and only for people who switched push off in EVERY
+ * Whether a person switched a channel off for this message (club row > global row > on, see `preferences.ts`). With
+ * `pushOnlyIfAllOff` (mandatory messages) only the push channel counts, and only for people who switched push off in EVERY core
  * category: a clear "no push at all" is honoured even for decisions, while the in-app copy and the mail stay mandatory.
  */
-async function loadOptOuts(category: string, targets: Target[], pushOnlyIfAllOff = false): Promise<Set<string>> {
+async function loadOptOut(category: string, targets: Target[], clubId: string | null, pushOnlyIfAllOff = false): Promise<OptOut> {
   const userIds = targets.map((t) => t.userId).filter((v): v is string => v !== null);
   const memberIds = targets.map((t) => t.clubMemberId).filter((v): v is string => v !== null);
-  if (userIds.length + memberIds.length === 0) return new Set();
-  const subject = [userIds.length ? inArray(notificationPreferences.userId, userIds) : undefined, memberIds.length ? inArray(notificationPreferences.clubMemberId, memberIds) : undefined];
-  const rows = await db
-    .select({ userId: notificationPreferences.userId, clubMemberId: notificationPreferences.clubMemberId, channel: notificationPreferences.channel, category: notificationPreferences.category })
-    .from(notificationPreferences)
-    .where(and(pushOnlyIfAllOff ? eq(notificationPreferences.channel, "push") : eq(notificationPreferences.category, category), eq(notificationPreferences.enabled, false), or(...subject)));
-  const out = new Set<string>();
-  if (pushOnlyIfAllOff) {
-    const seen = new Map<string, Set<string>>();
-    for (const r of rows) {
-      for (const key of [r.userId ? `u:${r.userId}` : null, r.clubMemberId ? `m:${r.clubMemberId}` : null]) {
-        if (key) seen.set(key, (seen.get(key) ?? new Set()).add(r.category));
-      }
-    }
-    for (const [key, categories] of seen) if (CORE_NOTIFICATION_CATEGORIES.every((c) => categories.has(c))) out.add(`push:${key}`);
-    return out;
-  }
-  for (const r of rows) {
-    if (r.userId) out.add(`${r.channel}:u:${r.userId}`);
-    if (r.clubMemberId) out.add(`${r.channel}:m:${r.clubMemberId}`);
-  }
-  return out;
+  if (userIds.length + memberIds.length === 0) return NEVER;
+  const isEnabled = await loadPrefResolver({ userIds, clubMemberIds: memberIds, clubIds: [clubId] });
+  const subject = (t: Target) => ({ userId: t.userId, clubMemberId: t.clubMemberId, clubId });
+  if (pushOnlyIfAllOff) return (channel, t) => channel === "push" && CORE_NOTIFICATION_CATEGORIES.every((c) => !isEnabled(subject(t), c, "push"));
+  return (channel, t) => !isEnabled(subject(t), category, channel);
 }
 
 /** Users with at least one active push token. */
@@ -126,9 +115,6 @@ function effectiveChannels(input: NotifyInput, template: NotifyTemplate): Commun
   return [...channels];
 }
 
-const optedOut = (optOuts: Set<string>, channel: CommunicationChannel, t: Target): boolean =>
-  (t.userId !== null && optOuts.has(`${channel}:u:${t.userId}`)) || (t.clubMemberId !== null && optOuts.has(`${channel}:m:${t.clubMemberId}`));
-
 type DeliveryInsert = typeof messageDeliveries.$inferInsert;
 
 export async function notify(input: NotifyInput): Promise<NotifyResult> {
@@ -142,17 +128,20 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
     ? targetsFromAudience((await resolveClubAudience(input.clubId!, input.audience, input.limit === undefined ? {} : { limit: input.limit })).recipients)
     : targetsFromRecipients(input.recipients ?? []);
 
+  // Language of the system chrome (mail intro/button/footer, push line): explicit, else the club's, else German.
+  const lang = input.content.lang ?? (input.clubId ? await clubMailLanguage(db, input.clubId) : DEFAULT_MAIL_LANGUAGE);
+
   const channels = effectiveChannels(input, template);
   const wantsInApp = channels.includes("in_app");
   const wantsEmail = channels.includes("email");
   const wantsPush = channels.includes("push");
   // Mandatory messages ignore preferences (except "push off everywhere"); optional ones are filtered per channel (in-app is the source of truth and stays on).
-  const optOuts =
+  const optedOut =
     input.class === "optional" && (wantsEmail || wantsPush)
-      ? await loadOptOuts(category, targets)
+      ? await loadOptOut(category, targets, input.clubId)
       : input.class === "mandatory" && wantsPush
-        ? await loadOptOuts(category, targets, true)
-        : new Set<string>();
+        ? await loadOptOut(category, targets, input.clubId, true)
+        : NEVER;
 
   const pushUsers = wantsPush ? await loadPushUsers(targets) : new Set<string>();
 
@@ -177,7 +166,7 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
       recipientName: channel === "email" ? t.name : null,
       ctaLabel: input.content.ctaLabel ?? null,
       ctaUrl: input.content.ctaUrl ?? null,
-      ...(input.content.lang ? { lang: input.content.lang } : {}),
+      lang,
       ...(input.content.rendered ? { rendered: input.content.rendered } : {}),
       ...(input.content.sensitive ? { sensitive: true } : {}),
     } satisfies DeliveryContent,
@@ -188,11 +177,11 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
     if (wantsInApp && t.inApp) rows.push({ ...base(t, "in_app"), status: "sent", sentAt: now });
     if (wantsEmail && !t.emailCovered) {
       if (t.email === null) rows.push({ ...base(t, "email"), status: "skipped_no_address" });
-      else if (optedOut(optOuts, "email", t)) rows.push({ ...base(t, "email"), status: "skipped_optout" });
+      else if (optedOut("email", t)) rows.push({ ...base(t, "email"), status: "skipped_optout" });
       else rows.push({ ...base(t, "email"), status: "queued", address: t.email });
     }
     if (wantsPush && t.userId !== null) {
-      if (optedOut(optOuts, "push", t)) rows.push({ ...base(t, "push"), status: "skipped_optout" });
+      if (optedOut("push", t)) rows.push({ ...base(t, "push"), status: "skipped_optout" });
       else if (!pushUsers.has(t.userId)) rows.push({ ...base(t, "push"), status: "skipped_no_address", errorCode: "no_push_token" });
       else rows.push({ ...base(t, "push"), status: "queued" });
     }

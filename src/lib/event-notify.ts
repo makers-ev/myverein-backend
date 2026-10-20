@@ -10,11 +10,12 @@ import type { EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
 import { meetingInvitees, type MeetingInviteeRow, type MeetingRow } from "../db/schema/meetings.js";
 import { AudienceLimitError } from "./audience.js";
-import { loadClubSettings } from "./club-settings.js";
+import { clubMailLanguage, loadClubSettings } from "./club-settings.js";
 import { enqueue } from "./jobs/queue.js";
 import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
 import { notify, notifySafely } from "./notify/dispatcher.js";
+import { tr, type MailLanguage } from "./notify/i18n.js";
 
 /**
  * Notifications about changed or cancelled events and meetings (Wave 9 B10). The route detects an essential change
@@ -48,16 +49,19 @@ export async function clubTimezone(clubId: string): Promise<string> {
   return row?.timezone || DEFAULT_TIMEZONE;
 }
 
-/** "Mo., 12.10.2026, 18:00" in the club's time zone; "ohne Termin" for none. */
-export function formatWhen(date: Date | null | undefined, timezone: string, endsAt?: Date | null): string {
-  if (!date) return "noch ohne Termin";
-  const fmt = (options: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat("de-DE", { timeZone: timezone, ...options });
-  const day = fmt({ weekday: "short", day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
+/** "Mo., 12.10.2026, 18:00 Uhr" (de) / "Mon, 12/10/2026, 18:00" (en) in the club's time zone; "noch ohne Termin" / "no date yet" for none. */
+export function formatWhen(date: Date | null | undefined, timezone: string, endsAt?: Date | null, lang: MailLanguage = "de"): string {
+  if (!date) return tr(lang, "noch ohne Termin", "no date yet");
+  const locale = tr(lang, "de-DE", "en-GB");
+  const fmt = (options: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat(locale, { timeZone: timezone, ...options });
+  const dayOptions: Intl.DateTimeFormatOptions = { weekday: "short", day: "2-digit", month: "2-digit", year: "numeric" };
   const time = fmt({ hour: "2-digit", minute: "2-digit" });
-  const start = `${day}, ${time.format(date)} Uhr`;
+  const suffix = tr(lang, " Uhr", "");
+  const to = tr(lang, "bis", "to");
+  const start = `${fmt(dayOptions).format(date)}, ${time.format(date)}${suffix}`;
   if (!endsAt) return start;
   const sameDay = fmt({ dateStyle: "short" }).format(date) === fmt({ dateStyle: "short" }).format(endsAt);
-  return sameDay ? `${start} bis ${time.format(endsAt)} Uhr` : `${start} bis ${fmt({ weekday: "short", day: "2-digit", month: "2-digit", year: "numeric" }).format(endsAt)}, ${time.format(endsAt)} Uhr`;
+  return sameDay ? `${start} ${to} ${time.format(endsAt)}${suffix}` : `${start} ${to} ${fmt(dayOptions).format(endsAt)}, ${time.format(endsAt)}${suffix}`;
 }
 
 export async function locationName(clubId: string, locationId: string | null | undefined): Promise<string | null> {
@@ -116,29 +120,35 @@ export interface EventMessageInput {
   after: { startsAt: Date | null; endsAt: Date | null; place: string | null };
   cancelled: boolean;
   reason?: string | null;
+  /** Language of the system text (club `mail_language`); the title of the event stays as written. */
+  lang?: MailLanguage;
 }
 
 /** Plain-text title and body; the old and the new time are always spelled out. */
 export function composeEventMessage(input: EventMessageInput): { title: string; body: string } {
   const { noun, timezone } = input;
-  const old = formatWhen(input.before.startsAt, timezone, input.before.endsAt);
-  const place = (value: string | null) => (value ? `\nOrt: ${value}` : "");
+  const lang = input.lang ?? "de";
+  const old = formatWhen(input.before.startsAt, timezone, input.before.endsAt, lang);
+  const place = (value: string | null) => (value ? `\n${tr(lang, "Ort", "Location")}: ${value}` : "");
+  const subject = tr(lang, noun === "Termin" ? "Der Termin" : "Das Treffen", noun === "Termin" ? "The event" : "The meeting");
   if (input.cancelled) {
-    const reason = input.reason?.trim() ? `\nGrund: ${input.reason.trim()}` : "";
+    const reason = input.reason?.trim() ? `\n${tr(lang, "Grund", "Reason")}: ${input.reason.trim()}` : "";
     // A meeting still in Terminfindung never had a date: there is nothing to say about "planned for".
-    const planned = input.before.startsAt ? `\nGeplant war: ${old}${place(input.before.place)}` : "\nDie Terminfindung ist damit beendet.";
-    return { title: `Abgesagt: ${input.title}`, body: `${noun === "Termin" ? "Der Termin" : "Das Treffen"} „${input.title}“ wurde abgesagt.${planned}${reason}` };
+    const planned = input.before.startsAt ? `\n${tr(lang, "Geplant war", "It was scheduled for")}: ${old}${place(input.before.place)}` : `\n${tr(lang, "Die Terminfindung ist damit beendet.", "The scheduling poll has ended.")}`;
+    return { title: `${tr(lang, "Abgesagt", "Cancelled")}: ${input.title}`, body: `${subject} ${tr(lang, `„${input.title}“ wurde abgesagt.`, `“${input.title}” has been cancelled.`)}${planned}${reason}` };
   }
-  const lines = [`${noun === "Termin" ? "Der Termin" : "Das Treffen"} „${input.title}“ wurde geändert.`];
+  const lines = [`${subject} ${tr(lang, `„${input.title}“ wurde geändert.`, `“${input.title}” has been changed.`)}`];
   const timeChanged = !sameInstant(input.before.startsAt, input.after.startsAt) || !sameInstant(input.before.endsAt, input.after.endsAt);
   if (timeChanged) {
-    lines.push(`Bisher: ${old}`, `Neu: ${formatWhen(input.after.startsAt, timezone, input.after.endsAt)}`);
+    lines.push(`${tr(lang, "Bisher", "Previously")}: ${old}`, `${tr(lang, "Neu", "New")}: ${formatWhen(input.after.startsAt, timezone, input.after.endsAt, lang)}`);
   } else {
-    lines.push(`Zeit: ${formatWhen(input.after.startsAt, timezone, input.after.endsAt)}`);
+    lines.push(`${tr(lang, "Zeit", "Time")}: ${formatWhen(input.after.startsAt, timezone, input.after.endsAt, lang)}`);
   }
-  if (input.before.place !== input.after.place) lines.push(`Ort bisher: ${input.before.place ?? "nicht angegeben"}`, `Ort neu: ${input.after.place ?? "nicht angegeben"}`);
-  else if (input.after.place) lines.push(`Ort: ${input.after.place}`);
-  return { title: `${noun === "Termin" ? "Terminänderung" : "Treffen verschoben"}: ${input.title}`, body: lines.join("\n") };
+  const unspecified = tr(lang, "nicht angegeben", "not specified");
+  if (input.before.place !== input.after.place) lines.push(`${tr(lang, "Ort bisher", "Previous location")}: ${input.before.place ?? unspecified}`, `${tr(lang, "Ort neu", "New location")}: ${input.after.place ?? unspecified}`);
+  else if (input.after.place) lines.push(`${tr(lang, "Ort", "Location")}: ${input.after.place}`);
+  const heading = noun === "Termin" ? tr(lang, "Terminänderung", "Event changed") : tr(lang, "Treffen verschoben", "Meeting rescheduled");
+  return { title: `${heading}: ${input.title}`, body: lines.join("\n") };
 }
 
 /**
@@ -181,6 +191,7 @@ export async function notifyWaitlistPromoted(args: { clubId: string; event: Pick
     const [clubMemberId] = await clubMemberIdsOf(clubId, [args.accountMemberId]);
     if (!clubMemberId) return;
     const timezone = await clubTimezone(clubId);
+    const lang = await clubMailLanguage(db, clubId);
     const place = await locationName(clubId, event.locationId);
     await notifySafely({
       clubId,
@@ -189,8 +200,12 @@ export async function notifyWaitlistPromoted(args: { clubId: string; event: Pick
       refId: `${event.id}#${args.respondedAt.getTime()}`,
       audience: { memberIds: [clubMemberId], includeGuardians: true },
       content: {
-        title: `Du bist nachgerückt: ${event.title}`,
-        body: `Für „${event.title}“ ist ein Platz frei geworden. Du stehst jetzt nicht mehr auf der Warteliste, sondern bist angemeldet.\nWann: ${formatWhen(event.startsAt, timezone, event.endsAt)}${place ? `\nOrt: ${place}` : ""}\nWenn du nicht kommen kannst, sag bitte ab, damit der Platz weitergegeben wird.`,
+        title: `${tr(lang, "Du bist nachgerückt", "You moved up")}: ${event.title}`,
+        body: tr(
+          lang,
+          `Für „${event.title}“ ist ein Platz frei geworden. Du stehst jetzt nicht mehr auf der Warteliste, sondern bist angemeldet.\nWann: ${formatWhen(event.startsAt, timezone, event.endsAt)}${place ? `\nOrt: ${place}` : ""}\nWenn du nicht kommen kannst, sag bitte ab, damit der Platz weitergegeben wird.`,
+          `A spot opened up for “${event.title}”. You are no longer on the waitlist, you are registered.\nWhen: ${formatWhen(event.startsAt, timezone, event.endsAt, lang)}${place ? `\nLocation: ${place}` : ""}\nIf you cannot come, please cancel so the spot can be passed on.`,
+        ),
         category: "events",
         template: "announcement",
       },
@@ -224,10 +239,19 @@ export async function announceMeetingInvitation(args: { clubId: string; actor: s
     const [clubMemberId] = await clubMemberIdsOf(clubId, [invitee.memberId]);
     if (!clubMemberId) return "skipped";
     const timezone = await clubTimezone(clubId);
+    const lang = await clubMailLanguage(db, clubId);
     const place = await locationName(clubId, meeting.locationId);
     const lines = meeting.scheduledAt
-      ? [`Du bist zu „${meeting.title}“ eingeladen.`, `Wann: ${formatWhen(meeting.scheduledAt, timezone)}`, ...(place ? [`Ort: ${place}`] : []), "Bitte sag zu oder ab."]
-      : [`Du bist zur Terminfindung für „${meeting.title}“ eingeladen.`, "Der Termin steht noch nicht fest. Bitte trage deine Verfügbarkeit ein und sag zu oder ab."];
+      ? [
+          tr(lang, `Du bist zu „${meeting.title}“ eingeladen.`, `You are invited to “${meeting.title}”.`),
+          `${tr(lang, "Wann", "When")}: ${formatWhen(meeting.scheduledAt, timezone, null, lang)}`,
+          ...(place ? [`${tr(lang, "Ort", "Location")}: ${place}`] : []),
+          tr(lang, "Bitte sag zu oder ab.", "Please accept or decline."),
+        ]
+      : [
+          tr(lang, `Du bist zur Terminfindung für „${meeting.title}“ eingeladen.`, `You are invited to the scheduling poll for “${meeting.title}”.`),
+          tr(lang, "Der Termin steht noch nicht fest. Bitte trage deine Verfügbarkeit ein und sag zu oder ab.", "The date is not set yet. Please enter your availability and accept or decline."),
+        ];
     const payload: EventChangedPayload = {
       clubId,
       kind: "meeting",
@@ -236,7 +260,7 @@ export async function announceMeetingInvitation(args: { clubId: string; actor: s
       discriminator: invitee.id,
       cancelled: false,
       eventKey: "meeting.invited",
-      title: meeting.scheduledAt ? `Einladung: ${meeting.title}` : `Terminfindung: ${meeting.title}`,
+      title: meeting.scheduledAt ? `${tr(lang, "Einladung", "Invitation")}: ${meeting.title}` : `${tr(lang, "Terminfindung", "Scheduling poll")}: ${meeting.title}`,
       body: lines.join("\n"),
       audience: { memberIds: [clubMemberId], includeGuardians: false },
     };

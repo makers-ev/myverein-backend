@@ -123,13 +123,18 @@ export const pushTokens = pgTable(
   (table) => [index("push_tokens_user_idx").on(table.userId)],
 );
 
-/** Opt-in/opt-out per person x category x channel. Exactly one of `user_id` / `club_member_id` (account-less members). */
+/**
+ * Opt-in/opt-out per person x category x channel. Exactly one of `user_id` / `club_member_id` (account-less members).
+ * `club_id` NULL = the global default of the person; a row with a `club_id` is the override for that club only and wins
+ * over the global row (club-specific > global > enabled).
+ */
 export const notificationPreferences = pgTable(
   "notification_preferences",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
     clubMemberId: uuid("club_member_id").references(() => clubMembers.id, { onDelete: "cascade" }),
+    clubId: text("club_id").references(() => organization.id, { onDelete: "cascade" }),
     category: text("category").notNull(),
     channel: text("channel").notNull(),
     enabled: boolean("enabled").notNull(),
@@ -139,10 +144,16 @@ export const notificationPreferences = pgTable(
     check("notification_preferences_subject_chk", sql`(${table.userId} IS NOT NULL) <> (${table.clubMemberId} IS NOT NULL)`),
     uniqueIndex("notification_preferences_user_uidx")
       .on(table.userId, table.category, table.channel)
-      .where(sql`${table.userId} IS NOT NULL`),
+      .where(sql`${table.userId} IS NOT NULL AND ${table.clubId} IS NULL`),
     uniqueIndex("notification_preferences_member_uidx")
       .on(table.clubMemberId, table.category, table.channel)
-      .where(sql`${table.clubMemberId} IS NOT NULL`),
+      .where(sql`${table.clubMemberId} IS NOT NULL AND ${table.clubId} IS NULL`),
+    uniqueIndex("notification_preferences_user_club_uidx")
+      .on(table.userId, table.clubId, table.category, table.channel)
+      .where(sql`${table.userId} IS NOT NULL AND ${table.clubId} IS NOT NULL`),
+    uniqueIndex("notification_preferences_member_club_uidx")
+      .on(table.clubMemberId, table.clubId, table.category, table.channel)
+      .where(sql`${table.clubMemberId} IS NOT NULL AND ${table.clubId} IS NOT NULL`),
   ],
 );
 

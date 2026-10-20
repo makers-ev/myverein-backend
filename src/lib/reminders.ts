@@ -19,6 +19,7 @@ import { credentialExpiry } from "./credentials.js";
 import { canGuardianRead } from "./custom-field-access.js";
 import { effectiveStatus, isLeftStatus } from "./member-lifecycle.js";
 import { formatWhen } from "./event-notify.js";
+import { formatIsoDay, isMailLanguage, tr, type MailLanguage } from "./notify/i18n.js";
 import { isLoanOverdue, maintenanceDueDate } from "./inventory-status.js";
 import { enqueue } from "./jobs/queue.js";
 import type { JobContext } from "./jobs/registry.js";
@@ -69,6 +70,8 @@ export interface ReminderPayload extends Record<string, unknown> {
 export interface ReminderClub {
   clubId: string;
   timezone: string;
+  /** Language of the reminder texts (`club_settings.mail_language`). */
+  lang: MailLanguage;
   eventEnabled: boolean;
   eventLeadHours: number;
   loanEnabled: boolean;
@@ -102,6 +105,7 @@ async function loadClubs(onlyClubId?: string): Promise<Map<string, ReminderClub>
       {
         clubId: id,
         timezone: safeTimezone(s?.timezone),
+        lang: isMailLanguage(s?.mailLanguage) ? s.mailLanguage : "de",
         eventEnabled: s?.reminderEventEnabled ?? true,
         eventLeadHours: s?.reminderEventLeadHours ?? 24,
         loanEnabled: s?.reminderLoanEnabled ?? true,
@@ -133,12 +137,10 @@ async function clubMemberIndex(accountMemberIds: string[]): Promise<Map<string, 
   return out;
 }
 
-function listLines(lines: string[]): string {
+function listLines(lines: string[], lang: MailLanguage = "de"): string {
   const shown = lines.slice(0, MAX_LIST);
-  return shown.join("\n") + (lines.length > shown.length ? `\n… und ${lines.length - shown.length} weitere` : "");
+  return shown.join("\n") + (lines.length > shown.length ? `\n… ${tr(lang, "und", "and")} ${lines.length - shown.length} ${tr(lang, "weitere", "more")}` : "");
 }
-
-const dateDe = (date: string): string => date.split("-").reverse().join(".");
 
 export interface DueReminder {
   kind: ReminderKind;
@@ -180,8 +182,12 @@ export async function collectEventReminders(clubs: Map<string, ReminderClub>, no
       refId: ev.id,
       date: localDate(ev.startsAt, club.timezone),
       clubId: ev.clubId,
-      title: `Erinnerung: ${ev.title}`,
-      body: `Für „${ev.title}“ liegt eine Zusage vor.\nWann: ${formatWhen(ev.startsAt, club.timezone, ev.endsAt)}`,
+      title: `${tr(club.lang, "Erinnerung", "Reminder")}: ${ev.title}`,
+      body: tr(
+        club.lang,
+        `Für „${ev.title}“ liegt eine Zusage vor.\nWann: ${formatWhen(ev.startsAt, club.timezone, ev.endsAt)}`,
+        `There is a confirmed registration for “${ev.title}”.\nWhen: ${formatWhen(ev.startsAt, club.timezone, ev.endsAt, club.lang)}`,
+      ),
       audience: { memberIds, includeGuardians: true },
     });
   }
@@ -213,9 +219,18 @@ export async function collectLoanReminders(clubs: Map<string, ReminderClub>, now
     // `isLoanOverdue` (inventory-status.ts) is the single definition of "overdue"; the repeat schedule counts calendar days.
     const overdueDays = isLoanOverdue(row, now) ? daysBetween(due, today) : 0;
     const audience: AnnouncementAudience = { memberIds: [memberId], includeGuardians: true };
+    const lang = clubs.get(row.clubId)!.lang;
     if (overdueDays <= 0) {
-      const when = today === due ? "heute" : `am ${dateDe(due)}`;
-      out.push({ kind: "loan_due", refId: row.id, date: due, clubId: row.clubId, title: `Rückgabe fällig: ${row.itemName}`, body: `„${row.itemName}“ ist ${when} zurückzugeben.`, audience });
+      const when = today === due ? tr(lang, "heute", "today") : tr(lang, `am ${formatIsoDay(due, lang)}`, `on ${formatIsoDay(due, lang)}`);
+      out.push({
+        kind: "loan_due",
+        refId: row.id,
+        date: due,
+        clubId: row.clubId,
+        title: `${tr(lang, "Rückgabe fällig", "Return due")}: ${row.itemName}`,
+        body: tr(lang, `„${row.itemName}“ ist ${when} zurückzugeben.`, `“${row.itemName}” is due back ${when}.`),
+        audience,
+      });
       continue;
     }
     const step = [...LOAN_OVERDUE_STEPS].reverse().find((s) => s <= overdueDays);
@@ -225,8 +240,12 @@ export async function collectLoanReminders(clubs: Map<string, ReminderClub>, now
       refId: row.id,
       date: addDays(due, step),
       clubId: row.clubId,
-      title: `Rückgabe überfällig: ${row.itemName}`,
-      body: `„${row.itemName}“ hätte am ${dateDe(due)} zurückgegeben werden sollen. Bitte gib es so bald wie möglich zurück.`,
+      title: `${tr(lang, "Rückgabe überfällig", "Return overdue")}: ${row.itemName}`,
+      body: tr(
+        lang,
+        `„${row.itemName}“ hätte am ${formatIsoDay(due, lang)} zurückgegeben werden sollen. Bitte gib es so bald wie möglich zurück.`,
+        `“${row.itemName}” should have been returned on ${formatIsoDay(due, lang)}. Please return it as soon as possible.`,
+      ),
       audience,
     });
   }
@@ -252,14 +271,15 @@ export async function collectMaintenanceReminders(clubs: Map<string, ReminderClu
     const club = clubs.get(clubId)!;
     const today = localDate(now, club.timezone);
     list.sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.name.localeCompare(b.name));
-    const lines = list.map((i) => `• ${i.name}: ${i.dueDate < today ? "überfällig seit" : "fällig am"} ${dateDe(i.dueDate)}`);
+    const lang = club.lang;
+    const lines = list.map((i) => `• ${i.name}: ${i.dueDate < today ? tr(lang, "überfällig seit", "overdue since") : tr(lang, "fällig am", "due on")} ${formatIsoDay(i.dueDate, lang)}`);
     out.push({
       kind: "maintenance",
       refId: clubId,
       date: today,
       clubId,
-      title: list.length === 1 ? "Wartung fällig: 1 Gegenstand" : `Wartung fällig: ${list.length} Gegenstände`,
-      body: `Diese Gegenstände brauchen Wartung:\n${listLines(lines)}`,
+      title: list.length === 1 ? tr(lang, "Wartung fällig: 1 Gegenstand", "Maintenance due: 1 item") : tr(lang, `Wartung fällig: ${list.length} Gegenstände`, `Maintenance due: ${list.length} items`),
+      body: `${tr(lang, "Diese Gegenstände brauchen Wartung:", "These items need maintenance:")}\n${listLines(lines, lang)}`,
       audience: { roleTypes: roleTypesWithPermission("inventory:write"), includeGuardians: false },
     });
   }
@@ -295,8 +315,12 @@ export async function collectRsvpReminders(clubs: Map<string, ReminderClub>, now
       refId: row.id,
       date: day,
       clubId: row.clubId,
-      title: `Bitte antworten: ${row.title}`,
-      body: `Für das Treffen „${row.title}“ fehlt noch eine Antwort.\nWann: ${formatWhen(row.scheduledAt, club.timezone)}\nBitte sag zu oder ab.`,
+      title: `${tr(club.lang, "Bitte antworten", "Please respond")}: ${row.title}`,
+      body: tr(
+        club.lang,
+        `Für das Treffen „${row.title}“ fehlt noch eine Antwort.\nWann: ${formatWhen(row.scheduledAt, club.timezone)}\nBitte sag zu oder ab.`,
+        `Your response to the meeting “${row.title}” is still missing.\nWhen: ${formatWhen(row.scheduledAt, club.timezone, null, club.lang)}\nPlease accept or decline.`,
+      ),
       audience: { memberIds, includeGuardians: true },
     });
   }
@@ -330,10 +354,18 @@ export async function collectInvitationReminders(clubs: Map<string, ReminderClub
       refId: row.id,
       date: expiryDay,
       clubId: row.clubId,
-      title: expired ? `Einladung abgelaufen: ${row.name}` : `Einladung läuft ab: ${row.name}`,
+      title: expired ? `${tr(club.lang, "Einladung abgelaufen", "Invitation expired")}: ${row.name}` : `${tr(club.lang, "Einladung läuft ab", "Invitation expiring")}: ${row.name}`,
       body: expired
-        ? `Die Einladung zu MyVerein für ${row.name} wurde nicht angenommen und ist am ${dateDe(expiryDay)} abgelaufen.\nDu kannst unter Verein, Mitglieder, Konto eine neue Einladung senden.`
-        : `Die Einladung zu MyVerein für ${row.name} wurde noch nicht angenommen und läuft am ${dateDe(expiryDay)} ab.\nDu kannst unter Verein, Mitglieder, Konto die Einladung erneut senden oder die Person daran erinnern.`,
+        ? tr(
+            club.lang,
+            `Die Einladung zu MyVerein für ${row.name} wurde nicht angenommen und ist am ${formatIsoDay(expiryDay)} abgelaufen.\nDu kannst unter Verein, Mitglieder, Konto eine neue Einladung senden.`,
+            `The MyVerein invitation for ${row.name} was not accepted and expired on ${formatIsoDay(expiryDay, "en")}.\nYou can send a new invitation under Club, Members, Account.`,
+          )
+        : tr(
+            club.lang,
+            `Die Einladung zu MyVerein für ${row.name} wurde noch nicht angenommen und läuft am ${formatIsoDay(expiryDay)} ab.\nDu kannst unter Verein, Mitglieder, Konto die Einladung erneut senden oder die Person daran erinnern.`,
+            `The MyVerein invitation for ${row.name} has not been accepted yet and expires on ${formatIsoDay(expiryDay, "en")}.\nUnder Club, Members, Account you can send the invitation again or remind the person.`,
+          ),
       audience: { roleTypes: roleTypesWithPermission("members:write"), includeGuardians: false },
     });
   }
@@ -371,10 +403,18 @@ export async function collectCredentialReminders(clubs: Map<string, ReminderClub
       refId: row.id,
       date: expiry.validUntil,
       clubId: row.clubId,
-      title: expired ? `Qualifikation abgelaufen: ${row.label}` : `Qualifikation läuft ab: ${row.label}`,
+      title: expired ? `${tr(club.lang, "Qualifikation abgelaufen", "Qualification expired")}: ${row.label}` : `${tr(club.lang, "Qualifikation läuft ab", "Qualification expiring")}: ${row.label}`,
       body: expired
-        ? `Die Qualifikation „${row.label}“ von ${row.name} war nur bis zum ${dateDe(expiry.validUntil)} gültig und ist abgelaufen.\nBitte erneuern und im Profil aktualisieren.`
-        : `Die Qualifikation „${row.label}“ von ${row.name} ist noch bis zum ${dateDe(expiry.validUntil)} gültig.\nBitte rechtzeitig erneuern und im Profil aktualisieren.`,
+        ? tr(
+            club.lang,
+            `Die Qualifikation „${row.label}“ von ${row.name} war nur bis zum ${formatIsoDay(expiry.validUntil)} gültig und ist abgelaufen.\nBitte erneuern und im Profil aktualisieren.`,
+            `The qualification “${row.label}” of ${row.name} was only valid until ${formatIsoDay(expiry.validUntil, "en")} and has expired.\nPlease renew it and update the profile.`,
+          )
+        : tr(
+            club.lang,
+            `Die Qualifikation „${row.label}“ von ${row.name} ist noch bis zum ${formatIsoDay(expiry.validUntil)} gültig.\nBitte rechtzeitig erneuern und im Profil aktualisieren.`,
+            `The qualification “${row.label}” of ${row.name} is valid until ${formatIsoDay(expiry.validUntil, "en")}.\nPlease renew it in time and update the profile.`,
+          ),
       audience: { memberIds: [row.clubMemberId], includeGuardians: guardians },
     });
   }

@@ -12,6 +12,7 @@ import { normalizeEmail } from "../lib/audience.js";
 import { formatFrom } from "../lib/email.js";
 import { LOGO_CID } from "../lib/emailTemplate.js";
 import { NOTIFY_TEMPLATES, renderNotifyEmail, unsubscribeBaseUrl } from "../lib/notify/index.js";
+import { MAIL_LANGUAGES } from "../lib/notify/i18n.js";
 import { cleanText } from "../lib/text-policy.js";
 import { isValidTimezone } from "../lib/club-time.js";
 import { loadClubSettings } from "../lib/club-settings.js";
@@ -91,6 +92,8 @@ const updateSettingsSchema = z.object({
   notifyMeetingInvites: z.boolean().optional(),
   notifyAgeTransition: z.boolean().optional(),
   notifyHandover: z.boolean().optional(),
+  // Language of the system texts in club mails and pushes (decisions, reminders, event changes, invitations).
+  mailLanguage: z.enum(MAIL_LANGUAGES).optional(),
   // Club mail template (B15).
   senderName: optionalText(80, false).optional(),
   signature: optionalText(1000, true).optional(),
@@ -139,10 +142,14 @@ clubSettingsRoutes.patch(
 // --- Mail preview (B15) ---------------------------------------------------------------------------------------------
 
 const SAMPLE_TITLE = "Beispiel: Training fällt aus";
+const SAMPLE_TITLE_EN = "Example: Training is cancelled";
+const SAMPLE_BODY_EN = "Hello everyone,\n\nthursday's training is cancelled because the hall is closed. You will find details in the app: https://example.org/example\n\nBest regards";
 const SAMPLE_BODY = "Hallo zusammen,\n\nam Donnerstag fällt das Training wegen der Hallensperrung aus. Details findet ihr in der App: https://example.org/beispiel\n\nSportliche Grüße";
 
 const previewSchema = z.object({
   template: z.enum(NOTIFY_TEMPLATES).default("announcement"),
+  // Unsaved edit of the mail language: previews the chrome (intro, button, footer) in that language.
+  mailLanguage: z.enum(MAIL_LANGUAGES).optional(),
   // Unsaved edits of the form: override the stored values for this preview only.
   senderName: optionalText(80, false).optional(),
   signature: optionalText(1000, true).optional(),
@@ -167,7 +174,8 @@ clubSettingsRoutes.post("/mail-preview", previewLimit, zValidator("json", previe
   const [club] = await db.select({ name: organization.name }).from(organization).where(eq(organization.id, clubId));
   const clubName = club?.name ?? null;
 
-  let body = SAMPLE_BODY;
+  const lang = input.mailLanguage ?? settings.mailLanguage;
+  let body = lang === "en" ? SAMPLE_BODY_EN : SAMPLE_BODY;
   if (input.textBlockKey !== undefined) {
     const block = settings.textBlocks.find((b) => b.key === input.textBlockKey);
     if (!block) throw new ValidationError("Unknown text block", { details: { textBlockKey: input.textBlockKey } });
@@ -179,14 +187,15 @@ clubSettingsRoutes.post("/mail-preview", previewLimit, zValidator("json", previe
 
   const { subject, html } = renderNotifyEmail({
     template: input.template,
-    title: SAMPLE_TITLE,
+    title: lang === "en" ? SAMPLE_TITLE_EN : SAMPLE_TITLE,
     body,
+    lang,
     recipientName: "Max",
     clubName,
     ctaLabel: null,
     ctaUrl: null,
     signature,
-    unsubscribeUrl: input.template === "decision" ? null : `${unsubscribeBaseUrl()}/unsubscribe/beispiel`,
+    unsubscribeUrl: input.template === "decision" || input.template === "notice" ? null : `${unsubscribeBaseUrl()}/unsubscribe/beispiel`,
   });
   const from = formatFrom(process.env.EMAIL_FROM ?? "", senderName?.trim() || clubName);
   c.header("Cache-Control", "private, no-store");

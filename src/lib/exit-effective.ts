@@ -13,6 +13,8 @@ import { enqueue } from "./jobs/queue.js";
 import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
 import { BOARD_CATEGORY } from "./notify/types.js";
+import { formatIsoDay, tr } from "./notify/i18n.js";
+import { clubMailLanguage } from "./club-settings.js";
 import { notify } from "./notify/dispatcher.js";
 
 /**
@@ -33,7 +35,6 @@ const CATCH_UP_DAYS = 3;
 
 export const exitEffectiveDedupeKey = (clubMemberId: string, leftAt: string): string => `exit_effective:${clubMemberId}:${leftAt}`;
 
-const dateDe = (date: string): string => date.split("-").reverse().join(".");
 
 export async function runExitEffectiveSweep(now: Date = new Date(), scope: { clubId?: string } = {}): Promise<{ scheduled: number; alreadyScheduled: number }> {
   const horizon = (days: number) => new Date(now.getTime() + days * 86_400_000).toISOString().slice(0, 10);
@@ -81,6 +82,7 @@ export async function handleExitEffectiveNotify(job: JobContext): Promise<void> 
   // Withdrawn in the meantime (cancellation revoked / date moved): nothing to announce.
   if (!member || member.leftAt !== leftAt) return;
 
+  const lang = await clubMailLanguage(db, clubId);
   const lines: string[] = [];
   if (member.accountId) {
     const loans = await db
@@ -93,11 +95,13 @@ export async function handleExitEffectiveNotify(job: JobContext): Promise<void> 
       .from(locationKeyHolders)
       .innerJoin(locations, eq(locations.id, locationKeyHolders.locationId))
       .where(and(eq(locationKeyHolders.memberId, member.accountId), eq(locations.clubId, clubId)));
-    lines.push(...loans.map((l) => `• Ausleihe: ${l.name}`), ...keys.map((k) => `• Schlüssel: ${k.location}${k.label ? ` (${k.label})` : ""}`));
+    lines.push(...loans.map((l) => `• ${tr(lang, "Ausleihe", "Loan")}: ${l.name}`), ...keys.map((k) => `• ${tr(lang, "Schlüssel", "Key")}: ${k.location}${k.label ? ` (${k.label})` : ""}`));
   }
   const body = [
-    `Die Mitgliedschaft von ${member.displayName} endet seit dem ${dateDe(leftAt)}.`,
-    lines.length > 0 ? `Noch zurückzugeben:\n${lines.join("\n")}\nBitte Rückgabe veranlassen und im Verein eintragen.` : "Es sind keine Ausleihen oder Schlüssel offen.",
+    tr(lang, `Die Mitgliedschaft von ${member.displayName} endet seit dem ${formatIsoDay(leftAt)}.`, `The membership of ${member.displayName} ended on ${formatIsoDay(leftAt, "en")}.`),
+    lines.length > 0
+      ? tr(lang, `Noch zurückzugeben:\n${lines.join("\n")}\nBitte Rückgabe veranlassen und im Verein eintragen.`, `Still to be returned:\n${lines.join("\n")}\nPlease arrange the return and record it in the club.`)
+      : tr(lang, "Es sind keine Ausleihen oder Schlüssel offen.", "There are no open loans or keys."),
   ].join("\n");
 
   try {
@@ -107,7 +111,13 @@ export async function handleExitEffectiveNotify(job: JobContext): Promise<void> 
       eventKey: "member.exit_effective",
       refId: `${clubMemberId}#${leftAt}`,
       audience: { roleTypes: roleTypesWithPermission("members:write"), includeGuardians: false },
-      content: { title: lines.length > 0 ? `Austritt wirksam – Rückgabe offen: ${member.displayName}` : `Austritt wirksam: ${member.displayName}`, body, template: "reminder", category: BOARD_CATEGORY },
+      content: {
+        title: lines.length > 0 ? `${tr(lang, "Austritt wirksam – Rückgabe offen", "Exit effective – return outstanding")}: ${member.displayName}` : `${tr(lang, "Austritt wirksam", "Exit effective")}: ${member.displayName}`,
+        body,
+        template: "reminder",
+        category: BOARD_CATEGORY,
+        lang,
+      },
       channels: ["in_app", "email"],
     });
   } catch (err) {

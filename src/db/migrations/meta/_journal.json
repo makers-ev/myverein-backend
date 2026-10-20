@@ -295,6 +295,13 @@
       "when": 1792484336565,
       "tag": "0041_notify-age-transition",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1792484617007,
+      "tag": "0042_preferences-per-club",
+      "breakpoints": true
     }
   ]
 }

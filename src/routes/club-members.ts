@@ -36,6 +36,8 @@ import { APP_NAME, buildMemberInviteEmail, SITE_URL } from "../lib/emailTemplate
 import { notify } from "../lib/notify/dispatcher.js";
 import { clubMemberInvites, type ClubMemberInviteRow } from "../db/schema/club-member-invites.js";
 import { enqueueMemberCategoryNotices } from "../lib/age-transition.js";
+import { clubMailLanguage } from "../lib/club-settings.js";
+import { tr } from "../lib/notify/i18n.js";
 import { effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
 import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "../lib/member-read-scope.js";
 import { findMemberPhotoMedia, canSeeMemberPhoto, isMinor, memberPhotoUrls, removeMemberPhoto, replaceMemberPhoto, type PhotoCaller } from "../lib/member-photos.js";
@@ -1662,8 +1664,9 @@ function shapeInvite(invite: ClubMemberInviteRow) {
 async function sendInviteMail(clubId: string, target: { id: string; displayName: string }, invite: ClubMemberInviteRow, token: string, email: string): Promise<boolean> {
   try {
     const club = await db.query.organization.findFirst({ where: eq(organization.id, clubId) });
-    const clubName = club?.name ?? "deinem Verein";
-    const subject = `Einladung von ${clubName.replace(/[\r\n]+/g, " ")} zu ${APP_NAME}`;
+    const lang = await clubMailLanguage(db, clubId);
+    const clubName = club?.name ?? tr(lang, "deinem Verein", "your club");
+    const subject = tr(lang, `Einladung von ${clubName.replace(/[\r\n]+/g, " ")} zu ${APP_NAME}`, `Invitation from ${clubName.replace(/[\r\n]+/g, " ")} to ${APP_NAME}`);
     const result = await notify({
       clubId,
       class: "mandatory",
@@ -1672,14 +1675,16 @@ async function sendInviteMail(clubId: string, target: { id: string; displayName:
       recipients: [{ clubMemberId: target.id, name: target.displayName, email }],
       content: {
         title: subject,
-        body: "Einladung zur Verknüpfung deines Mitglieds-Kontos",
+        body: tr(lang, "Einladung zur Verknüpfung deines Mitglieds-Kontos", "Invitation to link your member account"),
+        lang,
         rendered: {
           subject,
           html: buildMemberInviteEmail({
             name: target.displayName,
             clubName,
             url: `${SITE_URL}/einladung?token=${encodeURIComponent(token)}`,
-            expiresOn: invite.expiresAt.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }),
+            expiresOn: invite.expiresAt.toLocaleDateString(tr(lang, "de-DE", "en-GB"), { timeZone: "Europe/Berlin" }),
+            lang,
           }),
         },
         sensitive: true,

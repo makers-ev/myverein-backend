@@ -54,6 +54,9 @@ export const clubSettings = pgTable("club_settings", {
   notifyAgeTransition: boolean("notify_age_transition").notNull().default(true),
   // Tell people when a loan or a key is handed out, returned or extended (default on).
   notifyHandover: boolean("notify_handover").notNull().default(true),
+  // Language of the system texts around club mails and pushes (decisions, reminders, event changes, invitations): 'de' | 'en'.
+  // Text written by a person (announcements) is sent as written.
+  mailLanguage: text("mail_language").notNull().default("de"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

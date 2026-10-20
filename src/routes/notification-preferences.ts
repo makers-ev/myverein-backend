@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, count, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 
@@ -46,42 +46,72 @@ notificationPreferenceRoutes.use("*", sessionGuard);
 
 type Prefs = Record<NotificationCategory, Record<SwitchableChannel, boolean>>;
 
-/** The ids of the club_members rows linked to this account (any club). Preferences stored for them (via a link) count too. */
-async function ownClubMemberIds(userId: string): Promise<string[]> {
-  const rows = await db.select({ id: clubMembers.id }).from(clubMembers).innerJoin(member, eq(member.id, clubMembers.memberId)).where(eq(member.userId, userId));
+/** The ids of the club_members rows linked to this account (any club, or only `clubId`). Preferences stored for them (via a link) count too. */
+async function ownClubMemberIds(userId: string, clubId: string | null): Promise<string[]> {
+  const rows = await db
+    .select({ id: clubMembers.id })
+    .from(clubMembers)
+    .innerJoin(member, eq(member.id, clubMembers.memberId))
+    .where(and(eq(member.userId, userId), clubId ? eq(clubMembers.clubId, clubId) : undefined));
   return rows.map((r) => r.id);
 }
 
-async function loadPrefs(userId: string): Promise<Prefs> {
-  const memberIds = await ownClubMemberIds(userId);
-  const rows = await db
-    .select({ category: notificationPreferences.category, channel: notificationPreferences.channel, enabled: notificationPreferences.enabled })
-    .from(notificationPreferences)
-    .where(memberIds.length ? sql`(${notificationPreferences.userId} = ${userId} OR ${inArray(notificationPreferences.clubMemberId, memberIds)})` : eq(notificationPreferences.userId, userId));
-  const prefs = Object.fromEntries(NOTIFICATION_CATEGORIES.map((cat) => [cat, { email: true, push: true }])) as Prefs;
-  // Same rule as the dispatcher: one disabled row is enough, no row = enabled.
-  for (const r of rows) {
-    if (!r.enabled && (NOTIFICATION_CATEGORIES as readonly string[]).includes(r.category) && (SWITCHABLE_CHANNELS as readonly string[]).includes(r.channel)) {
-      prefs[r.category as NotificationCategory][r.channel as SwitchableChannel] = false;
-    }
-  }
-  return prefs;
+/** The account must belong to the club (account membership); anything else answers 404 so the route is no club-existence oracle. */
+async function assertAccountInClub(userId: string, clubId: string): Promise<void> {
+  const [row] = await db.select({ id: member.id }).from(member).where(and(eq(member.userId, userId), eq(member.organizationId, clubId))).limit(1);
+  if (!row) throw new NotFoundError("Club not found");
 }
 
-/** Whether the account holds a role with `members:write` (the audience of the `board` digests) in any club. */
-async function holdsBoardRole(userId: string): Promise<boolean> {
+interface LoadedPrefs {
+  prefs: Prefs;
+  /** Club view only: the switches that have a club-specific row (they win over the global default). */
+  overrides: Array<{ category: NotificationCategory; channel: SwitchableChannel; enabled: boolean }>;
+}
+
+/**
+ * Effective switches of the account. Global view (`clubId` null): only the global rows. Club view: per switch the club-specific row
+ * wins over the global row, no row = on. Same rule as the dispatcher: the account row AND the rows of the linked account-less
+ * member records all have to be on (one disabled row is enough).
+ */
+async function loadPrefs(userId: string, clubId: string | null): Promise<LoadedPrefs> {
+  const memberIds = await ownClubMemberIds(userId, clubId);
+  const subject = memberIds.length ? sql`(${notificationPreferences.userId} = ${userId} OR ${inArray(notificationPreferences.clubMemberId, memberIds)})` : eq(notificationPreferences.userId, userId);
+  const rows = await db
+    .select({ userId: notificationPreferences.userId, clubMemberId: notificationPreferences.clubMemberId, clubId: notificationPreferences.clubId, category: notificationPreferences.category, channel: notificationPreferences.channel, enabled: notificationPreferences.enabled })
+    .from(notificationPreferences)
+    .where(and(subject, clubId ? or(isNull(notificationPreferences.clubId), eq(notificationPreferences.clubId, clubId)) : isNull(notificationPreferences.clubId)));
+  const prefs = Object.fromEntries(NOTIFICATION_CATEGORIES.map((cat) => [cat, { email: true, push: true }])) as Prefs;
+  const overrides: LoadedPrefs["overrides"] = [];
+  const known = (r: { category: string; channel: string }) => (NOTIFICATION_CATEGORIES as readonly string[]).includes(r.category) && (SWITCHABLE_CHANNELS as readonly string[]).includes(r.channel);
+  const valueOf = (subjectKey: "userId" | "clubMemberId", id: string, category: string, channel: string): boolean => {
+    const mine = rows.filter((r) => r[subjectKey] === id && r.category === category && r.channel === channel);
+    return (clubId ? mine.find((r) => r.clubId === clubId)?.enabled : undefined) ?? mine.find((r) => r.clubId === null)?.enabled ?? true;
+  };
+  for (const category of NOTIFICATION_CATEGORIES) {
+    for (const channel of SWITCHABLE_CHANNELS) {
+      prefs[category][channel] = valueOf("userId", userId, category, channel) && memberIds.every((id) => valueOf("clubMemberId", id, category, channel));
+    }
+  }
+  if (clubId) for (const r of rows) if (r.userId === userId && r.clubId === clubId && known(r)) overrides.push({ category: r.category as NotificationCategory, channel: r.channel as SwitchableChannel, enabled: r.enabled });
+  return { prefs, overrides };
+}
+
+/** Whether the account holds a role with `members:write` (the audience of the `board` digests), in any club or in `clubId`. */
+async function holdsBoardRole(userId: string, clubId: string | null): Promise<boolean> {
   const rows = await db
     .select({ id: clubRoles.id })
     .from(clubRoles)
     .innerJoin(member, eq(member.id, clubRoles.memberId))
-    .where(and(eq(member.userId, userId), inArray(clubRoles.roleType, roleTypesWithPermission("members:write"))))
+    .where(and(eq(member.userId, userId), inArray(clubRoles.roleType, roleTypesWithPermission("members:write")), clubId ? eq(member.organizationId, clubId) : undefined))
     .limit(1);
   return rows.length > 0;
 }
 
 /** `board` is only listed for accounts that can receive it; everybody else keeps the three categories every client knows. */
-function shapePrefs(prefs: Prefs, includeBoard: boolean) {
+function shapePrefs(loaded: LoadedPrefs, includeBoard: boolean, clubId: string | null) {
+  const { prefs, overrides } = loaded;
   return {
+    clubId,
     categories: NOTIFICATION_CATEGORIES.filter((category) => includeBoard || category !== BOARD_CATEGORY).map((category) => ({
       category,
       channels: [
@@ -91,54 +121,82 @@ function shapePrefs(prefs: Prefs, includeBoard: boolean) {
       ],
     })),
     mandatory: MANDATORY_CLASSES.map((key) => ({ key, switchable: false })),
+    ...(clubId ? { overrides: overrides.filter((o) => includeBoard || o.category !== BOARD_CATEGORY) } : {}),
   };
 }
 
-notificationPreferenceRoutes.get("/", async (c) => {
+const getQuerySchema = z.object({ clubId: z.string().min(1).max(100).optional() });
+
+/**
+ * `GET /notification-preferences` = the global defaults. `?clubId=` = the effective switches for that club (club-specific
+ * overrides win over the global default; `overrides` lists the club-specific ones). The account must belong to the club (404).
+ */
+notificationPreferenceRoutes.get("/", zValidator("query", getQuerySchema, validationHook), async (c) => {
   c.header("Cache-Control", "private, no-store");
   const userId = c.get("user").id;
-  return c.json({ data: shapePrefs(await loadPrefs(userId), await holdsBoardRole(userId)) });
+  const clubId = c.req.valid("query").clubId ?? null;
+  if (clubId) await assertAccountInClub(userId, clubId);
+  return c.json({ data: shapePrefs(await loadPrefs(userId, clubId), await holdsBoardRole(userId, clubId), clubId) });
 });
 
 const putSchema = z.object({
+  /** Omitted/null: the global default. Set: the override for that club only. */
+  clubId: z.string().min(1).max(100).nullable().optional(),
   preferences: z
-    .array(z.object({ category: z.string().max(40), channel: z.string().max(20), enabled: z.boolean() }))
+    .array(z.object({ category: z.string().max(40), channel: z.string().max(20), enabled: z.boolean().nullable() }))
     .min(1)
     .max(20),
 });
 
 notificationPreferenceRoutes.put("/", zValidator("json", putSchema, validationHook), async (c) => {
   const userId = c.get("user").id;
-  const changes = new Map<string, { category: NotificationCategory; channel: SwitchableChannel; enabled: boolean }>();
-  for (const p of c.req.valid("json").preferences) {
+  const body = c.req.valid("json");
+  const clubId = body.clubId ?? null;
+  const changes = new Map<string, { category: NotificationCategory; channel: SwitchableChannel; enabled: boolean | null }>();
+  for (const p of body.preferences) {
     if (MANDATORY_CATEGORY_NAMES.includes(p.category)) throw new ValidationError("Mandatory messages cannot be switched off", { details: { code: "mandatory_not_switchable", category: p.category } });
     if (!(NOTIFICATION_CATEGORIES as readonly string[]).includes(p.category)) throw new ValidationError("Unknown category", { details: { category: p.category } });
     if (p.channel === "in_app") throw new ValidationError("The in-app channel cannot be switched off", { details: { code: "channel_not_switchable", channel: p.channel } });
     if (!(SWITCHABLE_CHANNELS as readonly string[]).includes(p.channel)) throw new ValidationError("Unknown channel", { details: { channel: p.channel } });
+    // `enabled: null` removes the club-specific override again (back to the global default); the global default itself has nothing to reset.
+    if (p.enabled === null && clubId === null) throw new ValidationError("Only a club-specific setting can be reset", { details: { code: "reset_needs_club", category: p.category, channel: p.channel } });
     changes.set(`${p.category}:${p.channel}`, { category: p.category as NotificationCategory, channel: p.channel as SwitchableChannel, enabled: p.enabled });
   }
-  const memberIds = await ownClubMemberIds(userId);
+  if (clubId) await assertAccountInClub(userId, clubId);
+  const memberIds = await ownClubMemberIds(userId, clubId);
   await db.transaction(async (tx) => {
     for (const ch of changes.values()) {
+      if (ch.enabled === null) {
+        await tx.delete(notificationPreferences).where(and(eq(notificationPreferences.userId, userId), eq(notificationPreferences.clubId, clubId!), eq(notificationPreferences.category, ch.category), eq(notificationPreferences.channel, ch.channel)));
+        continue;
+      }
       await tx
         .insert(notificationPreferences)
-        .values({ userId, category: ch.category, channel: ch.channel, enabled: ch.enabled })
-        .onConflictDoUpdate({
-          target: [notificationPreferences.userId, notificationPreferences.category, notificationPreferences.channel],
-          targetWhere: sql`${notificationPreferences.userId} IS NOT NULL`,
-          set: { enabled: ch.enabled, updatedAt: new Date() },
-        });
-      // A switch made earlier through an unsubscribe link of the account-less period must not outlive the explicit choice.
+        .values({ userId, clubId, category: ch.category, channel: ch.channel, enabled: ch.enabled })
+        .onConflictDoUpdate(
+          clubId
+            ? { target: [notificationPreferences.userId, notificationPreferences.clubId, notificationPreferences.category, notificationPreferences.channel], targetWhere: sql`${notificationPreferences.userId} IS NOT NULL AND ${notificationPreferences.clubId} IS NOT NULL`, set: { enabled: ch.enabled, updatedAt: new Date() } }
+            : { target: [notificationPreferences.userId, notificationPreferences.category, notificationPreferences.channel], targetWhere: sql`${notificationPreferences.userId} IS NOT NULL AND ${notificationPreferences.clubId} IS NULL`, set: { enabled: ch.enabled, updatedAt: new Date() } },
+        );
+      // A switch made earlier through an unsubscribe link of the account-less period must not outlive the explicit choice
+      // (global choice: the global rows of all own member records; club choice: the rows of the member record in that club).
       if (memberIds.length) {
         await tx
           .update(notificationPreferences)
           .set({ enabled: ch.enabled, updatedAt: new Date() })
-          .where(and(inArray(notificationPreferences.clubMemberId, memberIds), eq(notificationPreferences.category, ch.category), eq(notificationPreferences.channel, ch.channel)));
+          .where(
+            and(
+              inArray(notificationPreferences.clubMemberId, memberIds),
+              clubId ? or(isNull(notificationPreferences.clubId), eq(notificationPreferences.clubId, clubId)) : isNull(notificationPreferences.clubId),
+              eq(notificationPreferences.category, ch.category),
+              eq(notificationPreferences.channel, ch.channel),
+            ),
+          );
       }
     }
   });
   c.header("Cache-Control", "private, no-store");
-  return c.json({ data: shapePrefs(await loadPrefs(userId), await holdsBoardRole(userId)) });
+  return c.json({ data: shapePrefs(await loadPrefs(userId, clubId), await holdsBoardRole(userId, clubId), clubId) });
 });
 
 // --- Leadership view: yes/no only ----------------------------------------------------------------------------------------------
@@ -157,14 +215,16 @@ notificationPreferenceRoutes.get("/members", clubGuard, zValidator("query", memb
   if (!hasClubPermission(c.get("clubRoleTypes"), "announcements:write")) throw new ForbiddenError("Missing announcements:write permission");
   const query = c.req.valid("query" as never) as z.infer<typeof membersQuerySchema>;
   // Raw qualified names: drizzle renders columns of a single-table select unqualified, which would bind to the subquery's own table.
-  const unsubscribed = sql<boolean>`exists (
-    select 1 from notification_preferences np
-    where np.category = 'announcements' and np.channel = 'email' and np.enabled = false
-      and (np.club_member_id = club_members.id
-        or np.user_id = (select m.user_id from member m where m.id = club_members.member_id))
-  )`;
+  // Effective for THIS club: club-specific row > global row > on; the account row or the account-less member row switching it off is enough.
+  const clubId = c.get("clubId");
+  const effective = (subjectColumn: string, subjectExpr: ReturnType<typeof sql>) => sql`coalesce(
+    (select np.enabled from notification_preferences np where ${sql.raw(subjectColumn)} = ${subjectExpr} and np.club_id = ${clubId} and np.category = 'announcements' and np.channel = 'email'),
+    (select np.enabled from notification_preferences np where ${sql.raw(subjectColumn)} = ${subjectExpr} and np.club_id is null and np.category = 'announcements' and np.channel = 'email'),
+    true)`;
+  const unsubscribed = sql<boolean>`(not ${effective("np.club_member_id", sql`club_members.id`)}
+    or not ${effective("np.user_id", sql`(select m.user_id from member m where m.id = club_members.member_id)`)})`;
   const base = and(
-    eq(clubMembers.clubId, c.get("clubId")),
+    eq(clubMembers.clubId, clubId),
     notInArray(clubMembers.status, [...EXCLUDED_RECIPIENT_STATUSES]),
     query.unsubscribed === undefined ? undefined : query.unsubscribed === "true" ? unsubscribed : sql`not ${unsubscribed}`,
   );
@@ -211,28 +271,36 @@ async function clubNameOf(clubId: string | null): Promise<string | null> {
   return club?.name ?? null;
 }
 
+/** The club a token acts on: `v: 2` tokens with a club are club-specific; older tokens (no `v`) and platform mails are global. */
+const scopeOf = (p: UnsubscribePayload): { clubId: string | null; scope: "club" | "all" } => (p.v === 2 && p.k ? { clubId: p.k, scope: "club" } : { clubId: null, scope: "all" });
+
 async function isUnsubscribed(p: UnsubscribePayload): Promise<boolean> {
-  const [row] = await db
-    .select({ enabled: notificationPreferences.enabled })
+  const { clubId } = scopeOf(p);
+  const rows = await db
+    .select({ clubId: notificationPreferences.clubId, enabled: notificationPreferences.enabled })
     .from(notificationPreferences)
-    .where(and(p.s === "u" ? eq(notificationPreferences.userId, p.p) : eq(notificationPreferences.clubMemberId, p.p), eq(notificationPreferences.category, p.c), eq(notificationPreferences.channel, "email")));
-  return row?.enabled === false;
+    .where(and(p.s === "u" ? eq(notificationPreferences.userId, p.p) : eq(notificationPreferences.clubMemberId, p.p), eq(notificationPreferences.category, p.c), eq(notificationPreferences.channel, "email"), clubId ? or(isNull(notificationPreferences.clubId), eq(notificationPreferences.clubId, clubId)) : isNull(notificationPreferences.clubId)));
+  // club-specific row > global row > on (same as the dispatcher)
+  return (rows.find((r) => r.clubId !== null)?.enabled ?? rows.find((r) => r.clubId === null)?.enabled ?? true) === false;
 }
 
-/** Turns the e-mail channel of the category off for the token's subject. Idempotent; a subject that no longer exists changes nothing. */
+/** Turns the e-mail channel of the category off for the token's subject (and club, for current tokens). Idempotent; a subject that no longer exists changes nothing. */
 async function applyUnsubscribe(p: UnsubscribePayload): Promise<void> {
+  const { clubId } = scopeOf(p);
   const subject = p.s === "u" ? { userId: p.p } : { clubMemberId: p.p };
+  const subjectColumns = p.s === "u" ? [notificationPreferences.userId] : [notificationPreferences.clubMemberId];
+  const subjectPredicate = p.s === "u" ? sql`${notificationPreferences.userId} IS NOT NULL` : sql`${notificationPreferences.clubMemberId} IS NOT NULL`;
   try {
     await db
       .insert(notificationPreferences)
-      .values({ ...subject, category: p.c, channel: "email", enabled: false })
-      .onConflictDoUpdate({
-        target: p.s === "u" ? [notificationPreferences.userId, notificationPreferences.category, notificationPreferences.channel] : [notificationPreferences.clubMemberId, notificationPreferences.category, notificationPreferences.channel],
-        targetWhere: p.s === "u" ? sql`${notificationPreferences.userId} IS NOT NULL` : sql`${notificationPreferences.clubMemberId} IS NOT NULL`,
-        set: { enabled: false, updatedAt: new Date() },
-      });
+      .values({ ...subject, clubId, category: p.c, channel: "email", enabled: false })
+      .onConflictDoUpdate(
+        clubId
+          ? { target: [...subjectColumns, notificationPreferences.clubId, notificationPreferences.category, notificationPreferences.channel], targetWhere: sql`${subjectPredicate} AND ${notificationPreferences.clubId} IS NOT NULL`, set: { enabled: false, updatedAt: new Date() } }
+          : { target: [...subjectColumns, notificationPreferences.category, notificationPreferences.channel], targetWhere: sql`${subjectPredicate} AND ${notificationPreferences.clubId} IS NULL`, set: { enabled: false, updatedAt: new Date() } },
+      );
   } catch (err) {
-    // Deleted account / member: nothing left to unsubscribe, and the answer must not reveal that (no existence oracle).
+    // Deleted account / member / club: nothing left to unsubscribe, and the answer must not reveal that (no existence oracle).
     if ((err as { code?: string; cause?: { code?: string } })?.code !== "23503" && (err as { cause?: { code?: string } })?.cause?.code !== "23503") throw err;
   }
 }
@@ -246,7 +314,8 @@ unsubscribeRoutes.get("/:token", async (c) => {
   const [clubName, unsubscribed] = await Promise.all([clubNameOf(payload.k), isUnsubscribed(payload)]);
   if (wantsHtml(c)) {
     const label = CATEGORY_LABEL[payload.c];
-    const club = clubName ? ` von ${esc(clubName)}` : "";
+    // Current links act on this club only; links issued before G12 switch the category off for every club (and say so).
+    const club = scopeOf(payload).scope === "club" && clubName ? ` von ${esc(clubName)}` : scopeOf(payload).scope === "all" && payload.k ? " (in allen Vereinen)" : "";
     return c.html(
       page(
         unsubscribed ? "Bereits abgemeldet" : "Benachrichtigungen abbestellen",
@@ -256,7 +325,7 @@ unsubscribeRoutes.get("/:token", async (c) => {
       ),
     );
   }
-  return c.json({ data: { category: payload.c, channel: "email", clubName, unsubscribed } });
+  return c.json({ data: { category: payload.c, channel: "email", clubName, scope: scopeOf(payload).scope, unsubscribed } });
 });
 
 /** RFC 8058 one-click (`List-Unsubscribe=One-Click`, body ignored) and the confirmation button of the page. Idempotent, reusable until expiry. */
@@ -267,6 +336,10 @@ unsubscribeRoutes.post("/:token", async (c) => {
     throw new NotFoundError(INVALID);
   }
   await applyUnsubscribe(payload);
-  if (wantsHtml(c)) return c.html(page("Abgemeldet", `<p>Du erhältst keine E-Mails zu „${CATEGORY_LABEL[payload.c]}“ mehr. Wichtige Mitteilungen zu deinem Konto und deinen Anträgen bekommst du weiterhin.</p>`));
-  return c.json({ data: { category: payload.c, channel: "email", unsubscribed: true } });
+  if (wantsHtml(c)) {
+    const scope = scopeOf(payload);
+    const where = scope.scope === "club" ? ` von ${esc((await clubNameOf(scope.clubId)) ?? "diesem Verein")}` : payload.k ? " (in allen Vereinen)" : "";
+    return c.html(page("Abgemeldet", `<p>Du erhältst keine E-Mails zu „${CATEGORY_LABEL[payload.c]}“${where} mehr. Wichtige Mitteilungen zu deinem Konto und deinen Anträgen bekommst du weiterhin.</p>`));
+  }
+  return c.json({ data: { category: payload.c, channel: "email", scope: scopeOf(payload).scope, unsubscribed: true } });
 });

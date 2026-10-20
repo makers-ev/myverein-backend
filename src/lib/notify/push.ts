@@ -7,6 +7,7 @@ import { enqueue } from "../jobs/queue.js";
 import type { JobContext } from "../jobs/registry.js";
 import { logger } from "../logger.js";
 import { optedOutDeliveryIds, withdrawnAnnouncementIds } from "./guards.js";
+import type { MailLanguage } from "./i18n.js";
 import { PUSH_RECEIPTS_JOB_TYPE, type DeliveryContent } from "./types.js";
 
 /**
@@ -116,7 +117,29 @@ const GENERIC_TEXT_BY_KEY: Record<string, string> = {
   "reminder.loan_overdue": "Rückgabe überfällig",
 };
 
-export function genericPushText(eventKey: string | null, template: DeliveryContent["template"]): string {
+const GENERIC_TEXT_EN: Record<DeliveryContent["template"], string> = {
+  announcement: "New message",
+  urgent: "Urgent message",
+  reminder: "New reminder",
+  decision: "News about your request",
+  notice: "New notice",
+};
+
+const GENERIC_TEXT_BY_KEY_EN: Record<string, string> = {
+  "event.changed": "Event changed",
+  "event.cancelled": "Event cancelled",
+  "event.promoted": "You moved up",
+  "meeting.changed": "Meeting rescheduled",
+  "meeting.cancelled": "Meeting cancelled",
+  "meeting.invited": "Invitation to a meeting",
+  "reminder.event": "Reminder for an event",
+  "reminder.rsvp": "Please respond",
+  "reminder.loan_due": "Return due",
+  "reminder.loan_overdue": "Return overdue",
+};
+
+export function genericPushText(eventKey: string | null, template: DeliveryContent["template"], lang: MailLanguage = "de"): string {
+  if (lang === "en") return (eventKey ? GENERIC_TEXT_BY_KEY_EN[eventKey] : undefined) ?? GENERIC_TEXT_EN[template] ?? GENERIC_TEXT_EN.announcement;
   return (eventKey ? GENERIC_TEXT_BY_KEY[eventKey] : undefined) ?? GENERIC_TEXT[template] ?? GENERIC_TEXT.announcement;
 }
 
@@ -177,7 +200,7 @@ export async function handlePushDelivery(job: JobContext): Promise<void> {
         message: {
           to: t.token,
           title: (row.clubId ? clubName.get(row.clubId) : null) ?? "MyVerein",
-          body: genericPushText(row.eventKey, template),
+          body: genericPushText(row.eventKey, template, content.lang ?? "de"),
           data: pushDataFor(row.eventKey, row.refId, row.announcementId, row.clubId, urgent),
           priority: urgent ? "high" : "default",
           channelId: urgent ? "urgent" : "default",

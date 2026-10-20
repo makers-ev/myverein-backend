@@ -2,8 +2,9 @@ import { eq } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
-import { clubTimezone, clubMemberIdsOf, formatWhen } from "./event-notify.js";
+import { clubMemberIdsOf, formatWhen } from "./event-notify.js";
 import { loadClubSettings } from "./club-settings.js";
+import { tr } from "./notify/i18n.js";
 import { logger } from "./logger.js";
 import { notifySafely } from "./notify/dispatcher.js";
 
@@ -43,36 +44,51 @@ const SELF_PROOF: ReadonlySet<HandoverKind> = new Set(["loan.issued"]);
 export async function notifyHandover(input: HandoverInput): Promise<void> {
   try {
     if (input.accountMemberId === input.actorAccountMemberId && !SELF_PROOF.has(input.kind)) return;
-    if (!(await loadClubSettings(db, input.clubId)).notifyHandover) return;
+    const settings = await loadClubSettings(db, input.clubId);
+    if (!settings.notifyHandover) return;
+    const lang = settings.mailLanguage;
     const [clubMemberId] = await clubMemberIdsOf(input.clubId, [input.accountMemberId]);
     if (!clubMemberId) return;
     const [person] = await db.select({ name: clubMembers.displayName }).from(clubMembers).where(eq(clubMembers.id, clubMemberId));
-    const name = person?.name ?? "Mitglied";
-    const timezone = await clubTimezone(input.clubId);
-    const day = (date: Date) => formatWhen(date, timezone).split(", ").slice(0, 2).join(", ");
+    const name = person?.name ?? tr(lang, "Mitglied", "Member");
+    const timezone = settings.timezone;
+    const day = (date: Date) => formatWhen(date, timezone, null, lang).split(", ").slice(0, 2).join(", ");
     const label = input.keyLabel ? ` (${input.keyLabel})` : "";
+    const subject = input.subject;
     let title: string;
     let body: string;
     switch (input.kind) {
       case "loan.issued":
-        title = `Ausleihe: ${input.subject}`;
-        body = `„${input.subject}“ wurde an ${name} ausgeliehen.\n${input.dueAt ? `Rückgabe bis: ${day(input.dueAt)}.` : "Ein Rückgabedatum wurde nicht festgelegt."}`;
+        title = `${tr(lang, "Ausleihe", "Loan")}: ${subject}`;
+        body = tr(
+          lang,
+          `„${subject}“ wurde an ${name} ausgeliehen.\n${input.dueAt ? `Rückgabe bis: ${day(input.dueAt)}.` : "Ein Rückgabedatum wurde nicht festgelegt."}`,
+          `“${subject}” was lent to ${name}.\n${input.dueAt ? `Return by: ${day(input.dueAt)}.` : "No return date was set."}`,
+        );
         break;
       case "loan.returned":
-        title = `Rückgabe bestätigt: ${input.subject}`;
-        body = `„${input.subject}“ wurde von ${name} zurückgegeben. Danke!`;
+        title = `${tr(lang, "Rückgabe bestätigt", "Return confirmed")}: ${subject}`;
+        body = tr(lang, `„${subject}“ wurde von ${name} zurückgegeben. Danke!`, `“${subject}” was returned by ${name}. Thank you!`);
         break;
       case "loan.extended":
-        title = `Rückgabe verlängert: ${input.subject}`;
-        body = `Die Rückgabe von „${input.subject}“ (${name}) wurde ${input.dueAt ? `auf den ${day(input.dueAt)}` : "neu"} verlängert.${input.previousDueAt ? `\nBisher: ${day(input.previousDueAt)}.` : ""}`;
+        title = `${tr(lang, "Rückgabe verlängert", "Return extended")}: ${subject}`;
+        body = tr(
+          lang,
+          `Die Rückgabe von „${subject}“ (${name}) wurde ${input.dueAt ? `auf den ${day(input.dueAt)}` : "neu"} verlängert.${input.previousDueAt ? `\nBisher: ${day(input.previousDueAt)}.` : ""}`,
+          `The return of “${subject}” (${name}) was extended${input.dueAt ? ` to ${day(input.dueAt)}` : ""}.${input.previousDueAt ? `\nPreviously: ${day(input.previousDueAt)}.` : ""}`,
+        );
         break;
       case "key.issued":
-        title = `Schlüsselausgabe: ${input.subject}`;
-        body = `Ein Schlüssel${label} für „${input.subject}“ wurde an ${name} übergeben.\nBitte gib ihn zurück, sobald du ihn nicht mehr brauchst.`;
+        title = `${tr(lang, "Schlüsselausgabe", "Key handed out")}: ${subject}`;
+        body = tr(
+          lang,
+          `Ein Schlüssel${label} für „${subject}“ wurde an ${name} übergeben.\nBitte gib ihn zurück, sobald du ihn nicht mehr brauchst.`,
+          `A key${label} for “${subject}” was handed to ${name}.\nPlease return it as soon as you no longer need it.`,
+        );
         break;
       case "key.returned":
-        title = `Schlüsselrückgabe: ${input.subject}`;
-        body = `Der Schlüssel${label} für „${input.subject}“ wurde von ${name} zurückgegeben. Danke!`;
+        title = `${tr(lang, "Schlüsselrückgabe", "Key returned")}: ${subject}`;
+        body = tr(lang, `Der Schlüssel${label} für „${subject}“ wurde von ${name} zurückgegeben. Danke!`, `The key${label} for “${subject}” was returned by ${name}. Thank you!`);
         break;
     }
     await notifySafely({
@@ -81,7 +97,7 @@ export async function notifyHandover(input: HandoverInput): Promise<void> {
       eventKey: input.kind,
       refId: input.refId,
       audience: { memberIds: [clubMemberId], includeGuardians: true },
-      content: { title, body, category: "reminders", template: "announcement" },
+      content: { title, body, category: "reminders", template: "announcement", lang },
       channels: ["in_app", "email"],
     });
   } catch (err) {

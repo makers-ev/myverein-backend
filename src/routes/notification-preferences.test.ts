@@ -45,6 +45,9 @@ const call = (who: { cookie: string }, url: string, init: { method?: string; bod
     headers: { cookie: who.cookie, "x-forwarded-for": randomUUID(), "content-type": "application/json" },
     body: init.body ? JSON.stringify(init.body) : undefined,
   });
+/** Like `call`, but without the `clubId` query: the global defaults view (`call` adds it for the club guard of /members). */
+const callGlobal = (who: { cookie: string }, url: string, init: { method?: string; body?: object } = {}) =>
+  app.request(url, { method: init.method ?? "GET", headers: { cookie: who.cookie, "x-forwarded-for": randomUUID(), "content-type": "application/json" }, body: init.body ? JSON.stringify(init.body) : undefined });
 const open = (method: string, token: string, headers: Record<string, string> = {}) => app.request(`/unsubscribe/${token}`, { method, headers: { "x-forwarded-for": randomUUID(), ...headers } });
 
 describe("notification preferences and unsubscribe (B9)", () => {
@@ -174,16 +177,19 @@ describe("notification preferences and unsubscribe (B9)", () => {
 
       // confirmation payload (GET) changes nothing
       const get = await json(await open("GET", token));
-      expect(get.data).toEqual({ category: "announcements", channel: "email", clubName: `B9 Club ${suffix}`, unsubscribed: false });
+      expect(get.data).toEqual({ category: "announcements", channel: "email", clubName: `B9 Club ${suffix}`, scope: "club", unsubscribed: false });
       // one-click POST with the RFC 8058 body
       const post = await app.request(`/unsubscribe/${token}`, { method: "POST", headers: { "x-forwarded-for": randomUUID(), "content-type": "application/x-www-form-urlencoded" }, body: "List-Unsubscribe=One-Click" });
       expect(post.status).toBe(200);
-      expect((await json(post)).data).toEqual({ category: "announcements", channel: "email", unsubscribed: true });
+      expect((await json(post)).data).toEqual({ category: "announcements", channel: "email", scope: "club", unsubscribed: true });
       expect((await json(await open("GET", token))).data.unsubscribed).toBe(true);
 
       // the preference is visible in the settings and respected by the next send
       const prefs = await json(await call(anna, "/notification-preferences"));
       expect(prefs.data.categories[0].channels[1]).toMatchObject({ channel: "email", enabled: false });
+      expect(prefs.data.overrides).toEqual([{ category: "announcements", channel: "email", enabled: false }]);
+      // current links act on this club only: the global default is untouched
+      expect((await json(await callGlobal(anna, "/notification-preferences"))).data.categories[0].channels[1].enabled).toBe(true);
       const next = await notify({ clubId: club, class: "optional", eventKey: `b9-after-${suffix}`, recipients: [{ userId: anna.userId, clubMemberId: anna.clubMemberId, email: "anna@example.com" }], content: { title: "A", body: "B" }, channels: ["email"] });
       expect(next.skippedOptout).toBe(1);
       // other categories stay on
@@ -214,11 +220,17 @@ describe("notification preferences and unsubscribe (B9)", () => {
       expect((await open("POST", token)).status).toBe(200);
       const rows = await db.select().from(notificationPreferences).where(and(eq(notificationPreferences.userId, ben.userId), eq(notificationPreferences.category, "reminders")));
       expect(rows).toHaveLength(1);
-      await call(ben, "/notification-preferences", { method: "PUT", body: { preferences: [{ category: "reminders", channel: "email", enabled: true }] } });
+      expect(rows[0]).toMatchObject({ clubId: club, enabled: false });
+      // the user's explicit choice for this club (PUT with clubId) replaces the unsubscribe
+      const forClub = (enabled: boolean | null) => callGlobal(ben, "/notification-preferences", { method: "PUT", body: { clubId: club, preferences: [{ category: "reminders", channel: "email", enabled }] } });
+      expect((await forClub(true)).status).toBe(200);
       expect((await json(await call(ben, "/notification-preferences"))).data.categories[2].channels[1].enabled).toBe(true);
       expect((await open("POST", token)).status).toBe(200);
       expect((await json(await call(ben, "/notification-preferences"))).data.categories[2].channels[1].enabled).toBe(false);
-      await call(ben, "/notification-preferences", { method: "PUT", body: { preferences: [{ category: "reminders", channel: "email", enabled: true }] } });
+      // `enabled: null` drops the club override again: back to the global default (on)
+      expect((await forClub(null)).status).toBe(200);
+      expect((await json(await call(ben, "/notification-preferences"))).data.categories[2].channels[1].enabled).toBe(true);
+      expect(await db.select().from(notificationPreferences).where(and(eq(notificationPreferences.userId, ben.userId), eq(notificationPreferences.category, "reminders")))).toHaveLength(0);
     });
 
     it("answers tampered, expired, foreign and garbage tokens identically (404, no oracle) and changes nothing", async () => {

@@ -8,7 +8,8 @@ import { setUnsubscribeUrlProvider, type UnsubscribeSubject } from "./unsubscrib
 /**
  * Signed unsubscribe tokens (Wave 9 B9, ADR-006). A token is `base64url(json).base64url(hmac)`; the HMAC-SHA256 covers the
  * payload (person + category + club + expiry) under a namespace prefix, is compared in constant time and the token stops
- * working at its expiry. The subject is the account (`u`, `notification_preferences.user_id`) or, for members without an
+ * working at its expiry. Since G12 a token unsubscribes for the club of the mail only (`v: 2`); tokens without `v` (issued earlier)
+ * still switch the category off globally. The subject is the account (`u`, `notification_preferences.user_id`) or, for members without an
  * account, the `club_members` row (`m`). Tokens can be used several times: unsubscribing is idempotent, so a reuse changes nothing.
  * The key is `UNSUBSCRIBE_SECRET` (outside production it falls back to `BETTER_AUTH_SECRET`; production refuses to start without it).
  */
@@ -39,8 +40,13 @@ export interface UnsubscribePayload {
   /** Subject id. */
   p: string;
   c: NotificationCategory;
-  /** Club the mail came from (NULL: platform context). Display only; the preference itself is not club-specific. */
+  /** Club the mail came from (NULL: platform context). */
   k: string | null;
+  /**
+   * Scope marker. `2` (every token since G12): the unsubscribe applies to the club `k` only. Absent (tokens issued before):
+   * the old behaviour, the category is switched off globally -- those links keep working and keep doing what they promised.
+   */
+  v?: 2;
   /** Expiry, epoch milliseconds. */
   e: number;
 }
@@ -50,6 +56,7 @@ const payloadSchema = z.object({
   p: z.string().min(1).max(100),
   c: z.enum(NOTIFICATION_CATEGORIES),
   k: z.string().min(1).max(100).nullable(),
+  v: z.literal(2).optional(),
   e: z.number().int().positive(),
 });
 
@@ -59,7 +66,7 @@ export function createUnsubscribeToken(subject: UnsubscribeSubject, now = Date.n
   if (!(NOTIFICATION_CATEGORIES as readonly string[]).includes(subject.category)) return null; // mandatory classes have no link
   const kind = subject.userId ? "u" : subject.clubMemberId ? "m" : null;
   if (!kind) return null;
-  const payload: UnsubscribePayload = { s: kind, p: (kind === "u" ? subject.userId : subject.clubMemberId)!, c: subject.category as NotificationCategory, k: subject.clubId, e: now + ttlMs };
+  const payload: UnsubscribePayload = { s: kind, p: (kind === "u" ? subject.userId : subject.clubMemberId)!, c: subject.category as NotificationCategory, k: subject.clubId, v: 2, e: now + ttlMs };
   const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
   return `${encoded}.${sign(encoded).toString("base64url")}`;
 }

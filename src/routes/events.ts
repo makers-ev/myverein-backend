@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
+import { clubMailLanguage } from "../lib/club-settings.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { calendars } from "../db/schema/calendars.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
@@ -81,6 +82,7 @@ async function announceEventChange(args: {
     const timezone = await clubTimezone(clubId);
     const [placeBefore, placeAfter] = await Promise.all([locationName(clubId, before.locationId), locationName(clubId, after.locationId)]);
     const message = composeEventMessage({
+      lang: await clubMailLanguage(db, clubId),
       noun: "Termin",
       title: after.title,
       timezone,

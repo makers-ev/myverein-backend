@@ -27,3 +27,12 @@ export function pickMailLanguage(header: string | null | undefined): MailLanguag
   }
   return best?.lang ?? DEFAULT_MAIL_LANGUAGE;
 }
+
+/** Picks the German or English variant of a system text. */
+export const tr = <T>(lang: MailLanguage, de: T, en: T): T => (lang === "en" ? en : de);
+
+/** `YYYY-MM-DD` as `DD.MM.YYYY` (de) or `DD/MM/YYYY` (en); anything else is returned unchanged. */
+export function formatIsoDay(iso: string, lang: MailLanguage = DEFAULT_MAIL_LANGUAGE): string {
+  const [y, m, d] = iso.split("-");
+  return y && m && d ? (lang === "en" ? `${d}/${m}/${y}` : `${d}.${m}.${y}`) : iso;
+}

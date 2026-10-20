@@ -23,7 +23,9 @@ import { clubApplications } from "../db/schema/club-applications.js";
 import { clubExitRequests } from "../db/schema/club-exit-requests.js";
 import { formSubmissions, memberFieldValues } from "../db/schema/forms.js";
 import { APP_NAME, SITE_URL } from "./emailTemplate.js";
+import { clubMailLanguage } from "./club-settings.js";
 import { notifySafely } from "./notify/dispatcher.js";
+import { tr } from "./notify/i18n.js";
 import { meetingInvitees, meetings } from "../db/schema/meetings.js";
 import { clubMemberDepartments, clubMembers, clubMemberStatusHistory, type ClubMemberRow } from "../db/schema/club-members.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
@@ -389,7 +391,8 @@ async function notifyInviter(invite: ClubMemberInviteRow, row: ClubMemberRow, cl
     if (!inviterUser?.email || !inviterUser.emailVerified) return;
     const roles = await db.select({ roleType: clubRoles.roleType }).from(clubRoles).where(eq(clubRoles.memberId, inviter.id));
     if (!hasClubPermission([IMPLICIT_ROLE_TYPE, ...roles.map((r) => r.roleType)], "members:write")) return;
-    const club = clubName ?? "deinem Verein";
+    const lang = await clubMailLanguage(db, row.clubId);
+    const club = clubName ?? tr(lang, "deinem Verein", "your club");
     const memberName = row.displayName.replace(/[\r\n]+/g, " ");
     await notifySafely({
       clubId: row.clubId,
@@ -398,11 +401,16 @@ async function notifyInviter(invite: ClubMemberInviteRow, row: ClubMemberRow, cl
       refId: invite.id,
       recipients: [{ clubMemberId: inviterRow.id, userId: inviterUser.id, name: inviterUser.name, email: inviterUser.email }],
       content: {
-        title: `${memberName} hat ein Konto bei ${APP_NAME} verknüpft`,
-        body: `${memberName} hat die Einladung angenommen und ein Konto mit dem Mitglied in ${club} verknüpft. Du musst nichts weiter tun.`,
+        title: tr(lang, `${memberName} hat ein Konto bei ${APP_NAME} verknüpft`, `${memberName} has linked an account at ${APP_NAME}`),
+        body: tr(
+          lang,
+          `${memberName} hat die Einladung angenommen und ein Konto mit dem Mitglied in ${club} verknüpft. Du musst nichts weiter tun.`,
+          `${memberName} accepted the invitation and linked an account with the member in ${club}. You do not need to do anything else.`,
+        ),
         template: "notice",
-        ctaLabel: `${APP_NAME} öffnen`,
+        ctaLabel: tr(lang, `${APP_NAME} öffnen`, `Open ${APP_NAME}`),
         ctaUrl: SITE_URL,
+        lang,
       },
       channels: ["in_app", "email"],
     });

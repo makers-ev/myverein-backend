@@ -5,10 +5,11 @@ import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { roleTypesWithPermission } from "./club-permissions.js";
-import { loadClubSettings } from "./club-settings.js";
+import { clubMailLanguage, loadClubSettings } from "./club-settings.js";
 import { SITE_URL } from "./emailTemplate.js";
 import { logger } from "./logger.js";
 import { notifySafely } from "./notify/dispatcher.js";
+import { formatIsoDay, tr, type MailLanguage } from "./notify/i18n.js";
 import type { NotifyRecipient } from "./notify/types.js";
 
 /**
@@ -25,14 +26,9 @@ import type { NotifyRecipient } from "./notify/types.js";
  * mandatory receipt on application intake (the exit receipt is `exit.received`).
  */
 
-const formatDate = (iso: string): string => {
-  const [y, m, d] = iso.split("-");
-  return y && m && d ? `${d}.${m}.${y}` : iso;
-};
-
-async function clubNameOf(clubId: string): Promise<string> {
+async function clubNameOf(clubId: string, lang: MailLanguage = "de"): Promise<string> {
   const [club] = await db.select({ name: organization.name }).from(organization).where(eq(organization.id, clubId));
-  return club?.name ?? "deinem Verein";
+  return club?.name ?? tr(lang, "deinem Verein", "your club");
 }
 
 /**
@@ -92,9 +88,10 @@ export interface ApplicationDecision {
 }
 
 export async function notifyApplicationApproved(d: ApplicationDecision): Promise<void> {
-  const clubName = await clubNameOf(d.clubId);
-  const number = d.memberNumber !== null && d.memberNumber !== undefined && `${d.memberNumber}` !== "" ? `\nMitgliedsnummer: ${d.memberNumber}` : "";
-  const subject = d.childName ? `der Aufnahmeantrag für ${d.childName}` : "dein Aufnahmeantrag";
+  const lang = await clubMailLanguage(db, d.clubId);
+  const clubName = await clubNameOf(d.clubId, lang);
+  const number = d.memberNumber !== null && d.memberNumber !== undefined && `${d.memberNumber}` !== "" ? `\n${tr(lang, "Mitgliedsnummer", "Member number")}: ${d.memberNumber}` : "";
+  const subject = d.childName ? tr(lang, `der Aufnahmeantrag für ${d.childName}`, `the membership application for ${d.childName}`) : tr(lang, "dein Aufnahmeantrag", "your membership application");
   await notifySafely({
     clubId: d.clubId,
     class: "mandatory",
@@ -102,18 +99,22 @@ export async function notifyApplicationApproved(d: ApplicationDecision): Promise
     refId: d.applicationId,
     recipients: await recipientForUser(d.userId, d.clubMemberId ?? null),
     content: {
-      title: d.childName ? `Aufnahme von ${d.childName} bei ${clubName} angenommen` : `Dein Aufnahmeantrag bei ${clubName} wurde angenommen`,
-      body: `Gute Nachrichten: ${subject} bei ${clubName} wurde angenommen. Willkommen im Verein!${number}`,
-      ctaLabel: "Zum Verein",
+      title: d.childName
+        ? tr(lang, `Aufnahme von ${d.childName} bei ${clubName} angenommen`, `Admission of ${d.childName} to ${clubName} approved`)
+        : tr(lang, `Dein Aufnahmeantrag bei ${clubName} wurde angenommen`, `Your membership application to ${clubName} was approved`),
+      body: tr(lang, `Gute Nachrichten: ${subject} bei ${clubName} wurde angenommen. Willkommen im Verein!${number}`, `Good news: ${subject} to ${clubName} was approved. Welcome to the club!${number}`),
+      ctaLabel: tr(lang, "Zum Verein", "Go to the club"),
       ctaUrl: SITE_URL,
+      lang,
     },
     channels: ["in_app", "email", "push"],
   });
 }
 
 export async function notifyApplicationRejected(d: ApplicationDecision): Promise<void> {
-  const clubName = await clubNameOf(d.clubId);
-  const message = d.applicantMessage?.trim() ? `\n\nNachricht des Vorstands:\n${d.applicantMessage.trim()}` : "";
+  const lang = await clubMailLanguage(db, d.clubId);
+  const clubName = await clubNameOf(d.clubId, lang);
+  const message = d.applicantMessage?.trim() ? `\n\n${tr(lang, "Nachricht des Vorstands", "Message from the board")}:\n${d.applicantMessage.trim()}` : "";
   await notifySafely({
     clubId: d.clubId,
     class: "mandatory",
@@ -121,8 +122,15 @@ export async function notifyApplicationRejected(d: ApplicationDecision): Promise
     refId: d.applicationId,
     recipients: await recipientForUser(d.userId, d.clubMemberId ?? null),
     content: {
-      title: d.childName ? `Aufnahme von ${d.childName} bei ${clubName} abgelehnt` : `Dein Aufnahmeantrag bei ${clubName} wurde abgelehnt`,
-      body: `${d.childName ? `Der Aufnahmeantrag für ${d.childName}` : "Dein Aufnahmeantrag"} bei ${clubName} wurde leider abgelehnt.${message}`,
+      title: d.childName
+        ? tr(lang, `Aufnahme von ${d.childName} bei ${clubName} abgelehnt`, `Admission of ${d.childName} to ${clubName} declined`)
+        : tr(lang, `Dein Aufnahmeantrag bei ${clubName} wurde abgelehnt`, `Your membership application to ${clubName} was declined`),
+      body: tr(
+        lang,
+        `${d.childName ? `Der Aufnahmeantrag für ${d.childName}` : "Dein Aufnahmeantrag"} bei ${clubName} wurde leider abgelehnt.${message}`,
+        `${d.childName ? `The membership application for ${d.childName}` : "Your membership application"} to ${clubName} was unfortunately declined.${message}`,
+      ),
+      lang,
     },
     channels: ["in_app", "email", "push"],
   });
@@ -148,27 +156,35 @@ export interface ExitDecision {
 }
 
 export async function notifyExitDecision(d: ExitDecision): Promise<void> {
-  const clubName = await clubNameOf(d.clubId);
-  const note = d.note?.trim() ? `\n\nBegründung/Hinweis des Vorstands:\n${d.note.trim()}` : "";
-  const when = d.effectiveOn ? (d.effectiveOn > d.today ? `Der Austritt wird zum ${formatDate(d.effectiveOn)} wirksam.` : `Der Austritt ist seit dem ${formatDate(d.effectiveOn)} wirksam.`) : "";
+  const lang = await clubMailLanguage(db, d.clubId);
+  const clubName = await clubNameOf(d.clubId, lang);
+  const note = d.note?.trim() ? `\n\n${tr(lang, "Begründung/Hinweis des Vorstands", "Reason/note from the board")}:\n${d.note.trim()}` : "";
+  const day = d.effectiveOn ? formatIsoDay(d.effectiveOn, lang) : "";
+  const when = d.effectiveOn
+    ? d.effectiveOn > d.today
+      ? tr(lang, `Der Austritt wird zum ${day} wirksam.`, `The exit takes effect on ${day}.`)
+      : tr(lang, `Der Austritt ist seit dem ${day} wirksam.`, `The exit has been in effect since ${day}.`)
+    : "";
   let title: string;
   let body: string;
   switch (d.kind) {
-    case "received":
-      title = `Deine Austrittsanfrage bei ${clubName} ist eingegangen`;
-      body = `Wir haben deine Austrittsanfrage erhalten. Der Vorstand prüft sie und meldet sich bei dir.${d.earliestOn ? `\nFrühestmöglicher Austritt nach Kündigungsfrist: ${formatDate(d.earliestOn)}.` : ""}`;
+    case "received": {
+      const earliest = d.earliestOn ? `\n${tr(lang, "Frühestmöglicher Austritt nach Kündigungsfrist", "Earliest possible exit after the notice period")}: ${formatIsoDay(d.earliestOn, lang)}.` : "";
+      title = tr(lang, `Deine Austrittsanfrage bei ${clubName} ist eingegangen`, `Your request to leave ${clubName} has been received`);
+      body = tr(lang, `Wir haben deine Austrittsanfrage erhalten. Der Vorstand prüft sie und meldet sich bei dir.${earliest}`, `We received your request to leave. The board will review it and get back to you.${earliest}`);
       break;
+    }
     case "accepted":
-      title = `Dein Austritt bei ${clubName} wurde angenommen`;
-      body = `Deine Austrittsanfrage wurde angenommen. ${when}${note}`.trim();
+      title = tr(lang, `Dein Austritt bei ${clubName} wurde angenommen`, `Your exit from ${clubName} was approved`);
+      body = `${tr(lang, "Deine Austrittsanfrage wurde angenommen.", "Your request to leave was approved.")} ${when}${note}`.trim();
       break;
     case "rejected":
-      title = `Deine Austrittsanfrage bei ${clubName} wurde abgelehnt`;
-      body = `Deine Austrittsanfrage wurde leider abgelehnt. Du bleibst Mitglied.${note}`;
+      title = tr(lang, `Deine Austrittsanfrage bei ${clubName} wurde abgelehnt`, `Your request to leave ${clubName} was declined`);
+      body = tr(lang, `Deine Austrittsanfrage wurde leider abgelehnt. Du bleibst Mitglied.${note}`, `Your request to leave was unfortunately declined. You remain a member.${note}`);
       break;
     case "exclusion":
-      title = `Ausschluss aus ${clubName}`;
-      body = `Du wurdest aus ${clubName} ausgeschlossen. ${when}${note}`.trim();
+      title = tr(lang, `Ausschluss aus ${clubName}`, `Exclusion from ${clubName}`);
+      body = `${tr(lang, `Du wurdest aus ${clubName} ausgeschlossen.`, `You have been excluded from ${clubName}.`)} ${when}${note}`.trim();
       break;
   }
   await notifySafely({
@@ -177,7 +193,7 @@ export async function notifyExitDecision(d: ExitDecision): Promise<void> {
     eventKey: `exit.${d.kind}`,
     refId: d.requestId,
     recipients: await recipientsForClubMember(d.clubMemberId),
-    content: { title, body },
+    content: { title, body, lang },
     channels: d.kind === "received" ? ["in_app", "email"] : ["in_app", "email", "push"],
   });
 }
@@ -208,7 +224,8 @@ export interface ApplicationReceived {
 /** Application intake: the applicant gets a receipt (mandatory, event `application.received`), the board a notice (`application.new`, optional). */
 export async function notifyApplicationReceived(d: ApplicationReceived): Promise<void> {
   await safely("application intake", { clubId: d.clubId, applicationId: d.applicationId }, async () => {
-    const clubName = await clubNameOf(d.clubId);
+    const lang = await clubMailLanguage(db, d.clubId);
+    const clubName = await clubNameOf(d.clubId, lang);
     const forChild = d.onBehalfOf === "guardian";
     const [applicant] = await db.select({ name: user.name }).from(user).where(eq(user.id, d.userId));
     await notifySafely({
@@ -218,8 +235,13 @@ export async function notifyApplicationReceived(d: ApplicationReceived): Promise
       refId: d.applicationId,
       recipients: await recipientForUser(d.userId, null),
       content: {
-        title: `Dein Aufnahmeantrag bei ${clubName} ist eingegangen`,
-        body: `Wir haben ${forChild ? "den Aufnahmeantrag für dein Kind" : "deinen Aufnahmeantrag"} erhalten. Der Vorstand prüft ihn und meldet sich bei dir, sobald entschieden ist.`,
+        title: tr(lang, `Dein Aufnahmeantrag bei ${clubName} ist eingegangen`, `Your membership application to ${clubName} has been received`),
+        body: tr(
+          lang,
+          `Wir haben ${forChild ? "den Aufnahmeantrag für dein Kind" : "deinen Aufnahmeantrag"} erhalten. Der Vorstand prüft ihn und meldet sich bei dir, sobald entschieden ist.`,
+          `We received ${forChild ? "the membership application for your child" : "your membership application"}. The board will review it and get back to you as soon as a decision has been made.`,
+        ),
+        lang,
       },
       channels: ["in_app", "email"],
     });
@@ -231,11 +253,16 @@ export async function notifyApplicationReceived(d: ApplicationReceived): Promise
       refId: d.applicationId,
       audience: reviewers(),
       content: {
-        title: `Neuer Aufnahmeantrag: ${applicant?.name ?? "Antrag"}`,
-        body: `${applicant?.name ?? "Jemand"} hat einen Aufnahmeantrag${forChild ? " für ein Kind" : ""} gestellt. Bitte prüfe ihn unter Verein, Mitglieder, Anträge.`,
+        title: tr(lang, `Neuer Aufnahmeantrag: ${applicant?.name ?? "Antrag"}`, `New membership application: ${applicant?.name ?? "application"}`),
+        body: tr(
+          lang,
+          `${applicant?.name ?? "Jemand"} hat einen Aufnahmeantrag${forChild ? " für ein Kind" : ""} gestellt. Bitte prüfe ihn unter Verein, Mitglieder, Anträge.`,
+          `${applicant?.name ?? "Someone"} submitted a membership application${forChild ? " for a child" : ""}. Please review it under Club, Members, Applications.`,
+        ),
         category: "reminders",
-        ctaLabel: "Zum Verein",
+        ctaLabel: tr(lang, "Zum Verein", "Go to the club"),
         ctaUrl: SITE_URL,
+        lang,
       },
       channels: ["in_app", "email"],
     });
@@ -254,7 +281,8 @@ export async function notifyExitRequestToBoard(d: ExitRequestReceived): Promise<
   await safely("exit request notice", { clubId: d.clubId, requestId: d.requestId }, async () => {
     if (!(await loadClubSettings(db, d.clubId)).notifyBoardRequests) return;
     const [row] = await db.select({ name: clubMembers.displayName }).from(clubMembers).where(eq(clubMembers.id, d.clubMemberId));
-    const wish = d.desiredEffectiveOn ? `\nGewünschter Austritt zum: ${formatDate(d.desiredEffectiveOn)}.` : "";
+    const lang = await clubMailLanguage(db, d.clubId);
+    const wish = d.desiredEffectiveOn ? `\n${tr(lang, "Gewünschter Austritt zum", "Requested exit date")}: ${formatIsoDay(d.desiredEffectiveOn, lang)}.` : "";
     await notifySafely({
       clubId: d.clubId,
       class: "optional",
@@ -262,11 +290,16 @@ export async function notifyExitRequestToBoard(d: ExitRequestReceived): Promise<
       refId: d.requestId,
       audience: reviewers(),
       content: {
-        title: `Neue Austrittsanfrage: ${row?.name ?? "Mitglied"}`,
-        body: `${row?.name ?? "Ein Mitglied"} hat eine Austrittsanfrage gestellt.${wish}\nBitte prüfe sie unter Verein, Austritte.`,
+        title: tr(lang, `Neue Austrittsanfrage: ${row?.name ?? "Mitglied"}`, `New request to leave: ${row?.name ?? "member"}`),
+        body: tr(
+          lang,
+          `${row?.name ?? "Ein Mitglied"} hat eine Austrittsanfrage gestellt.${wish}\nBitte prüfe sie unter Verein, Austritte.`,
+          `${row?.name ?? "A member"} filed a request to leave.${wish}\nPlease review it under Club, Exits.`,
+        ),
         category: "reminders",
-        ctaLabel: "Zum Verein",
+        ctaLabel: tr(lang, "Zum Verein", "Go to the club"),
         ctaUrl: SITE_URL,
+        lang,
       },
       channels: ["in_app", "email"],
     });
