@@ -11,7 +11,7 @@ import { closeDatabase, db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubSettings } from "../db/schema/club-settings.js";
-import { inventoryItems } from "../db/schema/inventory.js";
+import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { CLUB_ROLE_TYPES, clubPermissionsFor } from "../lib/club-permissions.js";
 import { toAppError } from "../lib/errors.js";
 import { adminClubRegistrationRoutes } from "./admin-club-registrations.js";
@@ -130,7 +130,7 @@ const SELF_SERVICE: Record<string, string> = {
   "DELETE /availability/exceptions/:id": "own availability (ownership checked)",
   "PATCH /meetings/:id/invitees/me": "own accept/decline of an invitation",
   "POST /inventory-items/:id/loans": "self-service borrowing (switchable via club_settings.allow_self_loans)",
-  "PATCH /inventory-items/:id/loans/:loanId": "return of the own loan (borrower or inventory:write)",
+  "PATCH /inventory-items/:id/loans/:loanId": "return of the own loan (borrower or inventory:write); WITHOUT a body only -- an extension ({ dueAt }) needs inventory:write even for the borrower, asserted in the allow_self_loans block",
   "POST /inventory-items/:id/damage-reports": "self-service damage report",
   "POST /media": "image upload for damage reports / location photos (central media layer: magic bytes, EXIF strip, quota; the file stays unattached until a feature route claims it)",
   "PATCH /club-members/me/custom-fields": "own custom field values (only fields with editable_by = self; others answer 403/422)",
@@ -466,6 +466,89 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
         await db.delete(user).where(eq(user.id, other.userId));
       }
     });
+  });
+
+  describe("loan extension ({ dueAt }) needs inventory:write", () => {
+    const future = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString();
+    const loanPath = (item: string, loan: string) => `/inventory-items/${item}/loans/${loan}`;
+    const dueOf = async (loanId: string) => (await db.query.inventoryLoans.findFirst({ where: eq(inventoryLoans.id, loanId) }))!;
+    const openLoan = async (cookie: string) => {
+      const res = await req(`/inventory-items/${itemId}/loans`, cookie, { method: "POST", body: { dueAt: future(2) } });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { data: { id: string } }).data.id;
+    };
+
+    it("denies the borrower and a plain member (403, loan untouched), allows the board, refuses returned loans with 409", async () => {
+      const loanId = await openLoan(cookiePlain);
+      const before = (await dueOf(loanId)).dueAt!.getTime();
+      const other = await signUp("ext-other");
+      await auth.api.addMember({ body: { userId: other.userId, organizationId: clubId, role: "member" } });
+      try {
+        // the borrower may return their own loan, but not extend it
+        expect((await req(loanPath(itemId, loanId), cookiePlain, { method: "PATCH", body: { dueAt: future(30) } })).status).toBe(403);
+        // a plain member who is not the borrower
+        expect((await req(loanPath(itemId, loanId), other.cookie, { method: "PATCH", body: { dueAt: future(30) } })).status).toBe(403);
+        // an external guest
+        expect((await req(loanPath(itemId, loanId), cookieGuest, { method: "PATCH", body: { dueAt: future(30) } })).status).toBe(403);
+        expect((await dueOf(loanId)).dueAt!.getTime()).toBe(before);
+
+        const extended = await req(loanPath(itemId, loanId), cookieFounder, { method: "PATCH", body: { dueAt: future(30) } });
+        expect(extended.status).toBe(200);
+        expect((await dueOf(loanId)).dueAt!.getTime()).toBeGreaterThan(before);
+
+        // returned loans cannot be extended (board) -- and the denial still comes first for a plain member
+        expect((await req(loanPath(itemId, loanId), cookiePlain, { method: "PATCH", body: {} })).status).toBe(200);
+        expect((await req(loanPath(itemId, loanId), cookieFounder, { method: "PATCH", body: { dueAt: future(60) } })).status).toBe(409);
+        expect((await req(loanPath(itemId, loanId), cookiePlain, { method: "PATCH", body: { dueAt: future(60) } })).status).toBe(403);
+      } finally {
+        await db.delete(user).where(eq(user.id, other.userId));
+      }
+    });
+
+    it("answers 404 for a foreign item, a foreign loan and a foreign club (no existence leak across clubs)", async () => {
+      const ownLoan = await openLoan(cookiePlain);
+      const foreignOwner = await signUp("ext-foreign");
+      const foreignClub = (await auth.api.createOrganization({ body: { name: `Matrix Foreign ${suffix}`, slug: `matrix-foreign-${suffix}`, userId: foreignOwner.userId } }))!;
+      try {
+        const foreignMember = (await db.query.member.findFirst({ where: (m, { and: a, eq: e }) => a(e(m.organizationId, foreignClub.id), e(m.userId, foreignOwner.userId)) }))!;
+        await db.insert(clubRoles).values({ memberId: foreignMember.id, roleType: "vorsitz" });
+        const [foreignItem] = await db.insert(inventoryItems).values({ clubId: foreignClub.id, name: "Fremdes Zelt", condition: "gut" }).returning();
+        const [foreignLoan] = await db.insert(inventoryLoans).values({ itemId: foreignItem!.id, memberId: foreignMember.id, dueAt: new Date(Date.now() + 86_400_000) }).returning();
+
+        // the club's board with a foreign item id / foreign loan id (valid permission, wrong club): 404, nothing changed
+        expect((await req(loanPath(foreignItem!.id, foreignLoan!.id), cookieFounder, { method: "PATCH", body: { dueAt: future(30) } })).status).toBe(404);
+        expect((await req(loanPath(foreignItem!.id, ownLoan), cookieFounder, { method: "PATCH", body: { dueAt: future(30) } })).status).toBe(404);
+        expect((await req(loanPath(itemId, foreignLoan!.id), cookieFounder, { method: "PATCH", body: { dueAt: future(30) } })).status).toBe(404);
+        expect((await dueOf(foreignLoan!.id)).dueAt!.getTime()).toBe(foreignLoan!.dueAt!.getTime());
+
+        // the foreign club's own board, addressing our item in their club: the item does not exist there
+        const foreignReq = (path: string) =>
+          app.request(`${path}?clubId=${foreignClub.id}`, {
+            method: "PATCH",
+            headers: { cookie: foreignOwner.cookie, "x-forwarded-for": randomUUID(), "content-type": "application/json" },
+            body: JSON.stringify({ dueAt: future(30) }),
+          });
+        expect((await foreignReq(loanPath(itemId, ownLoan))).status).toBe(404);
+        // our board addressing the foreign club: not a member there, nothing is revealed or changed
+        const crossClub = await app.request(`${loanPath(foreignItem!.id, foreignLoan!.id)}?clubId=${foreignClub.id}`, {
+          method: "PATCH",
+          headers: { cookie: cookieFounder, "x-forwarded-for": randomUUID(), "content-type": "application/json" },
+          body: JSON.stringify({ dueAt: future(30) }),
+        });
+        expect(crossClub.status).toBe(404);
+        expect((await dueOf(foreignLoan!.id)).dueAt!.getTime()).toBe(foreignLoan!.dueAt!.getTime());
+      } finally {
+        await db.delete(organization).where(eq(organization.id, foreignClub.id));
+        await db.delete(user).where(eq(user.id, foreignOwner.userId));
+      }
+    });
+  });
+
+  it("keeps the event cancellation preview (it lists who would be reached) behind calendars:write, before any lookup", async () => {
+    const path = `/events/${randomUUID()}/cancel-preview`;
+    expect((await req(path, cookiePlain)).status).toBe(403);
+    expect((await req(path, cookieGuest)).status).toBe(403);
+    expect((await req(path, cookieFounder)).status).toBe(404); // board passes the check; the unknown event is the only reason left
   });
 
   it("keeps application decisions, custom field definitions and foreign custom field values behind their rights (Wave 8 B6/B7)", async () => {
