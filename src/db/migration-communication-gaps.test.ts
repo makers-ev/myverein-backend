@@ -24,6 +24,8 @@ beforeAll(async () => {
   // Rows written before the migrations: the same registration mail twice to the same bare address (legacy, no '#' in ref_id),
   // and a global preference.
   await q(`INSERT INTO message_deliveries (event_key, ref_id, channel, status, address) VALUES ('club_registration.review-notify', 'reg-1', 'email', 'sent', 'a@example.test'), ('club_registration.review-notify', 'reg-1', 'email', 'sent', 'a@example.test')`);
+  // ... and, already in the new reference style, the same key twice (possible before the unique index existed).
+  await q(`INSERT INTO message_deliveries (event_key, ref_id, channel, status, address) VALUES ('club_registration.review-notify', 'reg-0#5', 'email', 'sent', 'a@example.test'), ('club_registration.review-notify', 'reg-0#5', 'email', 'sent', 'a@example.test')`);
   await q(`INSERT INTO notification_preferences (user_id, category, channel, enabled) VALUES ('u1', 'events', 'email', false)`);
   await migrate(drizzle(pool), { migrationsFolder: MIGRATIONS });
 }, 60_000);
@@ -35,6 +37,11 @@ afterAll(async () => {
 describe("migration 0040 (registration dedupe)", () => {
   it("keeps legacy duplicate deliveries and dedupes new-style references per address", async () => {
     expect(await q(`SELECT 1 FROM message_deliveries WHERE ref_id = 'reg-1'`)).toHaveLength(2);
+    // pre-dedupe: both pre-existing '#' duplicates survived the index build, the later one with a unique suffix
+    const kept = (await q(`SELECT ref_id FROM message_deliveries WHERE ref_id LIKE 'reg-0#5%'`)).map((r) => String(r.ref_id)).sort();
+    expect(kept).toHaveLength(2);
+    expect(kept[0]).toBe("reg-0#5");
+    expect(kept[1]).toMatch(/^reg-0#5#dup-[0-9a-f-]{36}$/);
     await q(`INSERT INTO message_deliveries (event_key, ref_id, channel, status, address) VALUES ('club_registration.review-notify', 'reg-2#1', 'email', 'queued', 'a@example.test')`);
     await expect(q(`INSERT INTO message_deliveries (event_key, ref_id, channel, status, address) VALUES ('club_registration.review-notify', 'reg-2#1', 'email', 'queued', 'a@example.test')`)).rejects.toThrow(/message_deliveries_address_event_uidx/);
     // another address, another transition, and a delivery with a person are all fine
