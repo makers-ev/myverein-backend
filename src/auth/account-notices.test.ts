@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, like } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { createEmailVerificationToken } from "better-auth/api";
 import { symmetricDecrypt } from "better-auth/crypto";
 
 import { twoFactor, user } from "./auth-schema.js";
@@ -149,6 +150,108 @@ describe("admin password set and idempotency", () => {
     expect(await notices(a.id, "two_factor_enabled")).toHaveLength(1);
     await notifyAccountChange("two_factor_enabled", target, { now: new Date(now.getTime() + 120_000) });
     expect(await notices(a.id, "two_factor_enabled")).toHaveLength(2);
+  });
+});
+
+/**
+ * Every path that can write user.email / user.twoFactorEnabled. The decision uses the written row (id from `after`) against a
+ * per-request snapshot, so none of these may depend on body.userId or the acting session being the target.
+ */
+describe("every write path to email / twoFactorEnabled", () => {
+  const verifyToken = async (oldEmail: string, newEmail?: string, extra?: Record<string, unknown>) =>
+    createEmailVerificationToken((await auth.$context).secret, oldEmail, newEmail, 3600, extra);
+
+  it("admin sets another user's two-factor flag: announced to that user, not to the admin, once per real change", async () => {
+    const admin = await account("p-admin2fa", { role: "admin" });
+    const a = await account("p-2fa-target");
+    await auth.api.adminUpdateUser({ body: { userId: a.id, data: { twoFactorEnabled: true } }, headers: admin.headers() });
+    expect(await notices(a.id, "two_factor_enabled")).toHaveLength(1);
+    expect(await notices(admin.id, "two_factor_enabled")).toHaveLength(0);
+    // same value again is not a change
+    await auth.api.adminUpdateUser({ body: { userId: a.id, data: { twoFactorEnabled: true } }, headers: admin.headers() });
+    expect(await notices(a.id, "two_factor_enabled")).toHaveLength(1);
+    await auth.api.adminUpdateUser({ body: { userId: a.id, data: { twoFactorEnabled: false } }, headers: admin.headers() });
+    expect(await notices(a.id, "two_factor_disabled")).toHaveLength(1);
+  });
+
+  it("admin changes e-mail and two-factor in one call: both notices go to the target only", async () => {
+    const admin = await account("p-admin-both", { role: "admin" });
+    const a = await account("p-both");
+    await auth.api.adminUpdateUser({ body: { userId: a.id, data: { email: `acn-p-both-new-${sfx}@example.test`, twoFactorEnabled: true } }, headers: admin.headers() });
+    expect(await notices(a.id, "email_changed")).toHaveLength(1);
+    expect(await notices(a.id, "two_factor_enabled")).toHaveLength(1);
+    expect(await notices(admin.id, "email_changed")).toHaveLength(0);
+  });
+
+  it("admin re-sending the current address (any casing) or only the name sends nothing", async () => {
+    const admin = await account("p-admin-same", { role: "admin" });
+    const a = await account("p-same");
+    await auth.api.adminUpdateUser({ body: { userId: a.id, data: { email: a.email.toUpperCase() } }, headers: admin.headers() });
+    expect(await notices(a.id, "email_changed")).toHaveLength(0);
+  });
+
+  it("two concurrent admin updates of different users announce each to its own account", async () => {
+    const admin = await account("p-admin-conc", { role: "admin" });
+    const x = await account("p-conc-x");
+    const y = await account("p-conc-y");
+    await Promise.all([
+      auth.api.adminUpdateUser({ body: { userId: x.id, data: { email: `acn-p-conc-x2-${sfx}@example.test` } }, headers: admin.headers() }),
+      auth.api.adminUpdateUser({ body: { userId: y.id, data: { twoFactorEnabled: true } }, headers: admin.headers() }),
+    ]);
+    expect(await notices(x.id, "email_changed")).toHaveLength(1);
+    expect(await notices(x.id, "two_factor_enabled")).toHaveLength(0);
+    expect(await notices(y.id, "email_changed")).toHaveLength(0);
+    expect(await notices(y.id, "two_factor_enabled")).toHaveLength(1);
+  });
+
+  it("/update-user cannot write the address or the two-factor flag, and sends nothing", async () => {
+    const a = await account("p-selfupdate");
+    await expect(auth.api.updateUser({ body: { email: `acn-p-self-${sfx}@example.test` } as never, headers: a.headers() })).rejects.toThrow();
+    await auth.api.updateUser({ body: { name: "Renamed", twoFactorEnabled: true } as never, headers: a.headers() }).catch(() => undefined);
+    const [row] = await db.select().from(user).where(eq(user.id, a.id));
+    expect(row!.email).toBe(a.email);
+    expect(row!.twoFactorEnabled).toBeFalsy();
+    expect(await notices(a.id, "email_changed")).toHaveLength(0);
+    expect(await notices(a.id, "two_factor_enabled")).toHaveLength(0);
+  });
+
+  it("/change-email is disabled (no write path), and sends nothing", async () => {
+    const a = await account("p-changeemail");
+    await expect(auth.api.changeEmail({ body: { newEmail: `acn-p-ce-${sfx}@example.test` }, headers: a.headers() })).rejects.toThrow();
+    const [row] = await db.select().from(user).where(eq(user.id, a.id));
+    expect(row!.email).toBe(a.email);
+    expect(await notices(a.id, "email_changed")).toHaveLength(0);
+  });
+
+  it("verify-email token flows: the legacy and the confirmed change warn the OLD address even without a session", async () => {
+    const legacy = await account("p-legacy");
+    const legacyNew = `acn-p-legacy-new-${sfx}@example.test`;
+    await auth.api.verifyEmail({ query: { token: await verifyToken(legacy.email, legacyNew) } });
+    let rows = await notices(legacy.id, "email_changed");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.address).toBe(legacy.email);
+    expect(JSON.stringify(rows[0]!.content)).not.toContain(legacyNew);
+
+    const confirmed = await account("p-confirmed");
+    const confirmedNew = `acn-p-confirmed-new-${sfx}@example.test`;
+    await auth.api.verifyEmail({ query: { token: await verifyToken(confirmed.email, confirmedNew, { requestType: "change-email-verification" }) } });
+    rows = await notices(confirmed.id, "email_changed");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.address).toBe(confirmed.email);
+  });
+
+  it("verify-email without a change (plain verification) sends nothing", async () => {
+    const a = await account("p-plainverify");
+    await db.update(user).set({ emailVerified: false }).where(eq(user.id, a.id));
+    await auth.api.verifyEmail({ query: { token: await verifyToken(a.email) } });
+    expect(await notices(a.id, "email_changed")).toHaveLength(0);
+  });
+
+  it("a write outside any request (no context) is neither tracked nor an error", async () => {
+    const a = await account("p-noctx");
+    const ctx = await auth.$context;
+    await ctx.internalAdapter.updateUser(a.id, { twoFactorEnabled: true });
+    expect(await notices(a.id, "two_factor_enabled")).toHaveLength(0);
   });
 });
 
