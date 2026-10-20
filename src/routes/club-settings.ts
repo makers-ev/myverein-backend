@@ -89,6 +89,7 @@ const updateSettingsSchema = z.object({
   ageTransitionAuto: z.boolean().optional(),
   notifyBoardRequests: z.boolean().optional(),
   notifyMeetingInvites: z.boolean().optional(),
+  notifyHandover: z.boolean().optional(),
   // Club mail template (B15).
   senderName: optionalText(80, false).optional(),
   signature: optionalText(1000, true).optional(),

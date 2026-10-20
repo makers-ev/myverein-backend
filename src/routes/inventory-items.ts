@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
@@ -9,6 +9,7 @@ import { clubSettings } from "../db/schema/club-settings.js";
 import { inventoryDamageReports, inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { locations } from "../db/schema/locations.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
+import { notifyHandover } from "../lib/handover-notify.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { attachUploadedImage, signedMediaUrls } from "../lib/media.js";
 import { effectiveLoanStatus, isMaintenanceDue, maintenanceDueDate } from "../lib/inventory-status.js";
@@ -207,7 +208,7 @@ inventoryItemRoutes.post(
     const id = c.req.param("id");
     const body = c.req.valid("json");
 
-    await loadClubInventoryItem(id, clubId);
+    const item = await loadClubInventoryItem(id, clubId);
 
     // Self-service borrowing can be switched off per club (club_settings.allow_self_loans, default true); inventory:write holders are exempt.
     const settings = await db.query.clubSettings.findFirst({ where: eq(clubSettings.clubId, clubId) });
@@ -230,10 +231,14 @@ inventoryItemRoutes.post(
       subjectId: row.id,
       payload: { clubId, itemId: id, memberId: membership.id },
     });
+    await notifyHandover({ clubId, kind: "loan.issued", refId: row.id, accountMemberId: membership.id, actorAccountMemberId: membership.id, subject: item.name, dueAt: row.dueAt });
 
     return c.json({ data: withEffectiveLoanStatus(row) }, 201);
   },
 );
+
+/** Body of `PATCH /:id/loans/:loanId`: empty = return the loan, `{ dueAt }` = extend the return date (needs `inventory:write`). */
+const extendLoanSchema = z.object({ dueAt: z.string().datetime({ offset: true }).optional() }).strict();
 
 inventoryItemRoutes.patch("/:id/loans/:loanId", async (c) => {
   const clubId = c.get("clubId");
@@ -242,17 +247,50 @@ inventoryItemRoutes.patch("/:id/loans/:loanId", async (c) => {
   const id = c.req.param("id");
   const loanId = c.req.param("loanId");
 
-  await loadClubInventoryItem(id, clubId);
+  const item = await loadClubInventoryItem(id, clubId);
 
   const existing = await db.query.inventoryLoans.findFirst({ where: and(eq(inventoryLoans.id, loanId), eq(inventoryLoans.itemId, id)) });
   if (!existing) throw new NotFoundError("Loan not found");
 
+  // Optional tiny JSON body: only `{ dueAt }` (extension). No body = the classic "mark returned".
+  const raw = await c.req.text();
+  if (raw.length > 1024) throw new ValidationError("Request body too large");
+  let extension: { dueAt: string } | null = null;
+  if (raw.trim() !== "") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new ValidationError("Invalid request body");
+    }
+    const checked = extendLoanSchema.safeParse(parsed);
+    if (!checked.success) throw new ValidationError("Invalid request body", { details: checked.error.issues });
+    // `{}` is the same as no body: the loan is returned.
+    if (checked.data.dueAt !== undefined) extension = { dueAt: checked.data.dueAt };
+  }
+
   const isBorrower = existing.memberId === membership.id;
-  if (!isBorrower && !hasClubPermission(roleTypes, "inventory:write")) {
+  if (extension ? !hasClubPermission(roleTypes, "inventory:write") : !isBorrower && !hasClubPermission(roleTypes, "inventory:write")) {
     throw new ForbiddenError("Missing inventory:write permission");
   }
 
   if (existing.returnedAt) throw new ConflictError("Loan has already been returned");
+
+  if (extension) {
+    const newDueAt = new Date(extension.dueAt);
+    if (newDueAt.getTime() <= (existing.dueAt ?? existing.borrowedAt).getTime() || newDueAt.getTime() <= Date.now()) {
+      throw new ValidationError("dueAt must be later than the current return date and in the future");
+    }
+    const [extended] = await db.update(inventoryLoans).set({ dueAt: newDueAt }).where(and(eq(inventoryLoans.id, loanId), isNull(inventoryLoans.returnedAt))).returning();
+    if (!extended) throw new ConflictError("Loan has already been returned");
+    await db.insert(auditLog).values({
+      eventType: "inventory_loan.extend",
+      subjectId: loanId,
+      payload: { clubId, itemId: id, memberId: existing.memberId, from: existing.dueAt?.toISOString() ?? null, to: newDueAt.toISOString() },
+    });
+    await notifyHandover({ clubId, kind: "loan.extended", refId: `${loanId}#${newDueAt.getTime()}`, accountMemberId: existing.memberId, actorAccountMemberId: membership.id, subject: item.name, dueAt: newDueAt, previousDueAt: existing.dueAt });
+    return c.json({ data: withEffectiveLoanStatus(extended) });
+  }
 
   const [row] = await db
     .update(inventoryLoans)
@@ -265,6 +303,7 @@ inventoryItemRoutes.patch("/:id/loans/:loanId", async (c) => {
     subjectId: loanId,
     payload: { clubId, itemId: id, memberId: existing.memberId },
   });
+  await notifyHandover({ clubId, kind: "loan.returned", refId: loanId, accountMemberId: existing.memberId, actorAccountMemberId: membership.id, subject: item.name });
 
   return c.json({ data: withEffectiveLoanStatus(row) });
 });

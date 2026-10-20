@@ -34,6 +34,8 @@ export interface EffectiveClubSettings {
   notifyBoardRequests: boolean;
   /** Tell people when they are invited to a meeting or a Terminfindung (optional message, category events). */
   notifyMeetingInvites: boolean;
+  /** Tell the borrower / key holder when a loan or key is handed out, returned or a loan extended (optional message). */
+  notifyHandover: boolean;
 }
 
 export const DEFAULT_CLUB_TIMEZONE = "Europe/Berlin";
@@ -66,5 +68,6 @@ export async function loadClubSettings(executor: DbExecutor, clubId: string): Pr
     ageTransitionAuto: row?.ageTransitionAuto ?? false,
     notifyBoardRequests: row?.notifyBoardRequests ?? true,
     notifyMeetingInvites: row?.notifyMeetingInvites ?? true,
+    notifyHandover: row?.notifyHandover ?? true,
   };
 }

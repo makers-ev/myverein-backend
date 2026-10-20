@@ -1,0 +1,1 @@
+ALTER TABLE "club_settings" ADD COLUMN "notify_handover" boolean DEFAULT true NOT NULL;
