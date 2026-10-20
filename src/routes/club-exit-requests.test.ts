@@ -10,6 +10,7 @@ import { member, organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubExitRequests } from "../db/schema/club-exit-requests.js";
+import { messageDeliveries } from "../db/schema/communication.js";
 import { clubMembers, clubMemberStatusHistory } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubSettings } from "../db/schema/club-settings.js";
@@ -117,7 +118,36 @@ describe("exit workflow (B6)", () => {
       const plain = await join("settings-reader");
       const res = await call(plain, "/club-settings");
       expect(res.status).toBe(200);
-      expect((await body(res)).data).toEqual({ noticePeriodDays: null, noticeMode: null, memberNumberPrefix: null, allowSelfLoans: true });
+      expect((await body(res)).data).toEqual({
+        noticePeriodDays: null,
+        noticeMode: null,
+        memberNumberPrefix: null,
+        allowSelfLoans: true,
+        timezone: "Europe/Berlin",
+        reminderEventEnabled: true,
+        reminderEventLeadHours: 24,
+        reminderLoanEnabled: true,
+        reminderLoanLeadDays: 1,
+        reminderMaintenanceEnabled: true,
+        reminderMaintenanceLeadDays: 7,
+        reminderRsvpEnabled: true,
+        reminderRsvpLeadDays: 3,
+        reminderInvitationEnabled: true,
+        reminderInvitationLeadDays: 3,
+        reminderCredentialEnabled: true,
+        reminderCredentialLeadDays: 30,
+        ageTransitionAuto: false,
+        notifyBoardRequests: true,
+        notifyMeetingInvites: true,
+        notifyAgeTransition: true,
+        notifyHandover: true,
+        mailLanguage: "de",
+        // mail template fields are only visible with announcements:write (B15)
+        senderName: null,
+        signature: null,
+        replyTo: null,
+        textBlocks: [],
+      });
     });
 
     it("PATCH needs members:write and validates the values", async () => {
@@ -131,9 +161,9 @@ describe("exit workflow (B6)", () => {
     it("PATCH creates the row on demand, returns all four values, GET shows all four, and the prefix drives new member numbers", async () => {
       const res = await call(founder, "/club-settings", { method: "PATCH", body: { noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: " tsv ", allowSelfLoans: false } });
       expect(res.status).toBe(200);
-      expect((await body(res)).data).toEqual({ noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: "TSV", allowSelfLoans: false });
+      expect((await body(res)).data).toMatchObject({ noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: "TSV", allowSelfLoans: false });
       const plain = await join("settings-after");
-      expect((await body(await call(plain, "/club-settings"))).data).toEqual({ noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: "TSV", allowSelfLoans: false });
+      expect((await body(await call(plain, "/club-settings"))).data).toMatchObject({ noticePeriodDays: 30, noticeMode: "month_end", memberNumberPrefix: "TSV", allowSelfLoans: false });
       const created = await childMember();
       expect(created.memberNumber).toMatch(/^TSV-\d{4}$/);
       // partial update keeps the rest; null clears
@@ -143,9 +173,20 @@ describe("exit workflow (B6)", () => {
       expect(await db.query.auditLog.findFirst({ where: eq(auditLog.eventType, "club_settings.update") })).toBeTruthy();
     });
 
+    it("PATCH validates and stores the reminder switches, lead times, time zone and the age transition switch", async () => {
+      for (const bad of [{ timezone: "Mars/Olympus" }, { timezone: "" }, { reminderEventLeadHours: 0 }, { reminderEventLeadHours: 169 }, { reminderLoanLeadDays: -1 }, { reminderMaintenanceLeadDays: 91 }, { reminderRsvpLeadDays: 0 }, { reminderRsvpEnabled: "yes" }, { ageTransitionAuto: 1 }]) {
+        expect((await call(founder, "/club-settings", { method: "PATCH", body: bad })).status, JSON.stringify(bad)).toBe(422);
+      }
+      const res = await call(founder, "/club-settings", { method: "PATCH", body: { timezone: "Europe/Lisbon", reminderEventEnabled: false, reminderEventLeadHours: 48, reminderLoanLeadDays: 0, reminderMaintenanceLeadDays: 14, reminderRsvpEnabled: false, reminderRsvpLeadDays: 5, ageTransitionAuto: true } });
+      expect(res.status).toBe(200);
+      expect((await body(res)).data).toMatchObject({ timezone: "Europe/Lisbon", reminderEventEnabled: false, reminderEventLeadHours: 48, reminderLoanEnabled: true, reminderLoanLeadDays: 0, reminderMaintenanceLeadDays: 14, reminderRsvpEnabled: false, reminderRsvpLeadDays: 5, ageTransitionAuto: true });
+      const plain = await join("settings-reminders");
+      expect((await body(await call(plain, "/club-settings"))).data).toMatchObject({ timezone: "Europe/Lisbon", ageTransitionAuto: true });
+    });
+
     it("is club-scoped", async () => {
       const other = await call(outsider, "/club-settings", { clubId: otherClub });
-      expect((await body(other)).data).toEqual({ noticePeriodDays: null, noticeMode: null, memberNumberPrefix: null, allowSelfLoans: true });
+      expect((await body(other)).data).toMatchObject({ noticePeriodDays: null, noticeMode: null, memberNumberPrefix: null, allowSelfLoans: true });
     });
   });
 
@@ -193,6 +234,10 @@ describe("exit workflow (B6)", () => {
       expect(res.status).toBe(201);
       created = await data(res);
       expect(created).toMatchObject({ kind: "cancellation", status: "pending", clubMemberId: m1.clubMemberId, requestedOn: today(), desiredEffectiveOn: today(), effectiveOn: null, earliestEffectiveOn: earliest, proposedEffectiveOn: earliest, adjustedToEarliest: true, reason: "Umzug nach Hamburg" });
+      // B11: receipt confirmation (mandatory) to the member
+      const receipt = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, created.id), eq(messageDeliveries.eventKey, "exit.received")));
+      expect(receipt.map((m) => m.channel).sort()).toEqual(["email", "in_app"]);
+      expect((receipt[0]!.content as { class: string }).class).toBe("mandatory");
       // the member keeps full access while the request is open
       expect((await call(m1, "/club-members/me")).status).toBe(200);
       expect((await stored(m1.clubMemberId)).leftAt).toBeNull();
@@ -272,6 +317,18 @@ describe("exit workflow (B6)", () => {
       const approved = await body(res);
       expect(approved.data).toMatchObject({ status: "approved", effectiveOn: earliest, decisionNote: "Schade, alles Gute", decidedBy: founder.memberId });
       expect(approved.transition).toMatchObject({ kind: "scheduled_exit", toStatus: "ausgetreten", effectiveOn: earliest });
+      const accepted = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, created.id), eq(messageDeliveries.eventKey, "exit.accepted")));
+      expect(accepted.map((m) => m.channel).sort()).toEqual(["email", "in_app", "push"]); // G4: decisions also go out as push
+      expect((accepted[0]!.content as { body: string }).body).toContain(`${earliest.slice(8, 10)}.${earliest.slice(5, 7)}.${earliest.slice(0, 4)}`);
+      // The note is member-facing: the member reads exactly this text in their own request (GET /mine) and in the decision mail,
+      // and nothing else of the request (the member's own reason, status history) is copied into the text.
+      const mine = (await data(await call(m1, "/club-exit-requests/mine"))) as unknown as Json[];
+      expect(mine.find((r) => r.id === created.id)!.decisionNote).toBe("Schade, alles Gute");
+      for (const delivery of accepted) {
+        const text = (delivery.content as { body: string }).body;
+        expect(text).toContain("Schade, alles Gute");
+        expect(text).not.toContain("Umzug nach Hamburg");
+      }
       const row = await stored(m1.clubMemberId);
       expect(row).toMatchObject({ status: "aktiv", leftAt: earliest, exitReason: "Umzug nach Hamburg" });
       expect((await call(m1, "/club-members/me")).status).toBe(200);
@@ -314,6 +371,10 @@ describe("exit workflow (B6)", () => {
       const res = await call(founder, `/club-exit-requests/${req.id}/reject`, { method: "POST", body: { note: "Bitte erst Schluessel abgeben" } });
       expect(res.status).toBe(200);
       expect((await data(res)).status).toBe("rejected");
+      const rejectedMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, req.id), eq(messageDeliveries.eventKey, "exit.rejected")));
+      expect(rejectedMsgs).toHaveLength(3); // in-app, mail and push
+      expect((rejectedMsgs[0]!.content as { body: string }).body).toContain("Bitte erst Schluessel abgeben");
+      expect(((await data(await call(m, "/club-exit-requests/mine"))) as unknown as Json[]).find((r) => r.id === req.id)!.decisionNote).toBe("Bitte erst Schluessel abgeben"); // member-facing by contract
       expect(await stored(m.clubMemberId)).toMatchObject({ status: "aktiv", leftAt: null });
       expect((await call(m, "/club-members/me")).status).toBe(200);
     });
@@ -456,10 +517,15 @@ describe("exit workflow (B6)", () => {
       const out = await body(res);
       expect(out.data).toMatchObject({ kind: "exclusion", status: "approved", effectiveOn: today(), earliestEffectiveOn: null });
       expect(out.transition).toMatchObject({ kind: "status", toStatus: "ausgeschlossen" });
+      const exclusionMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, out.data.id), eq(messageDeliveries.eventKey, "exit.exclusion")));
+      expect(exclusionMsgs.map((m) => m.channel).sort()).toEqual(["email", "in_app", "push"]);
+      expect((exclusionMsgs[0]!.content as { body: string }).body).toContain("Vereinsschaedigung");
       expect(await stored(victim.clubMemberId)).toMatchObject({ status: "ausgeschlossen", leftAt: today(), exitReason: "Vereinsschaedigung" });
       expect((await call(victim, "/club-members/me")).status).toBe(404);
       const superseded = await db.query.clubExitRequests.findFirst({ where: eq(clubExitRequests.id, pending.id) });
       expect(superseded).toMatchObject({ status: "rejected", decisionNote: "Ersetzt durch Ausschluss" });
+      // the system note of a superseded request is internal bookkeeping: no mail with it, to anybody
+      expect(await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, pending.id), eq(messageDeliveries.eventKey, "exit.rejected")))).toHaveLength(0);
 
       expect((await call(founder, `/club-exit-requests/${out.data.id}/withdraw`, { method: "POST", body: {} })).status).toBe(409);
       // already left: neither a second exclusion nor a cancellation

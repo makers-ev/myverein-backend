@@ -102,8 +102,8 @@ describe("media gate (static scan)", () => {
   });
 
   it("only known response shapes carry a `url`/`photoUrl` field (each issues a signed URL after its own permission check)", () => {
-    // location links hold external links the board typed in (not files); the e-mail/auth files build links to the web app.
-    const urlAllowed = ["auth/auth.ts", "db/schema/location-links.ts", "lib/club-registration-mail.ts", "lib/emailTemplate.ts", "lib/media-url.ts", "lib/member-invites.ts", "routes/club-members.ts", "routes/form-submissions.ts", "routes/locations.ts", "routes/media.ts"];
+    // location links hold external links the board typed in (not files); the e-mail/auth/notify files build links to the web app.
+    const urlAllowed = ["auth/auth.ts", "db/schema/location-links.ts", "lib/club-registration-notify.ts", "lib/emailTemplate.ts", "lib/media-url.ts", "lib/member-invites.ts", "lib/notify/templates.ts", "lib/notify/unsubscribe.ts", "routes/club-members.ts", "routes/form-submissions.ts", "routes/locations.ts", "routes/media.ts"];
     expect(offenders(/\burl\s*:/, urlAllowed)).toEqual([]);
     expect(offenders(/\bphotoUrl\b/, ["routes/club-info.ts", "routes/club-members.ts", "routes/inventory-items.ts", "routes/locations.ts"])).toEqual([]);
     // the board-facing review of an application never carries a URL, only the authenticated stream path

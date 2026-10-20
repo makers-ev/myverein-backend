@@ -16,7 +16,8 @@ import {
   sendRegistrationApprovedMail,
   sendRegistrationNeedsInfoMail,
   sendRegistrationRejectedMail,
-} from "../lib/club-registration-mail.js";
+  transitionOf,
+} from "../lib/club-registration-notify.js";
 import { documentResponse, findDocument, isUuid, recordAdminDocumentAccess, registerKey, registerKeyMatches, shapeRegistration, shapeRegistrations } from "../lib/club-registrations.js";
 import { assertValidClubSlug, slugifyClubName, uniqueClubSlug } from "../lib/club-slug.js";
 import { ConflictError, InternalError, NotFoundError, ValidationError } from "../lib/errors.js";
@@ -123,9 +124,9 @@ async function shapeForAdmin(rows: ClubRegistrationRow[]) {
   }));
 }
 
-async function applicantOf(userId: string): Promise<{ name: string; email: string } | null> {
+async function applicantOf(userId: string): Promise<{ name: string; email: string; userId: string } | null> {
   const row = await db.query.user.findFirst({ where: eq(user.id, userId) });
-  return row ? { name: row.name, email: row.email } : null;
+  return row ? { name: row.name, email: row.email, userId: row.id } : null;
 }
 
 /** Deletes `org` iff it was created for `registrationId` (metadata tag) and has no member rows. Returns whether it did. */
@@ -206,8 +207,9 @@ async function decideWithNote(c: { get: (k: "user") => { id: string } }, id: str
     logger.error({ err, registrationId: decided.id }, "[admin-club-registrations] could not load applicant for notification mail");
     return null;
   });
-  if (applicant) {
-    inBackground(status === "needs_info" ? sendRegistrationNeedsInfoMail(applicant, decided.clubName, note, decided.id) : sendRegistrationRejectedMail(applicant, decided.clubName, note, decided.id));
+  const transition = transitionOf(decided.id, decided.reviewedAt, "reviewedAt");
+  if (applicant && transition) {
+    inBackground(status === "needs_info" ? sendRegistrationNeedsInfoMail(applicant, decided.clubName, note, decided.id, transition) : sendRegistrationRejectedMail(applicant, decided.clubName, note, decided.id, transition));
   }
   return decided;
 }
@@ -332,7 +334,8 @@ adminClubRegistrationRoutes.post("/:id/approve", async (c) => {
     logger.error({ err, registrationId: result.registration.id }, "[admin-club-registrations] could not load applicant for approval mail");
     return null;
   });
-  if (applicant) inBackground(sendRegistrationApprovedMail(applicant, result.club.name, result.club.slug, result.registration.id));
+  const approvedAt = transitionOf(result.registration.id, result.registration.reviewedAt, "reviewedAt");
+  if (applicant && approvedAt) inBackground(sendRegistrationApprovedMail(applicant, result.club.name, result.club.slug, result.registration.id, approvedAt));
 
   return c.json({ data: { registration: await shapeRegistration(result.registration), club: result.club } });
 });

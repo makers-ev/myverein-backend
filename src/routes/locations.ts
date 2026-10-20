@@ -13,6 +13,7 @@ import { locationWifiNetworks, WIFI_SECURITY_TYPES, type LocationWifiNetworkRow 
 import { LOCATION_VISIBILITIES, locationKeyHistory, locationKeyHolders, locations, type LocationRow, type LocationVisibility } from "../db/schema/locations.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
+import { notifyHandover } from "../lib/handover-notify.js";
 import { wifiQrPayload } from "../lib/wifi-qr.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { attachUploadedImage, markMediaDeleted, purgeMediaFile, signedMediaUrls } from "../lib/media.js";
@@ -306,7 +307,7 @@ locationRoutes.post(
     const id = c.req.param("id");
     const body = c.req.valid("json");
 
-    await loadClubLocation(id, clubId);
+    const location = await loadClubLocation(id, clubId);
 
     const [holder] = await db
       .select({ id: member.id, name: user.name })
@@ -317,13 +318,14 @@ locationRoutes.post(
 
     // Holder row, history entry and audit entry commit together (a duplicate aborts all three).
     let row;
+    let historyId = "";
     try {
       row = await db.transaction(async (tx) => {
         const [created] = await tx
           .insert(locationKeyHolders)
           .values({ locationId: id, memberId: body.memberId, keyLabel: body.keyLabel || null })
           .returning();
-        await tx.insert(locationKeyHistory).values({
+        const [entry] = await tx.insert(locationKeyHistory).values({
           locationId: id,
           action: "issued",
           memberId: body.memberId,
@@ -332,7 +334,8 @@ locationRoutes.post(
           note: body.note || null,
           recordedBy: c.get("membership").id,
           recordedByName: c.get("user").name,
-        });
+        }).returning({ id: locationKeyHistory.id });
+        historyId = entry!.id;
         await tx.insert(auditLog).values({
           eventType: "location_key_holder.create",
           subjectId: created!.id,
@@ -346,6 +349,7 @@ locationRoutes.post(
       }
       throw err;
     }
+    await notifyHandover({ clubId, kind: "key.issued", refId: historyId, accountMemberId: body.memberId, actorAccountMemberId: c.get("membership").id, subject: location.name, keyLabel: row.keyLabel });
 
     return c.json({ data: row }, 201);
   },
@@ -366,7 +370,7 @@ locationRoutes.delete("/:id/key-holders/:memberId", returnBodyLimit, async (c) =
   const id = c.req.param("id");
   const memberId = c.req.param("memberId");
 
-  await loadClubLocation(id, clubId);
+  const location = await loadClubLocation(id, clubId);
 
   // Optional JSON body { note } (a return note); no body or an empty one is fine.
   const raw = await c.req.text();
@@ -388,12 +392,12 @@ locationRoutes.delete("/:id/key-holders/:memberId", returnBodyLimit, async (c) =
   });
   if (!existing) throw new NotFoundError("Key holder not found");
 
-  await db.transaction(async (tx) => {
+  const historyId = await db.transaction(async (tx) => {
     const [holder] = await tx.select({ name: user.name }).from(member).innerJoin(user, eq(user.id, member.userId)).where(eq(member.id, memberId));
     const deleted = await tx.delete(locationKeyHolders).where(eq(locationKeyHolders.id, existing.id)).returning({ id: locationKeyHolders.id });
     // A parallel return already removed the row: do not log it twice.
     if (deleted.length === 0) throw new NotFoundError("Key holder not found");
-    await tx.insert(locationKeyHistory).values({
+    const [entry] = await tx.insert(locationKeyHistory).values({
       locationId: id,
       action: "returned",
       memberId,
@@ -402,13 +406,15 @@ locationRoutes.delete("/:id/key-holders/:memberId", returnBodyLimit, async (c) =
       note: note || null,
       recordedBy: c.get("membership").id,
       recordedByName: c.get("user").name,
-    });
+    }).returning({ id: locationKeyHistory.id });
     await tx.insert(auditLog).values({
       eventType: "location_key_holder.delete",
       subjectId: existing.id,
       payload: { clubId, locationId: id, memberId },
     });
+    return entry!.id;
   });
+  await notifyHandover({ clubId, kind: "key.returned", refId: historyId, accountMemberId: memberId, actorAccountMemberId: c.get("membership").id, subject: location.name, keyLabel: existing.keyLabel });
 
   return c.body(null, 204);
 });

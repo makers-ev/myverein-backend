@@ -218,6 +218,90 @@
       "when": 1792239885474,
       "tag": "0030_guardian-entered-via",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1792316641210,
+      "tag": "0031_communication-and-job-queue",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1792317264790,
+      "tag": "0032_delivery-content",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1792321248143,
+      "tag": "0033_rate-limit-events",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1792321746983,
+      "tag": "0034_club-settings-text-blocks",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1792322597882,
+      "tag": "0035_delivery-idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1792481219884,
+      "tag": "0036_notify-board-requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1792481450420,
+      "tag": "0037_notify-meeting-invites",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1792481884239,
+      "tag": "0038_reminder-invitations-credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1792482132945,
+      "tag": "0039_notify-handover",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1792484059682,
+      "tag": "0040_registration-dedupe",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1792484336565,
+      "tag": "0041_notify-age-transition",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1792484617007,
+      "tag": "0042_preferences-per-club",
+      "breakpoints": true
     }
   ]
 }

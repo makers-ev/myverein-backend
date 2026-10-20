@@ -8,6 +8,9 @@ import * as auditLogSchema from "./schema/audit-log.js";
 import * as availabilitySchema from "./schema/availability.js";
 import * as calendarVisibilitySchema from "./schema/calendar-visibility.js";
 import * as calendarsSchema from "./schema/calendars.js";
+import * as communicationSchema from "./schema/communication.js";
+import * as jobsSchema from "./schema/jobs.js";
+import * as rateLimitsSchema from "./schema/rate-limits.js";
 import * as clubApplicationsSchema from "./schema/club-applications.js";
 import * as clubInfoPagesSchema from "./schema/club-info-pages.js";
 import * as clubRegistrationsSchema from "./schema/club-registrations.js";
@@ -84,6 +87,9 @@ export const schema = {
   ...locationLinksSchema,
   ...inventorySchema,
   ...formsSchema,
+  ...jobsSchema,
+  ...rateLimitsSchema,
+  ...communicationSchema,
 };
 
 export const db = drizzle(pool, { schema });

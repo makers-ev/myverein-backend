@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { rm, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, like } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -15,6 +15,7 @@ import { calendars } from "../db/schema/calendars.js";
 import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrationDocuments, clubRegistrations } from "../db/schema/club-registrations.js";
+import { messageDeliveries } from "../db/schema/communication.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { encodeRfc5987 } from "../lib/club-registrations.js";
 import { toAppError } from "../lib/errors.js";
@@ -504,12 +505,22 @@ describe("club registrations (Wave 6)", () => {
       expect(((await (await req(second, `/club-registrations/${b.id}`)).json()) as { data: { registration: Reg } }).data.registration.status).toBe("draft");
     });
 
-    it("never fails the status change when mail sending fails", async () => {
+    it("queues the registration mails through the dispatcher and never fails the status change when mail sending fails", async () => {
       vi.mocked(sendEmail).mockClear();
       const who = await applicant("mailfail");
       const reg = await submitted(who, `Mailfehler Verein ${suffix}`);
-      await vi.waitFor(() => expect(vi.mocked(sendEmail)).toHaveBeenCalled());
+      await vi.waitFor(async () => {
+        const rows = await db.select().from(messageDeliveries).where(like(messageDeliveries.refId, `${reg.id}#%`));
+        const received = rows.filter((r) => r.eventKey === "club_registration.received" && r.clubId === null && r.status === "queued");
+        expect(received).toHaveLength(1);
+        // delivery-level dedupe: the ref_id carries the transition, the row the applicant's account
+        expect(received[0]!.userId).not.toBeNull();
+      });
       expect((await decide(reg.id, "approve")).status).toBe(200);
+      await vi.waitFor(async () => {
+        const rows = await db.select().from(messageDeliveries).where(and(like(messageDeliveries.refId, `${reg.id}#%`), eq(messageDeliveries.eventKey, "club_registration.approved")));
+        expect(rows).toHaveLength(1);
+      });
     });
   });
 

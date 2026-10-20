@@ -13,6 +13,7 @@ import { locationKeyHolders, locations } from "../db/schema/locations.js";
 import { type DbExecutor, ensureClubMember, isUuid, resolveClubMember } from "../lib/club-members.js";
 import { loadClubSettings } from "../lib/club-settings.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
+import { notifyExitDecision, notifyExitRequestToBoard } from "../lib/decision-notify.js";
 import { addDays, earliestExitDate } from "../lib/exit-notice.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { closeExitSubmission, currentExitDefinition, insertExitSubmission, loadExitSubmission, prepareExitAnswers, type PreparedExitAnswers } from "../lib/form-exit.js";
@@ -318,6 +319,8 @@ clubExitRequestRoutes.post("/", createBodyLimit, zValidator("json", createSchema
       });
       return { request: inserted!, member: row };
     });
+    await notifyExitDecision({ clubId, requestId: created.request.id, clubMemberId: created.member.id, kind: "received", earliestOn: earliest, today });
+    await notifyExitRequestToBoard({ clubId, requestId: created.request.id, clubMemberId: created.member.id, desiredEffectiveOn: created.request.desiredEffectiveOn });
     return c.json({ data: { ...shapeRequest(created.request, created.member, settings), adjustedToEarliest: body.desiredEffectiveOn != null && body.desiredEffectiveOn < earliest } }, 201);
   }
 
@@ -377,6 +380,7 @@ clubExitRequestRoutes.post("/", createBodyLimit, zValidator("json", createSchema
     return { request: inserted!, member: done.row, transition: done };
   });
 
+  await notifyExitDecision({ clubId, requestId: result.request.id, clubMemberId: result.member.id, kind: kind === "exclusion" ? "exclusion" : "accepted", effectiveOn, note: kind === "exclusion" ? reason : null, today });
   return c.json(
     {
       data: shapeRequest(result.request, result.member, settings),
@@ -409,6 +413,8 @@ async function insertRequest(tx: DbExecutor, values: typeof clubExitRequests.$in
 const approveSchema = z.object({
   // Overrides the proposed date; must not be before the earliest date allowed by the notice rules.
   effectiveOn: z.string().date().optional(),
+  // MEMBER-FACING: stored as `decisionNote`, readable by the member in GET /mine and quoted in the decision mail (also to the guardians
+  // of a child). Not a place for internal board remarks.
   note: z.string().trim().max(1000).nullable().optional(),
 });
 
@@ -471,12 +477,22 @@ clubExitRequestRoutes.post("/:id/approve", zValidator("json", approveSchema, val
     return { request: claimed, member: done.row, transition: done };
   });
 
+  await notifyExitDecision({
+    clubId,
+    requestId: result.request.id,
+    clubMemberId: result.request.clubMemberId,
+    kind: result.request.kind === "exclusion" ? "exclusion" : "accepted",
+    effectiveOn,
+    note: result.request.kind === "exclusion" ? result.request.reason : result.request.decisionNote,
+    today,
+  });
   return c.json({
     data: shapeRequest(result.request, result.member, settings),
     transition: { kind: result.transition.kind, fromStatus: result.transition.fromStatus, toStatus: result.transition.toStatus, effectiveOn: result.transition.effectiveOn },
   });
 });
 
+// MEMBER-FACING reason (required): stored as `decisionNote`, readable by the member in GET /mine and quoted in the rejection mail.
 const rejectSchema = z.object({ note: z.string().trim().min(1).max(1000) });
 
 clubExitRequestRoutes.post("/:id/reject", zValidator("json", rejectSchema, validationHook), async (c) => {
@@ -502,6 +518,7 @@ clubExitRequestRoutes.post("/:id/reject", zValidator("json", rejectSchema, valid
     });
     return row;
   });
+  await notifyExitDecision({ clubId, requestId: rejected.id, clubMemberId: rejected.clubMemberId, kind: "rejected", note, today: todayBerlin() });
   return c.json({ data: shapeRequest(rejected, loaded.member, settings) });
 });
 

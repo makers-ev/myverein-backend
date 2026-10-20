@@ -6,7 +6,7 @@ import { APIError, createAuthMiddleware } from "better-auth/api";
 import { eq } from "drizzle-orm";
 import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plugins";
 
-import { organization as organizationTable } from "./auth-schema.js";
+import { organization as organizationTable, user as userTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { assertRejoinAllowed, ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
@@ -15,7 +15,10 @@ import { ConflictError } from "../lib/errors.js";
 import { inviteLinkContext } from "../lib/invite-context.js";
 import { logger } from "../lib/logger.js";
 import { notification, notificationTemplate } from "../db/schema/notifications.js";
+import { changesAfterUserUpdate, rememberBeforeUserUpdate, type HookContext } from "../lib/account-change-tracker.js";
+import { notifyAccountChange } from "../lib/account-notify.js";
 import { sendEmail } from "../lib/email.js";
+import { pickMailLanguage, type MailLanguage } from "../lib/notify/i18n.js";
 import { APP_NAME, buildResetPasswordEmail, buildVerifyEmailEmail, LOGO_CID, LOGO_PATH } from "../lib/emailTemplate.js";
 import { isHttpsDeployment, trustedOrigins } from "../lib/trusted-origins.js";
 import { accessControl, adminRole, userRole } from "./permissions.js";
@@ -42,6 +45,10 @@ function rejoinBlocked(err: unknown): never {
   if (err instanceof ConflictError) throw new APIError("CONFLICT", { message: err.message });
   throw err;
 }
+
+/** Language of an account notice: the `Accept-Language` of the request that caused it (German if absent). */
+const langOf = (source: { request?: Request | null; headers?: Headers | null } | null | undefined): MailLanguage =>
+  pickMailLanguage(source?.headers?.get("accept-language") ?? source?.request?.headers.get("accept-language"));
 
 export const auth = betterAuth({
   secret: authSecret,
@@ -85,6 +92,11 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
     requireEmailVerification: true,
+    // Security notice after a completed reset (G8). The reset mail itself stays a Better Auth mail on purpose: it must work
+    // before the account has a verified address, so it cannot depend on the dispatcher's mandatory-class contact rules.
+    onPasswordReset: async ({ user: resetUser }, request) => {
+      await notifyAccountChange("password_changed", { id: resetUser.id, name: resetUser.name, email: resetUser.email }, { lang: langOf({ request }) });
+    },
     sendResetPassword: async ({ user, url }) => {
       // Better Auth builds `url` as
       // `${BACKEND_URL}/reset-password/:token?callbackURL=<client redirectTo>`.
@@ -231,6 +243,16 @@ export const auth = betterAuth({
         throw new APIError("NOT_FOUND", { message: "Not found" });
       }
     }),
+    // Security notice for a password changed while signed in (own change, or set by a platform admin) -- G8.
+    after: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/change-password" && ctx.path !== "/admin/set-user-password") return;
+      if (ctx.context.returned instanceof Error) return; // the change failed
+      const adminTarget = ctx.path === "/admin/set-user-password" && typeof (ctx.body as { userId?: unknown } | undefined)?.userId === "string" ? (ctx.body as { userId: string }).userId : null;
+      const targetId = adminTarget ?? ctx.context.session?.user.id ?? ctx.context.newSession?.user.id;
+      if (!targetId) return;
+      const [target] = await db.select({ id: userTable.id, name: userTable.name, email: userTable.email }).from(userTable).where(eq(userTable.id, targetId));
+      if (target) await notifyAccountChange("password_changed", target, { lang: langOf(ctx) });
+    }),
   },
   databaseHooks: {
     session: {
@@ -253,6 +275,23 @@ export const auth = betterAuth({
       },
     },
     user: {
+      // E-mail change and two-factor switch (G8): snapshot before the write, compare against the WRITTEN row after it
+      // (lib/account-change-tracker.ts; per request context, no body/session assumptions, no cross-request state).
+      update: {
+        before: async (data, context) => {
+          await rememberBeforeUserUpdate(data, context as HookContext);
+        },
+        after: async (updated, context) => {
+          const change = changesAfterUserUpdate(updated, context as HookContext);
+          if (!updated || !change) return;
+          if (change.previousEmail) {
+            await notifyAccountChange("email_changed", { id: updated.id, name: change.previousEmail.name, email: change.previousEmail.address }, { lang: change.lang });
+          }
+          if (change.twoFactor !== undefined) {
+            await notifyAccountChange(change.twoFactor ? "two_factor_enabled" : "two_factor_disabled", { id: updated.id, name: updated.name, email: updated.email }, { lang: change.lang });
+          }
+        },
+      },
       create: {
         after: async (createdUser) => {
           // System notification (ADR-006): rendered client-side from

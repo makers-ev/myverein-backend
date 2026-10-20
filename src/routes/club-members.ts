@@ -27,13 +27,17 @@ import { departments } from "../db/schema/departments.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { ASSIGNABLE_ROLE_TYPES, IMPLICIT_ROLE_TYPE, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
 import { DEFAULT_CATEGORY_KEY, type DbExecutor, ensureClubMember, ensureDefaultCategories, isUuid, markDetachedMembersLeft, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
+import { notifyApplicationReceived } from "../lib/decision-notify.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
 import { cleanText, isCleanText } from "../lib/text-policy.js";
 import { createInvite, previewInvite, acceptInvite, unlinkAccount } from "../lib/member-invites.js";
-import { sendEmail } from "../lib/email.js";
-import { APP_NAME, buildMemberInviteEmail, LOGO_CID, LOGO_PATH, SITE_URL } from "../lib/emailTemplate.js";
+import { APP_NAME, buildMemberInviteEmail, SITE_URL } from "../lib/emailTemplate.js";
+import { notify } from "../lib/notify/dispatcher.js";
 import { clubMemberInvites, type ClubMemberInviteRow } from "../db/schema/club-member-invites.js";
+import { enqueueMemberCategoryNotices } from "../lib/age-transition.js";
+import { clubMailLanguage } from "../lib/club-settings.js";
+import { tr } from "../lib/notify/i18n.js";
 import { effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
 import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "../lib/member-read-scope.js";
 import { findMemberPhotoMedia, canSeeMemberPhoto, isMinor, memberPhotoUrls, removeMemberPhoto, replaceMemberPhoto, type PhotoCaller } from "../lib/member-photos.js";
@@ -311,6 +315,7 @@ clubMemberRoutes.post(
           subjectId: filed.application.id,
           payload: { clubId, userId: currentUser.id, formSubmissionId: filed.submission.id, formVersionId: filed.submission.formVersionId, onBehalfOf: filed.submission.onBehalfOf },
         });
+        await notifyApplicationReceived({ clubId, applicationId: filed.application.id, userId: currentUser.id, onBehalfOf: filed.submission.onBehalfOf === "guardian" ? "guardian" : "self" });
       }
       return c.json(
         { data: { application: filed.application, submission: { id: filed.submission.id, status: filed.submission.status, formVersionId: filed.submission.formVersionId, onBehalfOf: filed.submission.onBehalfOf }, warnings: filed.warnings } },
@@ -352,6 +357,7 @@ clubMemberRoutes.post(
       subjectId: application.id,
       payload: { clubId, userId: currentUser.id, category: body.category, legacy: true },
     });
+    await notifyApplicationReceived({ clubId, applicationId: application.id, userId: currentUser.id, onBehalfOf: "self" });
 
     return c.json({ data: { application } }, 201);
   },
@@ -1352,6 +1358,8 @@ clubMemberRoutes.post("/transition-suggestions/apply", zValidator("json", applyS
     }
     if (applied.length > 0) {
       await tx.insert(auditLog).values({ eventType: "club_member.age_transition", subjectId: clubId, payload: { clubId, count: applied.length, memberIds: applied.map((a) => a.id), changedBy: actor.id } });
+      // The moved members (and guardians) are told, in the same transaction as the move (switch `notify_age_transition`).
+      await enqueueMemberCategoryNotices(tx, clubId, applied.map((a) => ({ id: a.id, fromId: a.fromCategoryId, toId: a.toCategoryId })), today);
     }
     return { applied, skipped };
   });
@@ -1648,23 +1656,43 @@ function shapeInvite(invite: ClubMemberInviteRow) {
   return { id: invite.id, clubMemberId: invite.clubMemberId, email: invite.email, status, expiresAt: invite.expiresAt, acceptedAt: invite.acceptedAt, createdAt: invite.createdAt };
 }
 
-/** Mail problems never block an invite (the board sees emailSent=false and can resend); the address is not logged. */
+/**
+ * Mail problems never block an invite (the board sees emailSent=false and can resend); the address is not logged. The mail
+ * goes through the dispatcher (Wave 9 B11, class `mandatory`, sent inline so the outcome is known); the link is wiped from
+ * the delivery row after sending (`sensitive`).
+ */
 async function sendInviteMail(clubId: string, target: { id: string; displayName: string }, invite: ClubMemberInviteRow, token: string, email: string): Promise<boolean> {
   try {
     const club = await db.query.organization.findFirst({ where: eq(organization.id, clubId) });
-    const clubName = club?.name ?? "deinem Verein";
-    await sendEmail({
-      to: email,
-      subject: `Einladung von ${clubName.replace(/[\r\n]+/g, " ")} zu ${APP_NAME}`,
-      html: buildMemberInviteEmail({
-        name: target.displayName,
-        clubName,
-        url: `${SITE_URL}/einladung?token=${encodeURIComponent(token)}`,
-        expiresOn: invite.expiresAt.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }),
-      }),
-      attachments: [{ filename: "logo.png", path: LOGO_PATH, cid: LOGO_CID }],
+    const lang = await clubMailLanguage(db, clubId);
+    const clubName = club?.name ?? tr(lang, "deinem Verein", "your club");
+    const subject = tr(lang, `Einladung von ${clubName.replace(/[\r\n]+/g, " ")} zu ${APP_NAME}`, `Invitation from ${clubName.replace(/[\r\n]+/g, " ")} to ${APP_NAME}`);
+    const result = await notify({
+      clubId,
+      class: "mandatory",
+      eventKey: "member_invite.created",
+      refId: invite.id,
+      recipients: [{ clubMemberId: target.id, name: target.displayName, email }],
+      content: {
+        title: subject,
+        body: tr(lang, "Einladung zur Verknüpfung deines Mitglieds-Kontos", "Invitation to link your member account"),
+        lang,
+        rendered: {
+          subject,
+          html: buildMemberInviteEmail({
+            name: target.displayName,
+            clubName,
+            url: `${SITE_URL}/einladung?token=${encodeURIComponent(token)}`,
+            expiresOn: invite.expiresAt.toLocaleDateString(tr(lang, "de-DE", "en-GB"), { timeZone: "Europe/Berlin" }),
+            lang,
+          }),
+        },
+        sensitive: true,
+      },
+      channels: ["email"],
+      immediate: true,
     });
-    return true;
+    return result.sentEmail > 0;
   } catch (err) {
     logger.error({ errorName: err instanceof Error ? err.name : "unknown", clubMemberId: target.id, inviteId: invite.id }, "[club-members] invite e-mail could not be sent");
     return false;

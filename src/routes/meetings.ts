@@ -6,10 +6,12 @@ import { z } from "zod";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
+import { clubMailLanguage } from "../lib/club-settings.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
 import { MEETING_TYPES, meetingAttendance, meetingInvitees, meetingResolutions, meetings } from "../db/schema/meetings.js";
 import { computeAvailability, type AvailabilityInput } from "../lib/availability-match.js";
+import { announceMeetingInvitation, clubTimezone, composeEventMessage, isOpenMeeting, locationName, meetingAudience, scheduleEventChanged } from "../lib/event-notify.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
@@ -134,7 +136,12 @@ const updateMeetingSchema = z.object({
   agenda: z.string().nullable().optional(),
   status: z.string().min(1).optional(),
   minutes: z.string().nullable().optional(),
+  /** `false` saves a reschedule / cancellation without telling the invitees (audited). */
+  notify: z.boolean().optional(),
 });
+
+/** `status` value that marks a cancelled meeting (free-text column; the invitees are told when it is set). */
+const CANCELLED_MEETING_STATUS = "abgesagt";
 
 meetingRoutes.patch(
   "/:id",
@@ -148,8 +155,8 @@ meetingRoutes.patch(
       throw new ForbiddenError("Missing meetings:write permission");
     }
     const id = c.req.param("id");
-    const body = c.req.valid("json");
-    await loadClubMeeting(c, id);
+    const { notify: notifyFlag, ...body } = c.req.valid("json");
+    const existing = await loadClubMeeting(c, id);
 
     const [row] = await db
       .update(meetings)
@@ -161,7 +168,31 @@ meetingRoutes.patch(
       .where(eq(meetings.id, id))
       .returning();
 
-    await db.insert(auditLog).values({ eventType: "meeting.update", subjectId: id, payload: { clubId, changes: body } });
+    await db.insert(auditLog).values({ eventType: "meeting.update", subjectId: id, payload: { clubId, changes: body, ...(notifyFlag === false ? { notify: false } : {}) } });
+
+    // A moved or cancelled meeting is announced to the invitees (B10).
+    const cancelled = row!.status === CANCELLED_MEETING_STATUS && existing.status !== CANCELLED_MEETING_STATUS;
+    const moved = existing.status !== CANCELLED_MEETING_STATUS && row!.scheduledAt !== null && row!.scheduledAt.getTime() !== existing.scheduledAt?.getTime();
+    if (cancelled || moved) {
+      try {
+        const audience = await meetingAudience(clubId, id);
+        const timezone = await clubTimezone(clubId);
+        const place = await locationName(clubId, row!.locationId);
+        const message = composeEventMessage({
+          lang: await clubMailLanguage(db, clubId),
+          noun: "Treffen",
+          title: row!.title,
+          timezone,
+          before: { startsAt: existing.scheduledAt, endsAt: null, place },
+          after: { startsAt: row!.scheduledAt, endsAt: null, place },
+          cancelled,
+        });
+        const payload = { clubId, kind: "meeting" as const, refId: id, version: row!.updatedAt.getTime(), cancelled, ...message, audience: audience ?? { memberIds: [], includeGuardians: false } };
+        if (notifyFlag === false || audience !== null) await scheduleEventChanged(payload, { suppressed: notifyFlag === false, actor: c.get("user").id });
+      } catch {
+        // Best effort: the meeting itself is already saved.
+      }
+    }
 
     return c.json({ data: row });
   },
@@ -174,10 +205,32 @@ meetingRoutes.delete("/:id", async (c) => {
     throw new ForbiddenError("Missing meetings:write permission");
   }
   const id = c.req.param("id");
-  await loadClubMeeting(c, id);
+  const existing = await loadClubMeeting(c, id);
+
+  // Deleting a meeting that is still open (Terminfindung or planned) is a cancellation for the invitees: capture them before they vanish.
+  const notifyFlag = c.req.query("notify");
+  const audience = isOpenMeeting(existing) ? await meetingAudience(clubId, id) : null;
 
   await db.delete(meetings).where(eq(meetings.id, id));
-  await db.insert(auditLog).values({ eventType: "meeting.delete", subjectId: id, payload: { clubId } });
+  await db.insert(auditLog).values({ eventType: "meeting.delete", subjectId: id, payload: { clubId, ...(notifyFlag === "false" ? { notify: false } : {}) } });
+
+  if (audience !== null) {
+    try {
+      const timezone = await clubTimezone(clubId);
+      const message = composeEventMessage({
+        lang: await clubMailLanguage(db, clubId),
+        noun: "Treffen",
+        title: existing.title,
+        timezone,
+        before: { startsAt: existing.scheduledAt, endsAt: null, place: await locationName(clubId, existing.locationId) },
+        after: { startsAt: null, endsAt: null, place: null },
+        cancelled: true,
+      });
+      await scheduleEventChanged({ clubId, kind: "meeting", refId: id, version: Date.now(), cancelled: true, ...message, audience }, { suppressed: notifyFlag === "false", actor: c.get("user").id });
+    } catch {
+      // Best effort: the meeting itself is already deleted.
+    }
+  }
 
   return c.body(null, 204);
 });
@@ -194,7 +247,11 @@ meetingRoutes.get("/:id/invitees", async (c) => {
   return c.json({ data: rows });
 });
 
-const addInviteeSchema = z.object({ memberId: z.string().min(1) });
+const addInviteeSchema = z.object({
+  memberId: z.string().min(1),
+  /** `false` adds the person without telling them (audited). Default: the invitation is announced (club switch `notify_meeting_invites`). */
+  notify: z.boolean().optional(),
+});
 
 meetingRoutes.post(
   "/:id/invitees",
@@ -208,8 +265,8 @@ meetingRoutes.post(
       throw new ForbiddenError("Missing meetings:write permission");
     }
     const id = c.req.param("id");
-    await loadClubMeeting(c, id);
-    const { memberId } = c.req.valid("json");
+    const meeting = await loadClubMeeting(c, id);
+    const { memberId, notify: notifyFlag } = c.req.valid("json");
 
     const memberRow = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
     if (!memberRow) throw new NotFoundError("Member not found in this club");
@@ -221,7 +278,8 @@ meetingRoutes.post(
 
     const [row] = await db.insert(meetingInvitees).values({ meetingId: id, memberId, response: "ausstehend" }).returning();
 
-    await db.insert(auditLog).values({ eventType: "meeting_invitee.add", subjectId: id, payload: { clubId, memberId } });
+    await db.insert(auditLog).values({ eventType: "meeting_invitee.add", subjectId: id, payload: { clubId, memberId, ...(notifyFlag === false ? { notify: false } : {}) } });
+    await announceMeetingInvitation({ clubId, actor: c.get("user").id, meeting, invitee: row, suppress: notifyFlag === false });
 
     return c.json({ data: row }, 201);
   },

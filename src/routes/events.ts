@@ -1,17 +1,22 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lte } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
+import { clubMailLanguage } from "../lib/club-settings.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { calendars } from "../db/schema/calendars.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
-import { events } from "../db/schema/events.js";
+import { events, type EventRow } from "../db/schema/events.js";
+import { locations } from "../db/schema/locations.js";
+import { AudienceLimitError, resolveClubAudience, summarizeAudience } from "../lib/audience.js";
+import { clubTimezone, composeEventMessage, essentialDiff, eventAudience, locationName, notifyWaitlistPromoted, scheduleEventChanged } from "../lib/event-notify.js";
 import { buildIcs } from "../lib/ics.js";
 import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
-import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { logger } from "../lib/logger.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -44,6 +49,58 @@ async function loadClubCalendar(calendarId: string, clubId: string) {
   return calendar;
 }
 
+/** Read shape: the row plus a `cancelled` flag (`cancelledAt`/`cancelReason` are part of the row; old clients ignore them). */
+function shapeEvent(row: EventRow) {
+  return { ...row, cancelled: row.cancelledAt !== null };
+}
+
+/** A location must belong to the caller's club (404 otherwise, indistinguishable from unknown). */
+async function assertClubLocation(locationId: string, clubId: string): Promise<void> {
+  const [row] = await db.select({ id: locations.id }).from(locations).where(and(eq(locations.id, locationId), eq(locations.clubId, clubId)));
+  if (!row) throw new NotFoundError("Location not found");
+}
+
+/**
+ * Composes and schedules the notification for an essential change or cancellation (B10). Audience and texts come from
+ * the state BEFORE the change; `notify: false` suppresses it (audited). Never throws.
+ */
+async function announceEventChange(args: {
+  clubId: string;
+  actor: string;
+  before: EventRow;
+  after: EventRow;
+  departmentId: string | null;
+  cancelled: boolean;
+  reason?: string | null;
+  suppress: boolean;
+  /** Audience captured earlier (a deleted event no longer has its RSVPs). */
+  audience?: Awaited<ReturnType<typeof eventAudience>>;
+}): Promise<void> {
+  try {
+    const { clubId, before, after } = args;
+    const audience = args.audience !== undefined ? args.audience : await eventAudience(clubId, before.id, args.departmentId, args.cancelled);
+    const timezone = await clubTimezone(clubId);
+    const [placeBefore, placeAfter] = await Promise.all([locationName(clubId, before.locationId), locationName(clubId, after.locationId)]);
+    const message = composeEventMessage({
+      lang: await clubMailLanguage(db, clubId),
+      noun: "Termin",
+      title: after.title,
+      timezone,
+      before: { startsAt: before.startsAt, endsAt: before.endsAt, place: placeBefore },
+      after: { startsAt: after.startsAt, endsAt: after.endsAt, place: placeAfter },
+      cancelled: args.cancelled,
+      reason: args.reason ?? null,
+    });
+    const payload = { clubId, kind: "event" as const, refId: before.id, version: after.updatedAt.getTime(), cancelled: args.cancelled, ...message, audience: audience ?? { memberIds: [], includeGuardians: false } };
+    if (!args.suppress && audience === null) return;
+    await scheduleEventChanged(payload, { suppressed: args.suppress, actor: args.actor });
+  } catch (err) {
+    // Best effort: the change itself is already committed. Class and event id only (no message text, no addresses).
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ eventId: args.before.id, errName: e?.name, errCode: e?.code }, "[events] could not announce event change");
+  }
+}
+
 function parseDateQuery(raw: string | undefined, paramName: string): Date | undefined {
   if (!raw) return undefined;
   const date = new Date(raw);
@@ -68,7 +125,7 @@ eventRoutes.get("/", async (c) => {
   // ponytail: no attendee count/caller-status inline -- plain event list,
   // add when a client actually needs it without a follow-up request.
   const rows = await db.query.events.findMany({ where: and(...conditions), orderBy: (e, { asc }) => [asc(e.startsAt)] });
-  return c.json({ data: rows });
+  return c.json({ data: rows.map(shapeEvent) });
 });
 
 eventRoutes.get("/:id", async (c) => {
@@ -78,7 +135,7 @@ eventRoutes.get("/:id", async (c) => {
   const id = c.req.param("id");
 
   const { event } = await loadVisibleEvent(id, clubId, membership.id, roleTypes);
-  return c.json({ data: event });
+  return c.json({ data: shapeEvent(event) });
 });
 
 const createEventSchema = z.object({
@@ -89,6 +146,7 @@ const createEventSchema = z.object({
   endsAt: z.string().datetime({ offset: true }).optional(),
   category: z.string().max(100).optional(),
   capacity: z.number().int().positive().optional(),
+  locationId: z.string().uuid().optional(),
 });
 
 eventRoutes.post(
@@ -105,6 +163,7 @@ eventRoutes.post(
     }
     const body = c.req.valid("json");
     await loadClubCalendar(body.calendarId, clubId);
+    if (body.locationId) await assertClubLocation(body.locationId, clubId);
 
     const [row] = await db
       .insert(events)
@@ -116,13 +175,14 @@ eventRoutes.post(
         endsAt: body.endsAt ? new Date(body.endsAt) : undefined,
         category: body.category,
         capacity: body.capacity,
+        locationId: body.locationId,
         createdBy: currentUser.id,
       })
       .returning();
 
     await db.insert(auditLog).values({ eventType: "event.create", subjectId: row.id, payload: { clubId, calendarId: body.calendarId } });
 
-    return c.json({ data: row }, 201);
+    return c.json({ data: shapeEvent(row) }, 201);
   },
 );
 
@@ -134,6 +194,9 @@ const updateEventSchema = z.object({
   endsAt: z.string().datetime({ offset: true }).nullable().optional(),
   category: z.string().max(100).nullable().optional(),
   capacity: z.number().int().positive().nullable().optional(),
+  locationId: z.string().uuid().nullable().optional(),
+  /** `false` saves the change without telling the attendees (audited). Default: essential changes are announced. */
+  notify: z.boolean().optional(),
 });
 
 eventRoutes.patch(
@@ -148,12 +211,13 @@ eventRoutes.patch(
       throw new ForbiddenError("Missing calendars:write permission");
     }
     const id = c.req.param("id");
-    const body = c.req.valid("json");
+    const { notify: notifyFlag, ...body } = c.req.valid("json");
 
     const existing = await db.query.events.findFirst({ where: eq(events.id, id) });
     if (!existing) throw new NotFoundError("Event not found");
-    await loadClubCalendar(existing.calendarId, clubId);
+    const calendar = await loadClubCalendar(existing.calendarId, clubId);
     if (body.calendarId) await loadClubCalendar(body.calendarId, clubId);
+    if (body.locationId) await assertClubLocation(body.locationId, clubId);
 
     const [row] = await db
       .update(events)
@@ -166,9 +230,15 @@ eventRoutes.patch(
       .where(eq(events.id, id))
       .returning();
 
-    await db.insert(auditLog).values({ eventType: "event.update", subjectId: id, payload: { clubId, changes: body } });
+    await db.insert(auditLog).values({ eventType: "event.update", subjectId: id, payload: { clubId, changes: body, ...(notifyFlag === false ? { notify: false } : {}) } });
 
-    return c.json({ data: row });
+    // Essential change (start, end, location) of an event that has not been cancelled: tell attendees and waitlist (B10).
+    const diff = essentialDiff(existing, row!);
+    if ((diff.time || diff.place) && existing.cancelledAt === null) {
+      await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: row!, departmentId: calendar.departmentId, cancelled: false, suppress: notifyFlag === false });
+    }
+
+    return c.json({ data: shapeEvent(row!) });
   },
 );
 
@@ -182,12 +252,95 @@ eventRoutes.delete("/:id", async (c) => {
 
   const existing = await db.query.events.findFirst({ where: eq(events.id, id) });
   if (!existing) throw new NotFoundError("Event not found");
-  await loadClubCalendar(existing.calendarId, clubId);
+  const calendar = await loadClubCalendar(existing.calendarId, clubId);
+
+  // Deleting an event that people signed up for is a cancellation for them (B10): resolve the audience before the RSVPs vanish.
+  const notifyFlag = c.req.query("notify");
+  const audienceBefore = existing.cancelledAt === null ? await eventAudience(clubId, id, calendar.departmentId, true) : null;
+  const hadRsvps = audienceBefore !== null && (await db.query.eventAttendees.findFirst({ where: eq(eventAttendees.eventId, id) })) !== undefined;
 
   await db.delete(events).where(eq(events.id, id));
-  await db.insert(auditLog).values({ eventType: "event.delete", subjectId: id, payload: { clubId } });
+  await db.insert(auditLog).values({ eventType: "event.delete", subjectId: id, payload: { clubId, ...(notifyFlag === "false" ? { notify: false } : {}) } });
+  if (hadRsvps) {
+    await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: { ...existing, updatedAt: new Date() }, departmentId: calendar.departmentId, cancelled: true, suppress: notifyFlag === "false", audience: audienceBefore });
+  }
 
   return c.body(null, 204);
+});
+
+const cancelEventSchema = z.object({
+  reason: z.string().trim().max(500).optional(),
+  /** `false` cancels without telling anybody (audited). */
+  notify: z.boolean().optional(),
+});
+
+/** Cancels instead of deleting: the event stays visible as "abgesagt" and the attendees, the waitlist and the department are told. */
+eventRoutes.post(
+  "/:id/cancel",
+  zValidator("json", cancelEventSchema, (result) => {
+    if (!result.success) throw new ValidationError("Invalid request body", { details: result.error.issues });
+  }),
+  async (c) => {
+    const clubId = c.get("clubId");
+    if (!hasClubPermission(c.get("clubRoleTypes"), "calendars:write")) {
+      throw new ForbiddenError("Missing calendars:write permission");
+    }
+    const id = c.req.param("id");
+    const body = c.req.valid("json");
+
+    const existing = await db.query.events.findFirst({ where: eq(events.id, id) });
+    if (!existing) throw new NotFoundError("Event not found");
+    const calendar = await loadClubCalendar(existing.calendarId, clubId);
+    if (existing.cancelledAt !== null) throw new ConflictError("Event is already cancelled");
+
+    const now = new Date();
+    const [row] = await db
+      .update(events)
+      .set({ cancelledAt: now, cancelReason: body.reason?.trim() || null, updatedAt: now })
+      .where(and(eq(events.id, id), isNull(events.cancelledAt)))
+      .returning();
+    if (!row) throw new ConflictError("Event is already cancelled");
+
+    await db.insert(auditLog).values({ eventType: "event.cancel", subjectId: id, payload: { clubId, hasReason: Boolean(body.reason?.trim()), ...(body.notify === false ? { notify: false } : {}) } });
+    await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: row, departmentId: calendar.departmentId, cancelled: true, reason: row.cancelReason, suppress: body.notify === false });
+
+    return c.json({ data: shapeEvent(row) });
+  },
+);
+
+/**
+ * Audience preview before cancelling (counts only, never names or addresses; same permission as the cancellation). Resolves the
+ * very audience `POST /:id/cancel` would address (RSVP `angemeldet` + `warteliste`, the department of a department calendar,
+ * guardians) with the resolver the dispatcher uses, for the channels in-app + mail. Individual mail opt-outs are only known to the
+ * dispatcher at send time, so `email` is an upper bound. Read-only: no job, no audit entry.
+ */
+eventRoutes.get("/:id/cancel-preview", async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "calendars:write")) {
+    throw new ForbiddenError("Missing calendars:write permission");
+  }
+  const id = c.req.param("id");
+  const existing = await db.query.events.findFirst({ where: eq(events.id, id) });
+  if (!existing) throw new NotFoundError("Event not found");
+  const calendar = await loadClubCalendar(existing.calendarId, clubId);
+
+  const attendeeRows = await db.select({ status: eventAttendees.status }).from(eventAttendees).where(eq(eventAttendees.eventId, id));
+  const confirmed = attendeeRows.filter((r) => r.status === "angemeldet").length;
+  const waitlisted = attendeeRows.filter((r) => r.status === "warteliste").length;
+  const audience = await eventAudience(clubId, id, calendar.departmentId, true);
+  const empty = { total: 0, reachable: 0, inApp: 0, email: 0, emailOnly: 0, unreachable: 0, sharedAddress: 0 };
+  let summary: typeof empty & { tooLarge: boolean } = { ...empty, tooLarge: false };
+  if (audience !== null) {
+    try {
+      const counts = summarizeAudience((await resolveClubAudience(clubId, audience)).recipients, ["in_app", "email"]);
+      summary = { total: counts.total, reachable: counts.reachable, inApp: counts.inApp, email: counts.email, emailOnly: counts.emailOnly, unreachable: counts.unreachable, sharedAddress: counts.sharedAddress, tooLarge: false };
+    } catch (err) {
+      // An audience beyond the limit is not sent either; the preview says so instead of failing.
+      if (!(err instanceof AudienceLimitError)) throw err;
+      summary = { ...empty, total: err.size, tooLarge: true };
+    }
+  }
+  return c.json({ data: { alreadyCancelled: existing.cancelledAt !== null, confirmed, waitlisted, departmentCalendar: calendar.departmentId !== null, audience: summary } });
 });
 
 // --- RSVP ----------------------------------------------------------------
@@ -199,6 +352,7 @@ eventRoutes.post("/:id/rsvp", async (c) => {
   const id = c.req.param("id");
 
   const { event } = await loadVisibleEvent(id, clubId, membership.id, roleTypes);
+  if (event.cancelledAt !== null) throw new ConflictError("Event is cancelled");
 
   const row = await db.transaction(async (tx) => {
     // Lock the event row for the duration of the tx -- without this, two
@@ -241,7 +395,7 @@ eventRoutes.delete("/:id/rsvp", async (c) => {
 
   const { event } = await loadVisibleEvent(id, clubId, membership.id, roleTypes);
 
-  await db.transaction(async (tx) => {
+  const promoted = await db.transaction(async (tx): Promise<{ memberId: string; respondedAt: Date } | null> => {
     // Same lock as the RSVP handler -- without it, two concurrent
     // cancellations can both pick the same waitlisted row to promote (each
     // reads "next in line" before the other commits), leaving one freed
@@ -274,9 +428,13 @@ eventRoutes.delete("/:id/rsvp", async (c) => {
           subjectId: id,
           payload: { clubId, memberId: nextInLine.memberId },
         });
+        return { memberId: nextInLine.memberId, respondedAt: nextInLine.respondedAt };
       }
     }
+    return null;
   });
+  // After the commit: tell the person who moved up (best effort, in addition to the audit entry).
+  if (promoted !== null) await notifyWaitlistPromoted({ clubId, event, accountMemberId: promoted.memberId, respondedAt: promoted.respondedAt });
 
   return c.body(null, 204);
 });
@@ -305,7 +463,7 @@ icsRoutes.get("/", async (c) => {
     ? await db.query.events.findMany({ where: inArray(events.calendarId, calendarIds), orderBy: (e, { asc }) => [asc(e.startsAt)] })
     : [];
 
-  const ics = buildIcs(rows.map((r) => ({ id: r.id, title: r.title, description: r.description, startsAt: r.startsAt, endsAt: r.endsAt })));
+  const ics = buildIcs(rows.map((r) => ({ id: r.id, title: r.title, description: r.description, startsAt: r.startsAt, endsAt: r.endsAt, cancelled: r.cancelledAt !== null })));
 
   c.header("Content-Type", "text/calendar; charset=utf-8");
   return c.body(ics);

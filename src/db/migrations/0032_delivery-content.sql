@@ -1,0 +1,1 @@
+ALTER TABLE "message_deliveries" ADD COLUMN "content" jsonb;

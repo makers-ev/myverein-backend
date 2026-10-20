@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { withConsent } from "./forms-test-support.js";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -10,6 +10,7 @@ import { member, organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { clubMembers, clubMemberStatusHistory, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { jobs } from "../db/schema/jobs.js";
 import { toAppError } from "../lib/errors.js";
 import { clubApplicationRoutes } from "./club-applications.js";
 import { clubMemberRoutes } from "./club-members.js";
@@ -361,9 +362,14 @@ describe("member lifecycle, categories and age transitions (B5)", () => {
       expect((await data(await call(founder, `/club-members/${ids.young}`))).categoryId).toBe(youth.id);
       const h = (await historyOf(ids.old)).find((x) => x.reason === "Altersübergang");
       expect(h).toMatchObject({ fromCategoryId: youth.id, toCategoryId: adult.id });
+      // The moved member gets a notice job (G10), keyed by member, day and target category.
+      const noticeJobs = await db.select().from(jobs).where(and(eq(jobs.type, "age_transition_member_notify"), sql`${jobs.payload}->>'clubMemberId' = ${ids.old}`));
+      expect(noticeJobs).toHaveLength(1);
+      expect(noticeJobs[0]!.payload).toMatchObject({ clubId: club, fromCategoryId: youth.id, toCategoryId: adult.id });
       // Idempotent: the same call again applies nothing.
       const again = await data(await call(founder, "/club-members/transition-suggestions/apply", { method: "POST", body: { memberIds: [ids.old] } }));
       expect(again.applied).toEqual([]);
+      expect(await db.select().from(jobs).where(and(eq(jobs.type, "age_transition_member_notify"), sql`${jobs.payload}->>'clubMemberId' = ${ids.old}`))).toHaveLength(1);
     });
   });
 });

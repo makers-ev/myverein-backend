@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { withConsent } from "./forms-test-support.js";
@@ -8,6 +8,7 @@ import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { messageDeliveries } from "../db/schema/communication.js";
 import { toAppError } from "../lib/errors.js";
 import { clubApplicationRoutes } from "./club-applications.js";
 import { clubMemberRoutes } from "./club-members.js";
@@ -196,6 +197,13 @@ describe("club-applications decision queue", () => {
     expect(bodyOne.data.membership.joinedAt).toBe(new Date().toISOString().slice(0, 10));
     expect(bodyOne.data.membership.memberNumber).toMatch(/^DEMO-\d{4}$/);
 
+    // B11: the applicant is told about the decision (mandatory, in-app + e-mail, with the member number)
+    const approvedMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, idOne), eq(messageDeliveries.eventKey, "application.approved")));
+    expect(approvedMsgs.map((m) => m.channel).sort()).toEqual(["email", "in_app", "push"]); // G4: push on top (no device token here)
+    expect(approvedMsgs.every((m) => m.userId === one.userId && (m.content as { class: string }).class === "mandatory")).toBe(true);
+    expect((approvedMsgs[0]!.content as { body: string }).body).toContain(bodyOne.data.membership.memberNumber);
+    expect(approvedMsgs.find((m) => m.channel === "email")).toMatchObject({ status: "queued", address: expect.stringContaining("@") });
+
     const resTwo = await decide(boardA, clubAId, idTwo, "approve");
     expect(resTwo.status).toBe(200);
     const bodyTwo = (await resTwo.json()) as { data: { membership: { memberNumber: string } } };
@@ -226,6 +234,9 @@ describe("club-applications decision queue", () => {
     expect(data.application.status).toBe("rejected");
     expect(data.application.decidedBy).toBe(boardAMemberId);
     expect(data.application.decidedAt).toBeTruthy();
+    const rejectedMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, id), eq(messageDeliveries.eventKey, "application.rejected")));
+    expect(rejectedMsgs.map((m) => m.channel).sort()).toEqual(["email", "in_app", "push"]);
+    expect((rejectedMsgs[0]!.content as { class: string }).class).toBe("mandatory");
 
     const memberRow = await db.query.member.findFirst({
       where: (m, { and, eq }) => and(eq(m.organizationId, clubAId), eq(m.userId, applicant.userId)),

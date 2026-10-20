@@ -1,0 +1,261 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`club registration mail content snapshot (pre-dispatcher) > keeps subject and html of all five mails 1`] = `
+[
+  {
+    "html": "<!doctype html>
+<html lang="de">
+  <body style="margin:0; padding:0; background-color:#f8fafc; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8fafc; padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px; background-color:#ffffff; border:1px solid #e2e8f0; border-radius:16px; overflow:hidden;">
+            <tr>
+              <td style="padding:28px 32px; border-bottom:1px solid #e2e8f0;">
+                <a href="http://localhost:3011" style="text-decoration:none;">
+                  <table role="presentation" cellpadding="0" cellspacing="0">
+                    <tr>
+                      <td style="padding-right:10px;">
+                        <img src="cid:app-logo" width="36" height="36" alt="MyVerein" style="display:block; border-radius:9px;" />
+                      </td>
+                      <td style="font-size:19px; font-weight:700; color:#0f172a;">MyVerein</td>
+                    </tr>
+                  </table>
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                
+                <p style="margin:0 0 16px; font-size:16px; font-weight:600; color:#0f172a;">Hallo Erika &lt;b&gt;Muster&lt;/b&gt;,</p>
+                <p style="margin:0 0 24px; font-size:15px; line-height:1.6; color:#0f172a;">wir haben deinen Antrag zur Gründung des Vereins <strong>TV Test</strong> erhalten. Wir prüfen die Angaben und Nachweise und melden uns per E-Mail bei dir.</p>
+                <a href="http://localhost:3011" style="display:inline-block; background-color:#2c4870; color:#ffffff; font-size:14px; font-weight:600; text-decoration:none; padding:12px 24px; border-radius:10px;">Zu MyVerein</a>
+                
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px; background-color:#f8fafc; border-top:1px solid #e2e8f0;">
+                <p style="margin:0; font-size:12px; color:#64748b;">
+                  <a href="http://localhost:3011" style="color:#2c4870; text-decoration:none;">MyVerein</a>
+                  &middot;
+                  <a href="http://localhost:3011/imprint" style="color:#2c4870; text-decoration:none;">Impressum</a>
+                  &middot;
+                  <a href="http://localhost:3011/contact" style="color:#2c4870; text-decoration:none;">Kontakt</a>
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>",
+    "subject": "Dein Antrag zur Vereinsgründung ist eingegangen",
+    "to": "erika@example.com",
+  },
+  {
+    "html": "<!doctype html>
+<html lang="de">
+  <body style="margin:0; padding:0; background-color:#f8fafc; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8fafc; padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px; background-color:#ffffff; border:1px solid #e2e8f0; border-radius:16px; overflow:hidden;">
+            <tr>
+              <td style="padding:28px 32px; border-bottom:1px solid #e2e8f0;">
+                <a href="http://localhost:3011" style="text-decoration:none;">
+                  <table role="presentation" cellpadding="0" cellspacing="0">
+                    <tr>
+                      <td style="padding-right:10px;">
+                        <img src="cid:app-logo" width="36" height="36" alt="MyVerein" style="display:block; border-radius:9px;" />
+                      </td>
+                      <td style="font-size:19px; font-weight:700; color:#0f172a;">MyVerein</td>
+                    </tr>
+                  </table>
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                
+                <p style="margin:0 0 16px; font-size:16px; font-weight:600; color:#0f172a;">Hallo,</p>
+                <p style="margin:0 0 24px; font-size:15px; line-height:1.6; color:#0f172a;">es liegt ein neuer Antrag zur Vereinsgründung zur Prüfung vor: <strong>TV Test</strong>, eingereicht von Erika &lt;b&gt;Muster&lt;/b&gt; (erika@example.com).</p>
+                <a href="http://localhost:3011" style="display:inline-block; background-color:#2c4870; color:#ffffff; font-size:14px; font-weight:600; text-decoration:none; padding:12px 24px; border-radius:10px;">Antrag prüfen</a>
+                
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px; background-color:#f8fafc; border-top:1px solid #e2e8f0;">
+                <p style="margin:0; font-size:12px; color:#64748b;">
+                  <a href="http://localhost:3011" style="color:#2c4870; text-decoration:none;">MyVerein</a>
+                  &middot;
+                  <a href="http://localhost:3011/imprint" style="color:#2c4870; text-decoration:none;">Impressum</a>
+                  &middot;
+                  <a href="http://localhost:3011/contact" style="color:#2c4870; text-decoration:none;">Kontakt</a>
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>",
+    "subject": "Neuer Vereinsantrag: TV Test",
+    "to": "review@example.com",
+  },
+  {
+    "html": "<!doctype html>
+<html lang="de">
+  <body style="margin:0; padding:0; background-color:#f8fafc; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8fafc; padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px; background-color:#ffffff; border:1px solid #e2e8f0; border-radius:16px; overflow:hidden;">
+            <tr>
+              <td style="padding:28px 32px; border-bottom:1px solid #e2e8f0;">
+                <a href="http://localhost:3011" style="text-decoration:none;">
+                  <table role="presentation" cellpadding="0" cellspacing="0">
+                    <tr>
+                      <td style="padding-right:10px;">
+                        <img src="cid:app-logo" width="36" height="36" alt="MyVerein" style="display:block; border-radius:9px;" />
+                      </td>
+                      <td style="font-size:19px; font-weight:700; color:#0f172a;">MyVerein</td>
+                    </tr>
+                  </table>
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                
+                <p style="margin:0 0 16px; font-size:16px; font-weight:600; color:#0f172a;">Hallo Erika &lt;b&gt;Muster&lt;/b&gt;,</p>
+                <p style="margin:0 0 24px; font-size:15px; line-height:1.6; color:#0f172a;">zu deinem Antrag für <strong>TV Test</strong> haben wir eine Rückfrage:<br /><br />Bitte Satzung<br />nachreichen<br /><br />Bitte ergänze deine Angaben oder Nachweise und sende den Antrag erneut ab.</p>
+                <a href="http://localhost:3011" style="display:inline-block; background-color:#2c4870; color:#ffffff; font-size:14px; font-weight:600; text-decoration:none; padding:12px 24px; border-radius:10px;">Antrag bearbeiten</a>
+                
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px; background-color:#f8fafc; border-top:1px solid #e2e8f0;">
+                <p style="margin:0; font-size:12px; color:#64748b;">
+                  <a href="http://localhost:3011" style="color:#2c4870; text-decoration:none;">MyVerein</a>
+                  &middot;
+                  <a href="http://localhost:3011/imprint" style="color:#2c4870; text-decoration:none;">Impressum</a>
+                  &middot;
+                  <a href="http://localhost:3011/contact" style="color:#2c4870; text-decoration:none;">Kontakt</a>
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>",
+    "subject": "Rückfrage zu deinem Vereinsantrag",
+    "to": "erika@example.com",
+  },
+  {
+    "html": "<!doctype html>
+<html lang="de">
+  <body style="margin:0; padding:0; background-color:#f8fafc; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8fafc; padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px; background-color:#ffffff; border:1px solid #e2e8f0; border-radius:16px; overflow:hidden;">
+            <tr>
+              <td style="padding:28px 32px; border-bottom:1px solid #e2e8f0;">
+                <a href="http://localhost:3011" style="text-decoration:none;">
+                  <table role="presentation" cellpadding="0" cellspacing="0">
+                    <tr>
+                      <td style="padding-right:10px;">
+                        <img src="cid:app-logo" width="36" height="36" alt="MyVerein" style="display:block; border-radius:9px;" />
+                      </td>
+                      <td style="font-size:19px; font-weight:700; color:#0f172a;">MyVerein</td>
+                    </tr>
+                  </table>
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                
+                <p style="margin:0 0 16px; font-size:16px; font-weight:600; color:#0f172a;">Hallo Erika &lt;b&gt;Muster&lt;/b&gt;,</p>
+                <p style="margin:0 0 24px; font-size:15px; line-height:1.6; color:#0f172a;">leider konnten wir deinen Antrag für <strong>TV Test</strong> nicht freigeben.<br /><br />Begründung:<br />Nicht gemeinnützig<br /><br />Du kannst bei Bedarf einen neuen Antrag stellen.</p>
+                <a href="http://localhost:3011" style="display:inline-block; background-color:#2c4870; color:#ffffff; font-size:14px; font-weight:600; text-decoration:none; padding:12px 24px; border-radius:10px;">Zu MyVerein</a>
+                
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px; background-color:#f8fafc; border-top:1px solid #e2e8f0;">
+                <p style="margin:0; font-size:12px; color:#64748b;">
+                  <a href="http://localhost:3011" style="color:#2c4870; text-decoration:none;">MyVerein</a>
+                  &middot;
+                  <a href="http://localhost:3011/imprint" style="color:#2c4870; text-decoration:none;">Impressum</a>
+                  &middot;
+                  <a href="http://localhost:3011/contact" style="color:#2c4870; text-decoration:none;">Kontakt</a>
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>",
+    "subject": "Dein Vereinsantrag wurde abgelehnt",
+    "to": "erika@example.com",
+  },
+  {
+    "html": "<!doctype html>
+<html lang="de">
+  <body style="margin:0; padding:0; background-color:#f8fafc; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f8fafc; padding:32px 16px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px; background-color:#ffffff; border:1px solid #e2e8f0; border-radius:16px; overflow:hidden;">
+            <tr>
+              <td style="padding:28px 32px; border-bottom:1px solid #e2e8f0;">
+                <a href="http://localhost:3011" style="text-decoration:none;">
+                  <table role="presentation" cellpadding="0" cellspacing="0">
+                    <tr>
+                      <td style="padding-right:10px;">
+                        <img src="cid:app-logo" width="36" height="36" alt="MyVerein" style="display:block; border-radius:9px;" />
+                      </td>
+                      <td style="font-size:19px; font-weight:700; color:#0f172a;">MyVerein</td>
+                    </tr>
+                  </table>
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                
+                <p style="margin:0 0 16px; font-size:16px; font-weight:600; color:#0f172a;">Hallo Erika &lt;b&gt;Muster&lt;/b&gt;,</p>
+                <p style="margin:0 0 24px; font-size:15px; line-height:1.6; color:#0f172a;">dein Verein <strong>TV Test</strong> ist freigeschaltet. Die Vereinskennung lautet <strong>tv-test</strong> – damit können Mitglieder per Aufnahmeantrag beitreten. Du bist als Vorstand eingetragen und kannst den Verein ab sofort verwalten.</p>
+                <a href="http://localhost:3011" style="display:inline-block; background-color:#2c4870; color:#ffffff; font-size:14px; font-weight:600; text-decoration:none; padding:12px 24px; border-radius:10px;">Zum Verein</a>
+                
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px; background-color:#f8fafc; border-top:1px solid #e2e8f0;">
+                <p style="margin:0; font-size:12px; color:#64748b;">
+                  <a href="http://localhost:3011" style="color:#2c4870; text-decoration:none;">MyVerein</a>
+                  &middot;
+                  <a href="http://localhost:3011/imprint" style="color:#2c4870; text-decoration:none;">Impressum</a>
+                  &middot;
+                  <a href="http://localhost:3011/contact" style="color:#2c4870; text-decoration:none;">Kontakt</a>
+                </p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>",
+    "subject": "Dein Verein ist freigeschaltet",
+    "to": "erika@example.com",
+  },
+]
+`;

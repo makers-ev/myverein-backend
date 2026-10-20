@@ -8,17 +8,19 @@ import { auth } from "./auth/auth.js";
 import { closeDatabase } from "./db/client.js";
 import { AppError, toAppError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
-import { startFormDraftSweeper } from "./lib/form-sweeper.js";
+import { registerAllJobs, startJobWorker, workerEnabled } from "./lib/jobs/index.js";
 import { startMediaSweeper } from "./lib/media.js";
 import { type LoggerEnv, requestId } from "./middleware/request-id.js";
 import { adminClubRegistrationRoutes } from "./routes/admin-club-registrations.js";
 import { adminNotificationRoutes } from "./routes/admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./routes/admin-notification-templates.js";
 import { adminClubRoutes } from "./routes/admin-clubs.js";
+import { adminJobRoutes } from "./routes/admin-jobs.js";
 import { adminStatsRoutes } from "./routes/admin-stats.js";
 import { adminEmailRoutes } from "./routes/admin-emails.js";
 import { availabilityRoutes } from "./routes/availability.js";
 import { calendarRoutes } from "./routes/calendars.js";
+import { clubAnnouncementRoutes, clubInboxRoutes } from "./routes/club-announcements.js";
 import { clubApplicationRoutes } from "./routes/club-applications.js";
 import { clubRegistrationRoutes } from "./routes/club-registrations.js";
 import { clubFormRoutes } from "./routes/club-forms.js";
@@ -39,7 +41,9 @@ import { memberFieldRoutes } from "./routes/member-fields.js";
 import { meetingRoutes } from "./routes/meetings.js";
 import { myClubRoutes } from "./routes/my-clubs.js";
 import { internalStatsRoutes } from "./routes/internal-stats.js";
+import { notificationPreferenceRoutes, unsubscribeRoutes } from "./routes/notification-preferences.js";
 import { notificationRoutes } from "./routes/notifications.js";
+import { pushTokenRoutes } from "./routes/push-tokens.js";
 import { trustedOrigins } from "./lib/trusted-origins.js";
 
 const app = new Hono<LoggerEnv>();
@@ -92,6 +96,7 @@ app.route("/admin", adminStatsRoutes);
 app.route("/admin", adminEmailRoutes);
 app.route("/admin", adminClubRoutes);
 app.route("/notifications", notificationRoutes);
+app.route("/admin/jobs", adminJobRoutes);
 app.route("/admin/notifications", adminNotificationRoutes);
 app.route("/admin/notification-templates", adminNotificationTemplateRoutes);
 app.route("/admin/club-registrations", adminClubRegistrationRoutes);
@@ -101,6 +106,11 @@ app.route("/club-members", clubMemberRoutes);
 app.route("/club-stats", clubStatsRoutes);
 app.route("/club-settings", clubSettingsRoutes);
 app.route("/club-exit-requests", clubExitRequestRoutes);
+app.route("/club-announcements", clubAnnouncementRoutes);
+app.route("/club-inbox", clubInboxRoutes);
+app.route("/notification-preferences", notificationPreferenceRoutes);
+app.route("/unsubscribe", unsubscribeRoutes);
+app.route("/push-tokens", pushTokenRoutes);
 app.route("/club-applications", clubApplicationRoutes);
 app.route("/forms", formRoutes);
 app.route("/member-fields", memberFieldRoutes);
@@ -125,8 +135,11 @@ const hostname = process.env.BIND_HOST ?? "127.0.0.1";
 
 // Unused uploads (POST /media files no feature row claimed) are removed after MEDIA_UNATTACHED_TTL_HOURS.
 const stopMediaSweeper = startMediaSweeper();
-// Abandoned application drafts (and their files) are removed after FORM_DRAFT_TTL_DAYS of inactivity.
-const stopFormDraftSweeper = startFormDraftSweeper();
+// Abandoned application drafts (and their files) are removed by the job `form_cleanup_sweep` (see registerAllJobs).
+
+// DB job queue worker (ADR-005): in-process unless WORKER_ENABLED=false (then run dist/worker.js separately).
+registerAllJobs();
+const jobWorker = workerEnabled() ? startJobWorker() : null;
 
 const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
   logger.info(`Server is running on http://${hostname}:${info.port}`);
@@ -135,8 +148,8 @@ const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
 async function shutdown(signal: string) {
   logger.info(`[shutdown] received ${signal}, closing server`);
   stopMediaSweeper();
-  stopFormDraftSweeper();
   server.close(async () => {
+    await jobWorker?.stop();
     await closeDatabase();
     process.exit(0);
   });

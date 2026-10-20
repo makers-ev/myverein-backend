@@ -27,6 +27,9 @@ export const events = pgTable(
     locationId: uuid("location_id").references(() => locations.id, { onDelete: "set null" }),
     // NULL once the creating account was deleted (the calendar / event stays, it belongs to the club).
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
+    // Cancellation instead of deletion (Wave 9): NULL = event takes place. Existing routes ignore these columns.
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    cancelReason: text("cancel_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

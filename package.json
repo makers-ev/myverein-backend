@@ -6,6 +6,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "start:worker": "node dist/worker.js",
+    "dev:worker": "tsx watch src/worker.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:migrate:runtime": "tsx src/db/migrate.ts",

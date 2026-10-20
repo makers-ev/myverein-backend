@@ -16,7 +16,7 @@ export const LOGO_PATH = "./assets/myverein-logo.png";
 // fixed to German -- there's no language on the user record to pick from,
 // and German is this template suite's default (see the website/mobile
 // templates' LanguageContext).
-const BRAND = {
+export const BRAND = {
   primary: primaryColor,
   background: "#f8fafc",
   card: "#ffffff",
@@ -29,9 +29,24 @@ const BRAND = {
 // these emails.
 export const APP_NAME = appName;
 
-function layout({ greeting, bodyHtml, ctaLabel, ctaUrl }: { greeting: string; bodyHtml: string; ctaLabel: string; ctaUrl: string }): string {
+export interface LayoutOptions {
+  greeting: string;
+  bodyHtml: string;
+  ctaLabel: string;
+  ctaUrl: string;
+  /** Optional banner above the greeting (e.g. "Dringend"), already escaped. */
+  bannerHtml?: string;
+  /** Optional extra block below the button (signature, unsubscribe note), already escaped. */
+  extraHtml?: string;
+  /** Language of the footer links and the document (default German). */
+  lang?: "de" | "en";
+}
+
+export function layout({ greeting, bodyHtml, ctaLabel, ctaUrl, bannerHtml, extraHtml, lang = "de" }: LayoutOptions): string {
+  const imprint = lang === "en" ? "Imprint" : "Impressum";
+  const contact = lang === "en" ? "Contact" : "Kontakt";
   return `<!doctype html>
-<html lang="de">
+<html lang="${lang}">
   <body style="margin:0; padding:0; background-color:${BRAND.background}; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:${BRAND.background}; padding:32px 16px;">
       <tr>
@@ -53,9 +68,11 @@ function layout({ greeting, bodyHtml, ctaLabel, ctaUrl }: { greeting: string; bo
             </tr>
             <tr>
               <td style="padding:32px;">
+                ${bannerHtml ?? ""}
                 <p style="margin:0 0 16px; font-size:16px; font-weight:600; color:${BRAND.foreground};">${greeting}</p>
                 <p style="margin:0 0 24px; font-size:15px; line-height:1.6; color:${BRAND.foreground};">${bodyHtml}</p>
                 <a href="${ctaUrl}" style="display:inline-block; background-color:${BRAND.primary}; color:#ffffff; font-size:14px; font-weight:600; text-decoration:none; padding:12px 24px; border-radius:10px;">${ctaLabel}</a>
+                ${extraHtml ?? ""}
               </td>
             </tr>
             <tr>
@@ -63,9 +80,9 @@ function layout({ greeting, bodyHtml, ctaLabel, ctaUrl }: { greeting: string; bo
                 <p style="margin:0; font-size:12px; color:${BRAND.mutedForeground};">
                   <a href="${SITE_URL}" style="color:${BRAND.primary}; text-decoration:none;">${APP_NAME}</a>
                   &middot;
-                  <a href="${SITE_URL}/imprint" style="color:${BRAND.primary}; text-decoration:none;">Impressum</a>
+                  <a href="${SITE_URL}/imprint" style="color:${BRAND.primary}; text-decoration:none;">${imprint}</a>
                   &middot;
-                  <a href="${SITE_URL}/contact" style="color:${BRAND.primary}; text-decoration:none;">Kontakt</a>
+                  <a href="${SITE_URL}/contact" style="color:${BRAND.primary}; text-decoration:none;">${contact}</a>
                 </p>
               </td>
             </tr>
@@ -165,21 +182,20 @@ export function buildRegistrationApprovedEmail({ name, clubName, slug, url }: { 
 
 // --- Wave 7 B4: Einladung eines Mitglieds ohne Konto -----------------------------
 
-export function buildMemberInviteEmail({ name, clubName, url, expiresOn }: { name: string; clubName: string; url: string; expiresOn: string }): string {
+export function buildMemberInviteEmail({ name, clubName, url, expiresOn, lang = "de" }: { name: string; clubName: string; url: string; expiresOn: string; lang?: "de" | "en" }): string {
+  if (lang === "en") {
+    return layout({
+      greeting: `Hello ${escapeHtml(name)},`,
+      bodyHtml: `<strong>${escapeHtml(clubName)}</strong> invites you to create or link your member account at ${escapeHtml(APP_NAME)}. There you see the events, meetings and news of your club. Sign up with this e-mail address, or sign in with it and confirm the invitation. The link is valid until ${escapeHtml(expiresOn)} and can only be used once. If you do not know the club, you can ignore this e-mail.`,
+      ctaLabel: "Accept invitation",
+      ctaUrl: escapeHtml(url),
+      lang,
+    });
+  }
   return layout({
     greeting: `Hallo ${escapeHtml(name)},`,
     bodyHtml: `<strong>${escapeHtml(clubName)}</strong> lädt dich ein, dein Mitglieds-Konto bei ${escapeHtml(APP_NAME)} anzulegen oder zu verknüpfen. Dort siehst du Termine, Treffen und Neuigkeiten deines Vereins. Registriere dich mit dieser E-Mail-Adresse oder melde dich damit an und bestätige die Einladung. Der Link ist bis zum ${escapeHtml(expiresOn)} gültig und kann nur einmal verwendet werden. Falls du den Verein nicht kennst, kannst du diese E-Mail ignorieren.`,
     ctaLabel: "Einladung annehmen",
-    ctaUrl: escapeHtml(url),
-  });
-}
-
-/** Wave 7 B4: tells the inviting board member that the invited member linked an account (name only, no token or profile data). */
-export function buildMemberLinkedEmail({ name, memberName, clubName, url }: { name: string; memberName: string; clubName: string; url: string }): string {
-  return layout({
-    greeting: `Hallo ${escapeHtml(name)},`,
-    bodyHtml: `<strong>${escapeHtml(memberName)}</strong> hat die Einladung angenommen und ein Konto mit dem Mitglied in <strong>${escapeHtml(clubName)}</strong> verknüpft. Du musst nichts weiter tun.`,
-    ctaLabel: `${escapeHtml(APP_NAME)} öffnen`,
     ctaUrl: escapeHtml(url),
   });
 }

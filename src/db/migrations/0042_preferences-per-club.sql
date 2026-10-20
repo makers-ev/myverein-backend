@@ -1,0 +1,9 @@
+DROP INDEX "notification_preferences_user_uidx";--> statement-breakpoint
+DROP INDEX "notification_preferences_member_uidx";--> statement-breakpoint
+ALTER TABLE "club_settings" ADD COLUMN "mail_language" text DEFAULT 'de' NOT NULL;--> statement-breakpoint
+ALTER TABLE "notification_preferences" ADD COLUMN "club_id" text;--> statement-breakpoint
+ALTER TABLE "notification_preferences" ADD CONSTRAINT "notification_preferences_club_id_organization_id_fk" FOREIGN KEY ("club_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE UNIQUE INDEX "notification_preferences_user_club_uidx" ON "notification_preferences" USING btree ("user_id","club_id","category","channel") WHERE "notification_preferences"."user_id" IS NOT NULL AND "notification_preferences"."club_id" IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "notification_preferences_member_club_uidx" ON "notification_preferences" USING btree ("club_member_id","club_id","category","channel") WHERE "notification_preferences"."club_member_id" IS NOT NULL AND "notification_preferences"."club_id" IS NOT NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "notification_preferences_user_uidx" ON "notification_preferences" USING btree ("user_id","category","channel") WHERE "notification_preferences"."user_id" IS NOT NULL AND "notification_preferences"."club_id" IS NULL;--> statement-breakpoint
+CREATE UNIQUE INDEX "notification_preferences_member_uidx" ON "notification_preferences" USING btree ("club_member_id","category","channel") WHERE "notification_preferences"."club_member_id" IS NOT NULL AND "notification_preferences"."club_id" IS NULL;
