@@ -38,11 +38,15 @@ export interface LayoutOptions {
   bannerHtml?: string;
   /** Optional extra block below the button (signature, unsubscribe note), already escaped. */
   extraHtml?: string;
+  /** Language of the footer links and the document (default German). */
+  lang?: "de" | "en";
 }
 
-export function layout({ greeting, bodyHtml, ctaLabel, ctaUrl, bannerHtml, extraHtml }: LayoutOptions): string {
+export function layout({ greeting, bodyHtml, ctaLabel, ctaUrl, bannerHtml, extraHtml, lang = "de" }: LayoutOptions): string {
+  const imprint = lang === "en" ? "Imprint" : "Impressum";
+  const contact = lang === "en" ? "Contact" : "Kontakt";
   return `<!doctype html>
-<html lang="de">
+<html lang="${lang}">
   <body style="margin:0; padding:0; background-color:${BRAND.background}; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:${BRAND.background}; padding:32px 16px;">
       <tr>
@@ -76,9 +80,9 @@ export function layout({ greeting, bodyHtml, ctaLabel, ctaUrl, bannerHtml, extra
                 <p style="margin:0; font-size:12px; color:${BRAND.mutedForeground};">
                   <a href="${SITE_URL}" style="color:${BRAND.primary}; text-decoration:none;">${APP_NAME}</a>
                   &middot;
-                  <a href="${SITE_URL}/imprint" style="color:${BRAND.primary}; text-decoration:none;">Impressum</a>
+                  <a href="${SITE_URL}/imprint" style="color:${BRAND.primary}; text-decoration:none;">${imprint}</a>
                   &middot;
-                  <a href="${SITE_URL}/contact" style="color:${BRAND.primary}; text-decoration:none;">Kontakt</a>
+                  <a href="${SITE_URL}/contact" style="color:${BRAND.primary}; text-decoration:none;">${contact}</a>
                 </p>
               </td>
             </tr>
@@ -183,16 +187,6 @@ export function buildMemberInviteEmail({ name, clubName, url, expiresOn }: { nam
     greeting: `Hallo ${escapeHtml(name)},`,
     bodyHtml: `<strong>${escapeHtml(clubName)}</strong> lädt dich ein, dein Mitglieds-Konto bei ${escapeHtml(APP_NAME)} anzulegen oder zu verknüpfen. Dort siehst du Termine, Treffen und Neuigkeiten deines Vereins. Registriere dich mit dieser E-Mail-Adresse oder melde dich damit an und bestätige die Einladung. Der Link ist bis zum ${escapeHtml(expiresOn)} gültig und kann nur einmal verwendet werden. Falls du den Verein nicht kennst, kannst du diese E-Mail ignorieren.`,
     ctaLabel: "Einladung annehmen",
-    ctaUrl: escapeHtml(url),
-  });
-}
-
-/** Wave 7 B4: tells the inviting board member that the invited member linked an account (name only, no token or profile data). */
-export function buildMemberLinkedEmail({ name, memberName, clubName, url }: { name: string; memberName: string; clubName: string; url: string }): string {
-  return layout({
-    greeting: `Hallo ${escapeHtml(name)},`,
-    bodyHtml: `<strong>${escapeHtml(memberName)}</strong> hat die Einladung angenommen und ein Konto mit dem Mitglied in <strong>${escapeHtml(clubName)}</strong> verknüpft. Du musst nichts weiter tun.`,
-    ctaLabel: `${escapeHtml(APP_NAME)} öffnen`,
     ctaUrl: escapeHtml(url),
   });
 }

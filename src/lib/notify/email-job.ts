@@ -87,6 +87,7 @@ export async function handleEmailDelivery(job: JobContext): Promise<void> {
     ctaUrl: content.ctaUrl,
     signature,
     unsubscribeUrl,
+    lang: content.lang ?? "de",
   });
 
   await waitForMailSlot();

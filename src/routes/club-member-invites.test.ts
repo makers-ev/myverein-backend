@@ -14,6 +14,7 @@ import { messageDeliveries } from "../db/schema/communication.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { toAppError } from "../lib/errors.js";
+import { handleEmailDelivery } from "../lib/notify/index.js";
 import { logger } from "../lib/logger.js";
 import { pool } from "../db/client.js";
 import { accountLinkLockKey, ensureClubMember } from "../lib/club-members.js";
@@ -496,35 +497,55 @@ describe("account linking by invitation (B4)", () => {
       expect((await stored(clubMemberId)).memberId).toBe(existing.memberId);
     });
 
-    it("notifies the inviting board member by mail (name only), never fails the accept", async () => {
+    it("notifies the inviting board member through the dispatcher (mandatory, in-app + mail, name only)", async () => {
       const invitee = await signUp("accept-notify");
       userIds.push(invitee.userId);
       const board = boards[0]!;
       const c = await child("Nora Notify");
-      expect((await invite(board, c.id, invitee.email)).status).toBe(201);
+      const inviteRes = await invite(board, c.id, invitee.email);
+      expect(inviteRes.status).toBe(201);
       const token = tokenFrom(sent.mails.at(-1)!.html);
       sent.mails.length = 0;
       expect((await accept(invitee, token)).status).toBe(200);
-      await vi.waitFor(() => expect(sent.mails).toHaveLength(1));
-      const mail = sent.mails[0]!;
+      const rows = await vi.waitFor(async () => {
+        const found = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.eventKey, "member_invite.accepted"), eq(messageDeliveries.userId, board.userId)));
+        expect(found.filter((r) => (r.content as { title?: string }).title?.includes("Nora Notify"))).toHaveLength(2);
+        return found.filter((r) => (r.content as { title?: string }).title?.includes("Nora Notify"));
+      });
+      expect(rows.map((r) => r.channel).sort()).toEqual(["email", "in_app"]);
+      const mailRow = rows.find((r) => r.channel === "email")!;
+      expect(mailRow).toMatchObject({ address: board.email, status: "queued" });
+      expect(mailRow.content).toMatchObject({ class: "mandatory" });
+      // The mail job sends it; nothing but the member name and the club name is in it.
+      await handleEmailDelivery({ id: randomUUID(), type: "notify.email", payload: { deliveryId: mailRow.id }, attempt: 1, maxAttempts: 3 });
+      const mail = sent.mails.at(-1)!;
       expect(mail.to).toBe(board.email);
       expect(mail.subject).toContain("Nora Notify");
       expect(mail.html).toContain("Nora Notify");
       expect(mail.html).not.toContain(token);
       expect(mail.html).not.toContain(invitee.email);
+      expect(mail.html).not.toContain("abbestellen"); // mandatory: no unsubscribe link
+    });
 
-      // mail failure does not fail the accept
+    it("a failing mail transport neither fails the accept nor loses the notice (the job retries)", async () => {
       const invitee2 = await signUp("accept-notify2");
       userIds.push(invitee2.userId);
+      const board = boards[0]!;
       const c2 = await child("Otto Notify");
       expect((await invite(board, c2.id, invitee2.email)).status).toBe(201);
       const token2 = tokenFrom(sent.mails.at(-1)!.html);
       sent.fail = true;
-      const logged = vi.spyOn(logger, "error");
       expect((await accept(invitee2, token2)).status).toBe(200);
-      await vi.waitFor(() => expect(logged).toHaveBeenCalled());
-      expect(JSON.stringify(logged.mock.calls)).not.toContain(board.email);
-      logged.mockRestore();
+      const row = await vi.waitFor(async () => {
+        const found = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.eventKey, "member_invite.accepted"), eq(messageDeliveries.channel, "email"), eq(messageDeliveries.userId, board.userId)));
+        const mine = found.find((r) => (r.content as { title?: string }).title?.includes("Otto Notify"));
+        expect(mine).toBeDefined();
+        return mine!;
+      });
+      await expect(handleEmailDelivery({ id: randomUUID(), type: "notify.email", payload: { deliveryId: row.id }, attempt: 1, maxAttempts: 3 })).rejects.toThrow();
+      sent.fail = false;
+      await handleEmailDelivery({ id: randomUUID(), type: "notify.email", payload: { deliveryId: row.id }, attempt: 2, maxAttempts: 3 });
+      expect((await db.select().from(messageDeliveries).where(eq(messageDeliveries.id, row.id)))[0]!.status).toBe("sent");
     });
 
     it("no notification if the inviter lost board rights or was removed", async () => {
@@ -535,10 +556,9 @@ describe("account linking by invitation (B4)", () => {
       expect((await invite(inviter, c.id, invitee.email)).status).toBe(201);
       const token = tokenFrom(sent.mails.at(-1)!.html);
       await db.delete(clubRoles).where(eq(clubRoles.memberId, inviter.memberId));
-      sent.mails.length = 0;
       expect((await accept(invitee, token)).status).toBe(200);
       await new Promise((r) => setTimeout(r, 300));
-      expect(sent.mails).toHaveLength(0);
+      expect(await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.eventKey, "member_invite.accepted"), eq(messageDeliveries.userId, inviter.userId)))).toHaveLength(0);
     });
 
     it("no notification to an inviter who has left the club", async () => {
@@ -549,13 +569,12 @@ describe("account linking by invitation (B4)", () => {
       expect((await invite(inviter, c.id, invitee.email)).status).toBe(201);
       const token = tokenFrom(sent.mails.at(-1)!.html);
       await db.update(clubMembers).set({ status: "ausgetreten", leftAt: "2026-01-01" }).where(eq(clubMembers.id, inviter.clubMemberId));
-      sent.mails.length = 0;
       expect((await accept(invitee, token)).status).toBe(200);
       await new Promise((r) => setTimeout(r, 300));
-      expect(sent.mails).toHaveLength(0);
+      expect(await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.eventKey, "member_invite.accepted"), eq(messageDeliveries.userId, inviter.userId)))).toHaveLength(0);
     });
 
-    it("a hanging mail transport does not block the accept", async () => {
+    it("the accept does not wait for the mail transport (the mail is a queued job now)", async () => {
       const invitee = await signUp("accept-notify-hang");
       userIds.push(invitee.userId);
       const c = await child();
@@ -565,6 +584,7 @@ describe("account linking by invitation (B4)", () => {
       const started = Date.now();
       expect((await accept(invitee, token)).status).toBe(200);
       expect(Date.now() - started).toBeLessThan(5000);
+      sent.hang = false;
       // lock released: a second accept of the same account in the same club answers immediately (already linked)
       expect([404, 409]).toContain((await accept(invitee, token)).status);
     });

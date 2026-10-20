@@ -1,10 +1,11 @@
+import type { MailLanguage } from "./i18n.js";
 import type { AnnouncementAudience, CommunicationChannel } from "../../db/schema/communication.js";
 
 /** `mandatory` = account/security, decisions about the person's own request (never suppressible); `optional` = opt-out-able (ADR-006). */
 export type NotifyClass = "mandatory" | "optional";
 
-/** Email/in-app layout variants. */
-export const NOTIFY_TEMPLATES = ["announcement", "urgent", "reminder", "decision"] as const;
+/** Email/in-app layout variants. `notice` = neutral information (account security, "account linked"). */
+export const NOTIFY_TEMPLATES = ["announcement", "urgent", "reminder", "decision", "notice"] as const;
 export type NotifyTemplate = (typeof NOTIFY_TEMPLATES)[number];
 
 /** Preference categories of `notification_preferences.category` (B9 exposes them). `decisions` is mandatory-only, never stored as a preference. */
@@ -27,6 +28,8 @@ export interface NotifyContent {
    * platform/invite mails whose wording must stay byte-identical; `title`/`body` remain the in-app text.
    */
   rendered?: { subject: string; html: string };
+  /** Language of the mail chrome (intro, button, footer) and the push line. Default: the club's `mail_language`, else `de`. The text itself is as composed. */
+  lang?: MailLanguage;
   /** The content carries a secret (e.g. an invite link): it is wiped from the delivery row once the mail is sent or failed for good. */
   sensitive?: boolean;
 }
@@ -88,6 +91,8 @@ export interface DeliveryContent {
   ctaUrl: string | null;
   rendered?: { subject: string; html: string } | null;
   sensitive?: boolean;
+  /** Language of the chrome around the text (absent = `de`, rows written before G12). */
+  lang?: MailLanguage;
 }
 
 export const EMAIL_JOB_TYPE = "notify.email";

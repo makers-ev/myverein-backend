@@ -22,8 +22,8 @@ import { guardianLinks } from "../db/schema/guardian-links.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import { clubExitRequests } from "../db/schema/club-exit-requests.js";
 import { formSubmissions, memberFieldValues } from "../db/schema/forms.js";
-import { sendEmail } from "./email.js";
-import { APP_NAME, buildMemberLinkedEmail, LOGO_CID, LOGO_PATH, SITE_URL } from "./emailTemplate.js";
+import { APP_NAME, SITE_URL } from "./emailTemplate.js";
+import { notifySafely } from "./notify/dispatcher.js";
 import { meetingInvitees, meetings } from "../db/schema/meetings.js";
 import { clubMemberDepartments, clubMembers, clubMemberStatusHistory, type ClubMemberRow } from "../db/schema/club-members.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
@@ -371,18 +371,10 @@ async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberR
   return { clubId, clubName: club?.name ?? null, clubMemberId: row.id, memberId: existing.id, merged: result.merged };
 }
 
-const NOTIFY_TIMEOUT_MS = 10_000;
-function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timeout")), ms);
-    timer.unref();
-    work.then(resolve, reject).finally(() => clearTimeout(timer));
-  });
-}
-
 /**
- * Tells the board member who sent the invitation that the member is now linked. Best effort: never throws, nothing but
- * the member's display name and the club name is mailed (no token, no address, no profile data).
+ * Tells the board member who sent the invitation that the member is now linked, through the dispatcher (class `mandatory`,
+ * in-app + mail, event key `member_invite.accepted`, `ref_id` = invitation id, so a repeat is the same delivery). Best
+ * effort: never throws, nothing but the member's display name and the club name is sent (no token, no address, no profile data).
  */
 async function notifyInviter(invite: ClubMemberInviteRow, row: ClubMemberRow, clubName: string | null, accountUserId: string): Promise<void> {
   try {
@@ -398,12 +390,22 @@ async function notifyInviter(invite: ClubMemberInviteRow, row: ClubMemberRow, cl
     const roles = await db.select({ roleType: clubRoles.roleType }).from(clubRoles).where(eq(clubRoles.memberId, inviter.id));
     if (!hasClubPermission([IMPLICIT_ROLE_TYPE, ...roles.map((r) => r.roleType)], "members:write")) return;
     const club = clubName ?? "deinem Verein";
-    await withTimeout(sendEmail({
-      to: inviterUser.email,
-      subject: `${row.displayName.replace(/[\r\n]+/g, " ")} hat ein Konto bei ${APP_NAME} verknüpft`,
-      html: buildMemberLinkedEmail({ name: inviterUser.name, memberName: row.displayName, clubName: club, url: `${SITE_URL}` }),
-      attachments: [{ filename: "logo.png", path: LOGO_PATH, cid: LOGO_CID }],
-    }), NOTIFY_TIMEOUT_MS);
+    const memberName = row.displayName.replace(/[\r\n]+/g, " ");
+    await notifySafely({
+      clubId: row.clubId,
+      class: "mandatory",
+      eventKey: "member_invite.accepted",
+      refId: invite.id,
+      recipients: [{ clubMemberId: inviterRow.id, userId: inviterUser.id, name: inviterUser.name, email: inviterUser.email }],
+      content: {
+        title: `${memberName} hat ein Konto bei ${APP_NAME} verknüpft`,
+        body: `${memberName} hat die Einladung angenommen und ein Konto mit dem Mitglied in ${club} verknüpft. Du musst nichts weiter tun.`,
+        template: "notice",
+        ctaLabel: `${APP_NAME} öffnen`,
+        ctaUrl: SITE_URL,
+      },
+      channels: ["in_app", "email"],
+    });
   } catch (err) {
     logger.error({ errorName: err instanceof Error ? err.name : "unknown", inviteId: invite.id }, "[invites] inviter notification could not be sent");
   }

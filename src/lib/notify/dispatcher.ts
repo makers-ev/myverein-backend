@@ -177,6 +177,7 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
       recipientName: channel === "email" ? t.name : null,
       ctaLabel: input.content.ctaLabel ?? null,
       ctaUrl: input.content.ctaUrl ?? null,
+      ...(input.content.lang ? { lang: input.content.lang } : {}),
       ...(input.content.rendered ? { rendered: input.content.rendered } : {}),
       ...(input.content.sensitive ? { sensitive: true } : {}),
     } satisfies DeliveryContent,

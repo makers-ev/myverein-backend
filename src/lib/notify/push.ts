@@ -99,6 +99,7 @@ const GENERIC_TEXT: Record<DeliveryContent["template"], string> = {
   urgent: "Dringende Mitteilung",
   reminder: "Neue Erinnerung",
   decision: "Neuigkeit zu deinem Antrag",
+  notice: "Neuer Hinweis",
 };
 
 /** Generic push text (no titles, names or dates): by event key first, then by layout template. */

@@ -6,7 +6,7 @@ import { APIError, createAuthMiddleware } from "better-auth/api";
 import { eq } from "drizzle-orm";
 import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plugins";
 
-import { organization as organizationTable } from "./auth-schema.js";
+import { organization as organizationTable, user as userTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { assertRejoinAllowed, ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
@@ -15,7 +15,9 @@ import { ConflictError } from "../lib/errors.js";
 import { inviteLinkContext } from "../lib/invite-context.js";
 import { logger } from "../lib/logger.js";
 import { notification, notificationTemplate } from "../db/schema/notifications.js";
+import { notifyAccountChange } from "../lib/account-notify.js";
 import { sendEmail } from "../lib/email.js";
+import { pickMailLanguage, type MailLanguage } from "../lib/notify/i18n.js";
 import { APP_NAME, buildResetPasswordEmail, buildVerifyEmailEmail, LOGO_CID, LOGO_PATH } from "../lib/emailTemplate.js";
 import { isHttpsDeployment, trustedOrigins } from "../lib/trusted-origins.js";
 import { accessControl, adminRole, userRole } from "./permissions.js";
@@ -42,6 +44,26 @@ function rejoinBlocked(err: unknown): never {
   if (err instanceof ConflictError) throw new APIError("CONFLICT", { message: err.message });
   throw err;
 }
+
+/** Language of an account notice: the `Accept-Language` of the request that caused it (German if absent). */
+const langOf = (source: { request?: Request | null; headers?: Headers | null } | null | undefined): MailLanguage =>
+  pickMailLanguage(source?.headers?.get("accept-language") ?? source?.request?.headers.get("accept-language"));
+
+/**
+ * Changes noticed in `databaseHooks.user.update.before` and announced in `.after` (the row is only written in between): the
+ * hook sees the partial update but not the user id, so it is taken from the admin endpoint's body or the acting session.
+ * Entries expire so a failed update cannot leak one into a later request.
+ */
+interface PendingAccountChange {
+  twoFactor?: boolean;
+  previousEmail?: { address: string; name: string | null };
+  lang: MailLanguage;
+  expiresAt: number;
+}
+const pendingAccountChanges = new Map<string, PendingAccountChange>();
+const PENDING_TTL_MS = 60_000;
+
+type HookContext = { body?: { userId?: unknown }; request?: Request; headers?: Headers; context?: { session?: { user?: { id?: string } } | null } } | null | undefined;
 
 export const auth = betterAuth({
   secret: authSecret,
@@ -85,6 +107,11 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
     requireEmailVerification: true,
+    // Security notice after a completed reset (G8). The reset mail itself stays a Better Auth mail on purpose: it must work
+    // before the account has a verified address, so it cannot depend on the dispatcher's mandatory-class contact rules.
+    onPasswordReset: async ({ user: resetUser }, request) => {
+      await notifyAccountChange("password_changed", { id: resetUser.id, name: resetUser.name, email: resetUser.email }, { lang: langOf({ request }) });
+    },
     sendResetPassword: async ({ user, url }) => {
       // Better Auth builds `url` as
       // `${BACKEND_URL}/reset-password/:token?callbackURL=<client redirectTo>`.
@@ -231,6 +258,16 @@ export const auth = betterAuth({
         throw new APIError("NOT_FOUND", { message: "Not found" });
       }
     }),
+    // Security notice for a password changed while signed in (own change, or set by a platform admin) -- G8.
+    after: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/change-password" && ctx.path !== "/admin/set-user-password") return;
+      if (ctx.context.returned instanceof Error) return; // the change failed
+      const adminTarget = ctx.path === "/admin/set-user-password" && typeof (ctx.body as { userId?: unknown } | undefined)?.userId === "string" ? (ctx.body as { userId: string }).userId : null;
+      const targetId = adminTarget ?? ctx.context.session?.user.id ?? ctx.context.newSession?.user.id;
+      if (!targetId) return;
+      const [target] = await db.select({ id: userTable.id, name: userTable.name, email: userTable.email }).from(userTable).where(eq(userTable.id, targetId));
+      if (target) await notifyAccountChange("password_changed", target, { lang: langOf(ctx) });
+    }),
   },
   databaseHooks: {
     session: {
@@ -253,6 +290,38 @@ export const auth = betterAuth({
       },
     },
     user: {
+      // E-mail change and two-factor switch (G8): remember the change before the write, announce it once it is stored.
+      update: {
+        before: async (data, context) => {
+          const wantsEmail = typeof data.email === "string";
+          const wantsTwoFactor = typeof data.twoFactorEnabled === "boolean";
+          if (!wantsEmail && !wantsTwoFactor) return;
+          const hook = context as HookContext;
+          const bodyUserId = hook?.body?.userId;
+          const targetId = typeof bodyUserId === "string" ? bodyUserId : hook?.context?.session?.user?.id;
+          if (!targetId) return;
+          const [current] = await db.select({ email: userTable.email, name: userTable.name, twoFactorEnabled: userTable.twoFactorEnabled }).from(userTable).where(eq(userTable.id, targetId));
+          if (!current) return;
+          const now = Date.now();
+          for (const [key, entry] of pendingAccountChanges) if (entry.expiresAt <= now) pendingAccountChanges.delete(key);
+          const pending: PendingAccountChange = { lang: langOf(hook), expiresAt: now + PENDING_TTL_MS };
+          if (wantsEmail && String(data.email).toLowerCase() !== current.email.toLowerCase()) pending.previousEmail = { address: current.email, name: current.name };
+          if (wantsTwoFactor && Boolean(data.twoFactorEnabled) !== Boolean(current.twoFactorEnabled)) pending.twoFactor = Boolean(data.twoFactorEnabled);
+          if (pending.previousEmail || pending.twoFactor !== undefined) pendingAccountChanges.set(targetId, pending);
+        },
+        after: async (updated) => {
+          if (!updated) return;
+          const pending = pendingAccountChanges.get(updated.id);
+          if (!pending) return;
+          pendingAccountChanges.delete(updated.id);
+          if (pending.previousEmail && updated.email.toLowerCase() !== pending.previousEmail.address.toLowerCase()) {
+            await notifyAccountChange("email_changed", { id: updated.id, name: pending.previousEmail.name, email: pending.previousEmail.address }, { lang: pending.lang });
+          }
+          if (pending.twoFactor !== undefined && Boolean(updated.twoFactorEnabled) === pending.twoFactor) {
+            await notifyAccountChange(pending.twoFactor ? "two_factor_enabled" : "two_factor_disabled", { id: updated.id, name: updated.name, email: updated.email }, { lang: pending.lang });
+          }
+        },
+      },
       create: {
         after: async (createdUser) => {
           // System notification (ADR-006): rendered client-side from
