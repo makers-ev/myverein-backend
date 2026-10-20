@@ -320,6 +320,15 @@ describe("exit workflow (B6)", () => {
       const accepted = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, created.id), eq(messageDeliveries.eventKey, "exit.accepted")));
       expect(accepted.map((m) => m.channel).sort()).toEqual(["email", "in_app", "push"]); // G4: decisions also go out as push
       expect((accepted[0]!.content as { body: string }).body).toContain(`${earliest.slice(8, 10)}.${earliest.slice(5, 7)}.${earliest.slice(0, 4)}`);
+      // The note is member-facing: the member reads exactly this text in their own request (GET /mine) and in the decision mail,
+      // and nothing else of the request (the member's own reason, status history) is copied into the text.
+      const mine = (await data(await call(m1, "/club-exit-requests/mine"))) as unknown as Json[];
+      expect(mine.find((r) => r.id === created.id)!.decisionNote).toBe("Schade, alles Gute");
+      for (const delivery of accepted) {
+        const text = (delivery.content as { body: string }).body;
+        expect(text).toContain("Schade, alles Gute");
+        expect(text).not.toContain("Umzug nach Hamburg");
+      }
       const row = await stored(m1.clubMemberId);
       expect(row).toMatchObject({ status: "aktiv", leftAt: earliest, exitReason: "Umzug nach Hamburg" });
       expect((await call(m1, "/club-members/me")).status).toBe(200);
@@ -365,6 +374,7 @@ describe("exit workflow (B6)", () => {
       const rejectedMsgs = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, req.id), eq(messageDeliveries.eventKey, "exit.rejected")));
       expect(rejectedMsgs).toHaveLength(3); // in-app, mail and push
       expect((rejectedMsgs[0]!.content as { body: string }).body).toContain("Bitte erst Schluessel abgeben");
+      expect(((await data(await call(m, "/club-exit-requests/mine"))) as unknown as Json[]).find((r) => r.id === req.id)!.decisionNote).toBe("Bitte erst Schluessel abgeben"); // member-facing by contract
       expect(await stored(m.clubMemberId)).toMatchObject({ status: "aktiv", leftAt: null });
       expect((await call(m, "/club-members/me")).status).toBe(200);
     });
@@ -514,6 +524,8 @@ describe("exit workflow (B6)", () => {
       expect((await call(victim, "/club-members/me")).status).toBe(404);
       const superseded = await db.query.clubExitRequests.findFirst({ where: eq(clubExitRequests.id, pending.id) });
       expect(superseded).toMatchObject({ status: "rejected", decisionNote: "Ersetzt durch Ausschluss" });
+      // the system note of a superseded request is internal bookkeeping: no mail with it, to anybody
+      expect(await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, pending.id), eq(messageDeliveries.eventKey, "exit.rejected")))).toHaveLength(0);
 
       expect((await call(founder, `/club-exit-requests/${out.data.id}/withdraw`, { method: "POST", body: {} })).status).toBe(409);
       // already left: neither a second exclusion nor a cancellation

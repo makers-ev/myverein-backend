@@ -413,6 +413,8 @@ async function insertRequest(tx: DbExecutor, values: typeof clubExitRequests.$in
 const approveSchema = z.object({
   // Overrides the proposed date; must not be before the earliest date allowed by the notice rules.
   effectiveOn: z.string().date().optional(),
+  // MEMBER-FACING: stored as `decisionNote`, readable by the member in GET /mine and quoted in the decision mail (also to the guardians
+  // of a child). Not a place for internal board remarks.
   note: z.string().trim().max(1000).nullable().optional(),
 });
 
@@ -490,6 +492,7 @@ clubExitRequestRoutes.post("/:id/approve", zValidator("json", approveSchema, val
   });
 });
 
+// MEMBER-FACING reason (required): stored as `decisionNote`, readable by the member in GET /mine and quoted in the rejection mail.
 const rejectSchema = z.object({ note: z.string().trim().min(1).max(1000) });
 
 clubExitRequestRoutes.post("/:id/reject", zValidator("json", rejectSchema, validationHook), async (c) => {

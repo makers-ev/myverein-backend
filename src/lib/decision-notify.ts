@@ -147,7 +147,12 @@ export interface ExitDecision {
   kind: ExitMessageKind;
   /** Day the exit takes effect (accepted / exclusion). A day that is not in the future reads as "wirksam seit". */
   effectiveOn?: string | null;
-  /** Board note (rejection reason, or the stated reason of an exclusion). */
+  /**
+   * MEMBER-FACING text only: the rejection reason, the optional note of an approval, or the stated reason of an exclusion. These
+   * are exactly the fields the member can read in their own request (`GET /club-exit-requests/mine`: `decisionNote`, `reason`), so the
+   * mail (to the member and, for children, their guardians) discloses nothing the member could not read anyway. Internal remarks
+   * and system notes (e.g. "Ersetzt durch Ausschluss" of a superseded request) must never be passed here.
+   */
   note?: string | null;
   /** Earliest possible day (receipt confirmation). */
   earliestOn?: string | null;
