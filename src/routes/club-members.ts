@@ -27,6 +27,7 @@ import { departments } from "../db/schema/departments.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { ASSIGNABLE_ROLE_TYPES, IMPLICIT_ROLE_TYPE, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
 import { DEFAULT_CATEGORY_KEY, type DbExecutor, ensureClubMember, ensureDefaultCategories, isUuid, markDetachedMembersLeft, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
+import { notifyApplicationReceived } from "../lib/decision-notify.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
 import { cleanText, isCleanText } from "../lib/text-policy.js";
@@ -311,6 +312,7 @@ clubMemberRoutes.post(
           subjectId: filed.application.id,
           payload: { clubId, userId: currentUser.id, formSubmissionId: filed.submission.id, formVersionId: filed.submission.formVersionId, onBehalfOf: filed.submission.onBehalfOf },
         });
+        await notifyApplicationReceived({ clubId, applicationId: filed.application.id, userId: currentUser.id, onBehalfOf: filed.submission.onBehalfOf === "guardian" ? "guardian" : "self" });
       }
       return c.json(
         { data: { application: filed.application, submission: { id: filed.submission.id, status: filed.submission.status, formVersionId: filed.submission.formVersionId, onBehalfOf: filed.submission.onBehalfOf }, warnings: filed.warnings } },
@@ -352,6 +354,7 @@ clubMemberRoutes.post(
       subjectId: application.id,
       payload: { clubId, userId: currentUser.id, category: body.category, legacy: true },
     });
+    await notifyApplicationReceived({ clubId, applicationId: application.id, userId: currentUser.id, onBehalfOf: "self" });
 
     return c.json({ data: { application } }, 201);
   },

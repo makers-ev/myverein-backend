@@ -83,6 +83,7 @@ const updateSettingsSchema = z.object({
   reminderRsvpEnabled: z.boolean().optional(),
   reminderRsvpLeadDays: z.number().int().min(1).max(30).optional(),
   ageTransitionAuto: z.boolean().optional(),
+  notifyBoardRequests: z.boolean().optional(),
   // Club mail template (B15).
   senderName: optionalText(80, false).optional(),
   signature: optionalText(1000, true).optional(),

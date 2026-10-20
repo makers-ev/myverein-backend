@@ -26,6 +26,8 @@ export interface EffectiveClubSettings {
   reminderRsvpLeadDays: number;
   /** Apply the age transition automatically (job `age_transition_sweep`) instead of only suggesting it. */
   ageTransitionAuto: boolean;
+  /** Tell the `members:write` roles about a new admission application or exit request (optional message, in-app + mail). */
+  notifyBoardRequests: boolean;
 }
 
 export const DEFAULT_CLUB_TIMEZONE = "Europe/Berlin";
@@ -52,5 +54,6 @@ export async function loadClubSettings(executor: DbExecutor, clubId: string): Pr
     reminderRsvpEnabled: row?.reminderRsvpEnabled ?? true,
     reminderRsvpLeadDays: row?.reminderRsvpLeadDays ?? 3,
     ageTransitionAuto: row?.ageTransitionAuto ?? false,
+    notifyBoardRequests: row?.notifyBoardRequests ?? true,
   };
 }

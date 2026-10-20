@@ -253,6 +253,13 @@
       "when": 1792322597882,
       "tag": "0035_delivery-idempotency",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1792481219884,
+      "tag": "0036_notify-board-requests",
+      "breakpoints": true
     }
   ]
 }

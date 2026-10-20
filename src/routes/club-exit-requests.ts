@@ -13,7 +13,7 @@ import { locationKeyHolders, locations } from "../db/schema/locations.js";
 import { type DbExecutor, ensureClubMember, isUuid, resolveClubMember } from "../lib/club-members.js";
 import { loadClubSettings } from "../lib/club-settings.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
-import { notifyExitDecision } from "../lib/decision-notify.js";
+import { notifyExitDecision, notifyExitRequestToBoard } from "../lib/decision-notify.js";
 import { addDays, earliestExitDate } from "../lib/exit-notice.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
 import { closeExitSubmission, currentExitDefinition, insertExitSubmission, loadExitSubmission, prepareExitAnswers, type PreparedExitAnswers } from "../lib/form-exit.js";
@@ -320,6 +320,7 @@ clubExitRequestRoutes.post("/", createBodyLimit, zValidator("json", createSchema
       return { request: inserted!, member: row };
     });
     await notifyExitDecision({ clubId, requestId: created.request.id, clubMemberId: created.member.id, kind: "received", earliestOn: earliest, today });
+    await notifyExitRequestToBoard({ clubId, requestId: created.request.id, clubMemberId: created.member.id, desiredEffectiveOn: created.request.desiredEffectiveOn });
     return c.json({ data: { ...shapeRequest(created.request, created.member, settings), adjustedToEarliest: body.desiredEffectiveOn != null && body.desiredEffectiveOn < earliest } }, 201);
   }
 

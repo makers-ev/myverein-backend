@@ -12,6 +12,7 @@ import { forms, formSubmissionFiles, formSubmissions, formVersions, type FormRow
 import { mediaFiles } from "../db/schema/media-files.js";
 import type { DbExecutor } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
+import { notifyApplicationReceived } from "../lib/decision-notify.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { scheduleLazyCleanup } from "../lib/form-sweeper.js";
 import { applicationPendingError, closeApplicationOfSubmission, createApplicationForSubmission } from "../lib/form-applications.js";
@@ -686,6 +687,7 @@ formSubmissionRoutes.post("/:id/submit", submitLimiter, jsonLimit, zValidator("j
     return submitDraftInTx(tx, sub, userId, body.answers);
   });
   await purgeAll(submitted.purge);
+  if (submitted.application) await notifyApplicationReceived({ clubId: submitted.application.clubId, applicationId: submitted.application.id, userId, onBehalfOf: submitted.application.onBehalfOf === "guardian" ? "guardian" : "self" });
   return c.json({ data: { submission: (await shapeSubmissions([submitted.row]))[0], application: submitted.application ? applicationDto(submitted.application) : null, warnings: submitted.warnings } });
 });
 

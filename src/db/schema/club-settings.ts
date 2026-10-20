@@ -40,6 +40,8 @@ export const clubSettings = pgTable("club_settings", {
   reminderRsvpLeadDays: integer("reminder_rsvp_lead_days").notNull().default(3),
   // Apply the age transition (member categories) automatically instead of only suggesting it. Default off.
   ageTransitionAuto: boolean("age_transition_auto").notNull().default(false),
+  // Tell the members who review requests (`members:write`) about a new admission application / exit request (default on).
+  notifyBoardRequests: boolean("notify_board_requests").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

@@ -4,7 +4,10 @@ import { member, organization, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
+import { roleTypesWithPermission } from "./club-permissions.js";
+import { loadClubSettings } from "./club-settings.js";
 import { SITE_URL } from "./emailTemplate.js";
+import { logger } from "./logger.js";
 import { notifySafely } from "./notify/dispatcher.js";
 import type { NotifyRecipient } from "./notify/types.js";
 
@@ -13,6 +16,10 @@ import type { NotifyRecipient } from "./notify/types.js";
  * in-app copy for people with an account plus e-mail. Always best effort (`notifySafely`) and called AFTER the decision was
  * committed; a failing dispatch never changes the HTTP result. Left members are addressed explicitly (the audience resolver
  * deliberately skips them), so the recipient is resolved here.
+ *
+ * Intake notices (G1): a new admission application or exit request tells the people who review them (`members:write`, class
+ * `optional`, category `reminders`, in-app + mail, switch `club_settings.notify_board_requests`); the applicant gets a
+ * mandatory receipt on application intake (the exit receipt is `exit.received`).
  */
 
 const formatDate = (iso: string): string => {
@@ -161,5 +168,96 @@ export async function notifyExitDecision(d: ExitDecision): Promise<void> {
     recipients: await recipientsForClubMember(d.clubMemberId),
     content: { title, body },
     channels: ["in_app", "email"],
+  });
+}
+
+// --- Intake: board notice + applicant receipt -----------------------------------------------------------
+
+/** Never throws: the request itself is already committed. Logs ids and the error class only. */
+async function safely(what: string, ids: Record<string, string>, fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ ...ids, errName: e?.name, errCode: e?.code }, `[decision-notify] ${what} failed`);
+  }
+}
+
+/** The reviewers of requests: everybody with a role that holds `members:write`, no guardians. Optional, so each can opt out of mail. */
+const reviewers = () => ({ roleTypes: roleTypesWithPermission("members:write"), includeGuardians: false });
+
+export interface ApplicationReceived {
+  clubId: string;
+  applicationId: string;
+  /** The applicant's account (the parent for a child application). */
+  userId: string;
+  onBehalfOf?: "self" | "guardian" | null;
+}
+
+/** Application intake: the applicant gets a receipt (mandatory, event `application.received`), the board a notice (`application.new`, optional). */
+export async function notifyApplicationReceived(d: ApplicationReceived): Promise<void> {
+  await safely("application intake", { clubId: d.clubId, applicationId: d.applicationId }, async () => {
+    const clubName = await clubNameOf(d.clubId);
+    const forChild = d.onBehalfOf === "guardian";
+    const [applicant] = await db.select({ name: user.name }).from(user).where(eq(user.id, d.userId));
+    await notifySafely({
+      clubId: d.clubId,
+      class: "mandatory",
+      eventKey: "application.received",
+      refId: d.applicationId,
+      recipients: await recipientForUser(d.userId, null),
+      content: {
+        title: `Dein Aufnahmeantrag bei ${clubName} ist eingegangen`,
+        body: `Wir haben ${forChild ? "den Aufnahmeantrag für dein Kind" : "deinen Aufnahmeantrag"} erhalten. Der Vorstand prüft ihn und meldet sich bei dir, sobald entschieden ist.`,
+      },
+      channels: ["in_app", "email"],
+    });
+    if (!(await loadClubSettings(db, d.clubId)).notifyBoardRequests) return;
+    await notifySafely({
+      clubId: d.clubId,
+      class: "optional",
+      eventKey: "application.new",
+      refId: d.applicationId,
+      audience: reviewers(),
+      content: {
+        title: `Neuer Aufnahmeantrag: ${applicant?.name ?? "Antrag"}`,
+        body: `${applicant?.name ?? "Jemand"} hat einen Aufnahmeantrag${forChild ? " für ein Kind" : ""} gestellt. Bitte prüfe ihn unter Verein, Mitglieder, Anträge.`,
+        category: "reminders",
+        ctaLabel: "Zum Verein",
+        ctaUrl: SITE_URL,
+      },
+      channels: ["in_app", "email"],
+    });
+  });
+}
+
+export interface ExitRequestReceived {
+  clubId: string;
+  requestId: string;
+  clubMemberId: string;
+  desiredEffectiveOn?: string | null;
+}
+
+/** A member filed an exit request: the board is told (`exit.new`, optional); the member's own receipt is `exit.received`. */
+export async function notifyExitRequestToBoard(d: ExitRequestReceived): Promise<void> {
+  await safely("exit request notice", { clubId: d.clubId, requestId: d.requestId }, async () => {
+    if (!(await loadClubSettings(db, d.clubId)).notifyBoardRequests) return;
+    const [row] = await db.select({ name: clubMembers.displayName }).from(clubMembers).where(eq(clubMembers.id, d.clubMemberId));
+    const wish = d.desiredEffectiveOn ? `\nGewünschter Austritt zum: ${formatDate(d.desiredEffectiveOn)}.` : "";
+    await notifySafely({
+      clubId: d.clubId,
+      class: "optional",
+      eventKey: "exit.new",
+      refId: d.requestId,
+      audience: reviewers(),
+      content: {
+        title: `Neue Austrittsanfrage: ${row?.name ?? "Mitglied"}`,
+        body: `${row?.name ?? "Ein Mitglied"} hat eine Austrittsanfrage gestellt.${wish}\nBitte prüfe sie unter Verein, Austritte.`,
+        category: "reminders",
+        ctaLabel: "Zum Verein",
+        ctaUrl: SITE_URL,
+      },
+      channels: ["in_app", "email"],
+    });
   });
 }
