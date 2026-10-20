@@ -9,6 +9,7 @@ import { calendars } from "../db/schema/calendars.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
 import { events, type EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
+import { AudienceLimitError, resolveClubAudience, summarizeAudience } from "../lib/audience.js";
 import { clubTimezone, composeEventMessage, essentialDiff, eventAudience, locationName, notifyWaitlistPromoted, scheduleEventChanged } from "../lib/event-notify.js";
 import { buildIcs } from "../lib/ics.js";
 import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
@@ -304,6 +305,41 @@ eventRoutes.post(
     return c.json({ data: shapeEvent(row) });
   },
 );
+
+/**
+ * Audience preview before cancelling (counts only, never names or addresses; same permission as the cancellation). Resolves the
+ * very audience `POST /:id/cancel` would address (RSVP `angemeldet` + `warteliste`, the department of a department calendar,
+ * guardians) with the resolver the dispatcher uses, for the channels in-app + mail. Individual mail opt-outs are only known to the
+ * dispatcher at send time, so `email` is an upper bound. Read-only: no job, no audit entry.
+ */
+eventRoutes.get("/:id/cancel-preview", async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "calendars:write")) {
+    throw new ForbiddenError("Missing calendars:write permission");
+  }
+  const id = c.req.param("id");
+  const existing = await db.query.events.findFirst({ where: eq(events.id, id) });
+  if (!existing) throw new NotFoundError("Event not found");
+  const calendar = await loadClubCalendar(existing.calendarId, clubId);
+
+  const attendeeRows = await db.select({ status: eventAttendees.status }).from(eventAttendees).where(eq(eventAttendees.eventId, id));
+  const confirmed = attendeeRows.filter((r) => r.status === "angemeldet").length;
+  const waitlisted = attendeeRows.filter((r) => r.status === "warteliste").length;
+  const audience = await eventAudience(clubId, id, calendar.departmentId, true);
+  const empty = { total: 0, reachable: 0, inApp: 0, email: 0, emailOnly: 0, unreachable: 0, sharedAddress: 0 };
+  let summary: typeof empty & { tooLarge: boolean } = { ...empty, tooLarge: false };
+  if (audience !== null) {
+    try {
+      const counts = summarizeAudience((await resolveClubAudience(clubId, audience)).recipients, ["in_app", "email"]);
+      summary = { total: counts.total, reachable: counts.reachable, inApp: counts.inApp, email: counts.email, emailOnly: counts.emailOnly, unreachable: counts.unreachable, sharedAddress: counts.sharedAddress, tooLarge: false };
+    } catch (err) {
+      // An audience beyond the limit is not sent either; the preview says so instead of failing.
+      if (!(err instanceof AudienceLimitError)) throw err;
+      summary = { ...empty, total: err.size, tooLarge: true };
+    }
+  }
+  return c.json({ data: { alreadyCancelled: existing.cancelledAt !== null, confirmed, waitlisted, departmentCalendar: calendar.departmentId !== null, audience: summary } });
+});
 
 // --- RSVP ----------------------------------------------------------------
 
