@@ -191,7 +191,8 @@ describe("credential overview", () => {
     expect(payload.clubMemberIds).toEqual(expect.arrayContaining([rows.soon!, rows.later!]));
     expect(JSON.stringify(after[0]!.payload)).not.toContain("validUntil");
     // Non-sensitive overviews leave no entry; neither does a read without a single value (status=missing of a sensitive field).
-    const count = async () => (await db.select().from(auditLog).where(eq(auditLog.eventType, "member_field.sensitive_read"))).length;
+    // Scoped to this test club: other test files write audit rows concurrently into the shared DB.
+    const count = async () => (await db.select().from(auditLog).where(eq(auditLog.eventType, "member_field.sensitive_read"))).filter((e) => (e.payload as { clubId?: string } | null)?.clubId === cid()).length;
     const n = await count();
     await listed(board(), "fieldKey=mod_q_erste_hilfe");
     expect(await count()).toBe(n);
