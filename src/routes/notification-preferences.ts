@@ -64,7 +64,11 @@ async function assertAccountInClub(userId: string, clubId: string): Promise<void
 
 interface LoadedPrefs {
   prefs: Prefs;
-  /** Club view only: the switches that have a club-specific row (they win over the global default). */
+  /**
+   * Club view only: the switches that have a club-specific row (they win over the global default) -- of the account AND of its
+   * linked account-less member records in that club (e.g. an unsubscribe link of a club mail from before the account was linked).
+   * When several such rows exist for one switch, `enabled` is their AND (one off is enough, the same rule as the effective value).
+   */
   overrides: Array<{ category: NotificationCategory; channel: SwitchableChannel; enabled: boolean }>;
 }
 
@@ -92,7 +96,18 @@ async function loadPrefs(userId: string, clubId: string | null): Promise<LoadedP
       prefs[category][channel] = valueOf("userId", userId, category, channel) && memberIds.every((id) => valueOf("clubMemberId", id, category, channel));
     }
   }
-  if (clubId) for (const r of rows) if (r.userId === userId && r.clubId === clubId && known(r)) overrides.push({ category: r.category as NotificationCategory, channel: r.channel as SwitchableChannel, enabled: r.enabled });
+  if (clubId) {
+    const byKey = new Map<string, LoadedPrefs["overrides"][number]>();
+    for (const r of rows) {
+      const own = r.userId === userId || (r.clubMemberId !== null && memberIds.includes(r.clubMemberId));
+      if (!own || r.clubId !== clubId || !known(r)) continue;
+      const key = `${r.category}:${r.channel}`;
+      const seen = byKey.get(key);
+      if (seen) seen.enabled = seen.enabled && r.enabled;
+      else byKey.set(key, { category: r.category as NotificationCategory, channel: r.channel as SwitchableChannel, enabled: r.enabled });
+    }
+    overrides.push(...byKey.values());
+  }
   return { prefs, overrides };
 }
 
@@ -168,6 +183,10 @@ notificationPreferenceRoutes.put("/", zValidator("json", putSchema, validationHo
     for (const ch of changes.values()) {
       if (ch.enabled === null) {
         await tx.delete(notificationPreferences).where(and(eq(notificationPreferences.userId, userId), eq(notificationPreferences.clubId, clubId!), eq(notificationPreferences.category, ch.category), eq(notificationPreferences.channel, ch.channel)));
+        // The club-specific rows of the linked account-less member record(s) in this club are listed as overrides too, so a reset removes them as well.
+        if (memberIds.length) {
+          await tx.delete(notificationPreferences).where(and(inArray(notificationPreferences.clubMemberId, memberIds), eq(notificationPreferences.clubId, clubId!), eq(notificationPreferences.category, ch.category), eq(notificationPreferences.channel, ch.channel)));
+        }
         continue;
       }
       await tx
@@ -179,7 +198,10 @@ notificationPreferenceRoutes.put("/", zValidator("json", putSchema, validationHo
             : { target: [notificationPreferences.userId, notificationPreferences.category, notificationPreferences.channel], targetWhere: sql`${notificationPreferences.userId} IS NOT NULL AND ${notificationPreferences.clubId} IS NULL`, set: { enabled: ch.enabled, updatedAt: new Date() } },
         );
       // A switch made earlier through an unsubscribe link of the account-less period must not outlive the explicit choice
-      // (global choice: the global rows of all own member records; club choice: the rows of the member record in that club).
+      // (global choice: the global rows of all own member records; club choice: the club-specific rows of the member record in
+      // that club AND its global row -- on purpose: that row exists only for this very member record, and the effective value is the
+      // AND of the account and member rows, so a stale "off" there would otherwise veto the explicit club-specific "on". The account's
+      // own global row and the member records of OTHER clubs are never touched by a club choice.)
       if (memberIds.length) {
         await tx
           .update(notificationPreferences)

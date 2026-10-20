@@ -1,6 +1,6 @@
 import { createHmac, randomUUID } from "node:crypto";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -124,6 +124,49 @@ describe("API", () => {
     const rows = await db.select().from(notificationPreferences).where(and(eq(notificationPreferences.userId, ann.userId), eq(notificationPreferences.clubId, clubA), eq(notificationPreferences.category, "reminders")));
     expect(rows).toHaveLength(1);
     expect(rows[0]!.enabled).toBe(true);
+  });
+});
+
+describe("linked account-less member rows", () => {
+  const memberRows = (clubMemberId: string, category: string) => db.select().from(notificationPreferences).where(and(eq(notificationPreferences.clubMemberId, clubMemberId), eq(notificationPreferences.category, category)));
+
+  it("lists a club-specific row of the linked member record as an override, and a reset removes it", async () => {
+    await db.delete(notificationPreferences).where(eq(notificationPreferences.userId, ann.userId));
+    await db.insert(notificationPreferences).values({ clubMemberId: ann.cmA, clubId: clubA, category: "reminders", channel: "email", enabled: false });
+    const view = await json(await req(ann, `/notification-preferences?clubId=${clubA}`));
+    expect(view.data.overrides).toEqual([{ category: "reminders", channel: "email", enabled: false }]);
+    expect(emailSwitch(view.data, "reminders")).toBe(false); // the effective value and the override agree
+    // a club-specific row of the account for the same switch is merged (one off is enough)
+    await put(ann, [{ category: "reminders", channel: "email", enabled: true }], clubA);
+    await expect(memberRows(ann.cmA, "reminders")).resolves.toEqual([expect.objectContaining({ clubId: clubA, enabled: true })]);
+    const merged = await json(await req(ann, `/notification-preferences?clubId=${clubA}`));
+    expect(merged.data.overrides).toEqual([{ category: "reminders", channel: "email", enabled: true }]);
+    // the other club does not see it
+    expect((await json(await req(ann, `/notification-preferences?clubId=${clubB}`))).data.overrides).toEqual([]);
+    // reset: neither the account row nor the linked member row stays behind
+    expect((await put(ann, [{ category: "reminders", channel: "email", enabled: null }], clubA)).status).toBe(200);
+    expect((await json(await req(ann, `/notification-preferences?clubId=${clubA}`))).data.overrides).toEqual([]);
+    expect(await memberRows(ann.cmA, "reminders")).toHaveLength(0);
+  });
+
+  it("a club-specific PUT rewrites the global row of the linked member record of THAT club only, never the account's global row", async () => {
+    await db.delete(notificationPreferences).where(eq(notificationPreferences.userId, ann.userId));
+    await db.delete(notificationPreferences).where(eq(notificationPreferences.clubMemberId, ann.cmA));
+    await db.delete(notificationPreferences).where(eq(notificationPreferences.clubMemberId, ann.cmB));
+    // stale "off" rows from the account-less period, in both clubs, plus the account's own global "off"
+    await db.insert(notificationPreferences).values([
+      { clubMemberId: ann.cmA, clubId: null, category: "events", channel: "push", enabled: false },
+      { clubMemberId: ann.cmB, clubId: null, category: "events", channel: "push", enabled: false },
+      { userId: ann.userId, clubId: null, category: "events", channel: "push", enabled: false },
+    ]);
+    expect((await put(ann, [{ category: "events", channel: "push", enabled: true }], clubA)).status).toBe(200);
+    // without the rewrite the stale member row would veto the explicit "on" (AND rule)
+    const effectiveA = (await json(await req(ann, `/notification-preferences?clubId=${clubA}`))).data.categories.find((c: Json) => c.category === "events").channels.find((ch: Json) => ch.channel === "push").enabled;
+    expect(effectiveA).toBe(true);
+    expect((await memberRows(ann.cmA, "events"))[0]).toMatchObject({ clubId: null, enabled: true });
+    expect((await memberRows(ann.cmB, "events"))[0]).toMatchObject({ clubId: null, enabled: false }); // other club untouched
+    const [account] = await db.select().from(notificationPreferences).where(and(eq(notificationPreferences.userId, ann.userId), isNull(notificationPreferences.clubId)));
+    expect(account).toMatchObject({ enabled: false }); // the account's global default is untouched
   });
 });
 
