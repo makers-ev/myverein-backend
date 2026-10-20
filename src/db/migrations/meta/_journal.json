@@ -260,6 +260,13 @@
       "when": 1792481219884,
       "tag": "0036_notify-board-requests",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1792481450420,
+      "tag": "0037_notify-meeting-invites",
+      "breakpoints": true
     }
   ]
 }

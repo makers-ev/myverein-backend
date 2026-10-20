@@ -7,8 +7,9 @@ import { clubSettings } from "../db/schema/club-settings.js";
 import type { AnnouncementAudience } from "../db/schema/communication.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
 import { locations } from "../db/schema/locations.js";
-import { meetingInvitees } from "../db/schema/meetings.js";
+import { meetingInvitees, type MeetingInviteeRow, type MeetingRow } from "../db/schema/meetings.js";
 import { AudienceLimitError } from "./audience.js";
+import { loadClubSettings } from "./club-settings.js";
 import { enqueue } from "./jobs/queue.js";
 import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
@@ -33,6 +34,10 @@ export interface EventChangedPayload extends Record<string, unknown> {
   title: string;
   body: string;
   audience: AnnouncementAudience;
+  /** Dispatcher event key; default `<kind>.cancelled` / `<kind>.changed`. */
+  eventKey?: string;
+  /** Replaces `version` in the job key and the delivery `ref_id` (e.g. the invitee row id of a meeting invitation). */
+  discriminator?: string;
 }
 
 const DEFAULT_TIMEZONE = "Europe/Berlin";
@@ -74,7 +79,7 @@ export function essentialDiff(before: TimePlace, after: TimePlace): { time: bool
 }
 
 /** Maps the account memberships (`member.id`) to the club members (`club_members.id`) who can be addressed. */
-async function clubMemberIdsOf(clubId: string, accountMemberIds: string[]): Promise<string[]> {
+export async function clubMemberIdsOf(clubId: string, accountMemberIds: string[]): Promise<string[]> {
   if (accountMemberIds.length === 0) return [];
   const rows = await db.select({ id: clubMembers.id }).from(clubMembers).where(and(eq(clubMembers.clubId, clubId), inArray(clubMembers.memberId, accountMemberIds)));
   return rows.map((r) => r.id);
@@ -118,7 +123,9 @@ export function composeEventMessage(input: EventMessageInput): { title: string; 
   const place = (value: string | null) => (value ? `\nOrt: ${value}` : "");
   if (input.cancelled) {
     const reason = input.reason?.trim() ? `\nGrund: ${input.reason.trim()}` : "";
-    return { title: `Abgesagt: ${input.title}`, body: `${noun === "Termin" ? "Der Termin" : "Das Treffen"} „${input.title}“ wurde abgesagt.\nGeplant war: ${old}${place(input.before.place)}${reason}` };
+    // A meeting still in Terminfindung never had a date: there is nothing to say about "planned for".
+    const planned = input.before.startsAt ? `\nGeplant war: ${old}${place(input.before.place)}` : "\nDie Terminfindung ist damit beendet.";
+    return { title: `Abgesagt: ${input.title}`, body: `${noun === "Termin" ? "Der Termin" : "Das Treffen"} „${input.title}“ wurde abgesagt.${planned}${reason}` };
   }
   const lines = [`${noun === "Termin" ? "Der Termin" : "Das Treffen"} „${input.title}“ wurde geändert.`];
   const timeChanged = !sameInstant(input.before.startsAt, input.after.startsAt) || !sameInstant(input.before.endsAt, input.after.endsAt);
@@ -149,11 +156,58 @@ export async function scheduleEventChanged(
       });
       return "suppressed";
     }
-    await enqueue({ type: EVENT_CHANGED_JOB_TYPE, payload, dedupeKey: `${EVENT_CHANGED_JOB_TYPE}:${payload.kind}:${payload.refId}:${payload.version}` });
+    await enqueue({ type: EVENT_CHANGED_JOB_TYPE, payload, dedupeKey: `${EVENT_CHANGED_JOB_TYPE}:${payload.kind}:${payload.refId}:${payload.discriminator ?? payload.version}` });
     return "queued";
   } catch (err) {
     const e = err as { name?: string; code?: unknown } | undefined;
     logger.error({ kind: payload.kind, refId: payload.refId, errName: e?.name, errCode: e?.code }, "[event-notify] could not schedule notification");
+    return "failed";
+  }
+}
+
+/** Statuses of a meeting that people can still react to (Terminfindung or planned); everything else is history. */
+const OPEN_MEETING_STATUSES = ["terminfindung", "geplant"];
+
+/** Whether announcing something about this meeting still makes sense (open status and not in the past). */
+export function isOpenMeeting(meeting: Pick<MeetingRow, "status" | "scheduledAt">, now: Date = new Date()): boolean {
+  return OPEN_MEETING_STATUSES.includes(meeting.status) && (meeting.scheduledAt === null || meeting.scheduledAt.getTime() > now.getTime());
+}
+
+/**
+ * Tells one newly invited member about the meeting (event key `meeting.invited`, optional, category events). Covers the
+ * start of a Terminfindung too: that is the moment the first invitees are added. Skipped for meetings that are over or
+ * cancelled, for people without a club_members row and when the club switched `notify_meeting_invites` off; `suppress`
+ * (body `notify:false`) skips it and audits that. Job key per invitee row, so a repeated request never sends twice
+ * while removing and re-adding the person is a new invitation. Never throws.
+ */
+export async function announceMeetingInvitation(args: { clubId: string; actor: string; meeting: MeetingRow; invitee: MeetingInviteeRow; suppress: boolean }): Promise<"queued" | "suppressed" | "skipped" | "failed"> {
+  try {
+    const { clubId, meeting, invitee } = args;
+    if (!isOpenMeeting(meeting) || !(await loadClubSettings(db, clubId)).notifyMeetingInvites) return "skipped";
+    const [clubMemberId] = await clubMemberIdsOf(clubId, [invitee.memberId]);
+    if (!clubMemberId) return "skipped";
+    const timezone = await clubTimezone(clubId);
+    const place = await locationName(clubId, meeting.locationId);
+    const lines = meeting.scheduledAt
+      ? [`Du bist zu „${meeting.title}“ eingeladen.`, `Wann: ${formatWhen(meeting.scheduledAt, timezone)}`, ...(place ? [`Ort: ${place}`] : []), "Bitte sag zu oder ab."]
+      : [`Du bist zur Terminfindung für „${meeting.title}“ eingeladen.`, "Der Termin steht noch nicht fest. Bitte trage deine Verfügbarkeit ein und sag zu oder ab."];
+    const payload: EventChangedPayload = {
+      clubId,
+      kind: "meeting",
+      refId: meeting.id,
+      version: 0,
+      discriminator: invitee.id,
+      cancelled: false,
+      eventKey: "meeting.invited",
+      title: meeting.scheduledAt ? `Einladung: ${meeting.title}` : `Terminfindung: ${meeting.title}`,
+      body: lines.join("\n"),
+      audience: { memberIds: [clubMemberId], includeGuardians: false },
+    };
+    const scheduled = await scheduleEventChanged(payload, { suppressed: args.suppress, actor: args.actor });
+    return scheduled === "queued" || scheduled === "suppressed" ? scheduled : "failed";
+  } catch (err) {
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ meetingId: args.meeting.id, errName: e?.name, errCode: e?.code }, "[event-notify] could not announce meeting invitation");
     return "failed";
   }
 }
@@ -166,9 +220,9 @@ export async function handleEventChanged(job: JobContext): Promise<void> {
     await notify({
       clubId: p.clubId,
       class: "optional",
-      eventKey: `${p.kind}.${p.cancelled ? "cancelled" : "changed"}`,
+      eventKey: p.eventKey ?? `${p.kind}.${p.cancelled ? "cancelled" : "changed"}`,
       // Every change of the same event is a new message; a re-run of one change is the same delivery.
-      refId: `${p.refId}#${p.version ?? ""}`,
+      refId: `${p.refId}#${p.discriminator ?? p.version ?? ""}`,
       audience: p.audience,
       content: { title: p.title, body: p.body, category: "events", template: "announcement" },
       channels: ["in_app", "email"],

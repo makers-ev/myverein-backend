@@ -28,6 +28,8 @@ export interface EffectiveClubSettings {
   ageTransitionAuto: boolean;
   /** Tell the `members:write` roles about a new admission application or exit request (optional message, in-app + mail). */
   notifyBoardRequests: boolean;
+  /** Tell people when they are invited to a meeting or a Terminfindung (optional message, category events). */
+  notifyMeetingInvites: boolean;
 }
 
 export const DEFAULT_CLUB_TIMEZONE = "Europe/Berlin";
@@ -55,5 +57,6 @@ export async function loadClubSettings(executor: DbExecutor, clubId: string): Pr
     reminderRsvpLeadDays: row?.reminderRsvpLeadDays ?? 3,
     ageTransitionAuto: row?.ageTransitionAuto ?? false,
     notifyBoardRequests: row?.notifyBoardRequests ?? true,
+    notifyMeetingInvites: row?.notifyMeetingInvites ?? true,
   };
 }

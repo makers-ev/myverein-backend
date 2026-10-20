@@ -134,6 +134,7 @@ describe("exit workflow (B6)", () => {
         reminderRsvpLeadDays: 3,
         ageTransitionAuto: false,
         notifyBoardRequests: true,
+        notifyMeetingInvites: true,
         // mail template fields are only visible with announcements:write (B15)
         senderName: null,
         signature: null,

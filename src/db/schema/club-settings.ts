@@ -42,6 +42,8 @@ export const clubSettings = pgTable("club_settings", {
   ageTransitionAuto: boolean("age_transition_auto").notNull().default(false),
   // Tell the members who review requests (`members:write`) about a new admission application / exit request (default on).
   notifyBoardRequests: boolean("notify_board_requests").notNull().default(true),
+  // Tell people when they are invited to a meeting / a Terminfindung (default on).
+  notifyMeetingInvites: boolean("notify_meeting_invites").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
