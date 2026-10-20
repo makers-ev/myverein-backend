@@ -73,7 +73,8 @@ export function verifyUnsubscribeToken(token: string, now = Date.now()): Unsubsc
   if (!/^[A-Za-z0-9_-]+$/.test(encoded) || !/^[A-Za-z0-9_-]{43}$/.test(sig)) return null;
   const expected = sign(encoded);
   const given = Buffer.from(sig, "base64url");
-  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
+  // The last base64url char of a 32-byte MAC carries only 4 bits, so sibling spellings decode to the same bytes: accept the canonical form only.
+  if (given.length !== expected.length || given.toString("base64url") !== sig || !timingSafeEqual(given, expected)) return null;
   try {
     const parsed = payloadSchema.safeParse(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")));
     if (!parsed.success || parsed.data.e <= now) return null;

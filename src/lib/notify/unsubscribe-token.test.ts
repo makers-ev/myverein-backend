@@ -64,7 +64,10 @@ describe("unsubscribe tokens (B9)", () => {
     forged.p = "user-1";
     forged.c = "events";
     expect(verifyUnsubscribeToken(`${Buffer.from(JSON.stringify(forged)).toString("base64url")}.${sig}`)).toBeNull();
-    expect(verifyUnsubscribeToken(`${payload}.${sig.slice(0, -1)}${sig.endsWith("A") ? "B" : "A"}`)).toBeNull();
+    expect(verifyUnsubscribeToken(`${payload}.${sig.startsWith("A") ? "B" : "A"}${sig.slice(1)}`)).toBeNull();
+    // non-canonical spelling of the same MAC bytes (last char only has 4 significant bits)
+    const siblings = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".split("").filter((c) => c !== sig.slice(-1));
+    for (const c of siblings) expect(verifyUnsubscribeToken(`${payload}.${sig.slice(0, -1)}${c}`)).toBeNull();
     expect(verifyUnsubscribeToken(`${payload}.`)).toBeNull();
     expect(verifyUnsubscribeToken(payload)).toBeNull();
     expect(verifyUnsubscribeToken(`${token}.extra`)).toBeNull();
