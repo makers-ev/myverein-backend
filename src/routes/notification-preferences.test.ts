@@ -96,6 +96,21 @@ describe("notification preferences and unsubscribe (B9)", () => {
   });
 
   describe("own preferences", () => {
+    it("lists the board category only for accounts with a role that holds members:write, and any account can store it", async () => {
+      const asBoard = await json(await call(board, "/notification-preferences"));
+      expect(asBoard.data.categories.map((c: Json) => c.category)).toEqual(["announcements", "events", "reminders", "board"]);
+      const asMember = await json(await call(anna, "/notification-preferences"));
+      expect(asMember.data.categories.map((c: Json) => c.category)).not.toContain("board");
+
+      const off = await call(board, "/notification-preferences", { method: "PUT", body: { preferences: [{ category: "board", channel: "email", enabled: false }] } });
+      expect(off.status).toBe(200);
+      const after = await json(off);
+      expect(after.data.categories.find((c: Json) => c.category === "board").channels.find((ch: Json) => ch.channel === "email").enabled).toBe(false);
+      // the personal reminders stay on: the board digest is its own switch
+      expect(after.data.categories.find((c: Json) => c.category === "reminders").channels.find((ch: Json) => ch.channel === "email").enabled).toBe(true);
+      await call(board, "/notification-preferences", { method: "PUT", body: { preferences: [{ category: "board", channel: "email", enabled: true }] } });
+    });
+
     it("needs a session (401) and starts with everything on; in-app and mandatory classes are read-only", async () => {
       expect((await app.request("/notification-preferences")).status).toBe(401);
       const res = await json(await call(anna, "/notification-preferences"));

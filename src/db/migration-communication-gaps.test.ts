@@ -48,3 +48,10 @@ describe("migration 0040 (registration dedupe)", () => {
     await q(`INSERT INTO notification (kind, target_user_id, translations) VALUES ('admin', 'u1', '{}'::jsonb), ('admin', 'u1', '{}'::jsonb)`);
   });
 });
+
+describe("migration 0041 (age transition notice switch)", () => {
+  it("defaults existing clubs to on and keeps their other settings", async () => {
+    const [row] = await q(`SELECT notify_age_transition, age_transition_auto, notify_handover FROM club_settings WHERE club_id = 'o1'`);
+    expect(row).toEqual({ notify_age_transition: true, age_transition_auto: false, notify_handover: true });
+  });
+});

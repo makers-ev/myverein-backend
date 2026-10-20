@@ -50,6 +50,8 @@ export const clubSettings = pgTable("club_settings", {
   notifyBoardRequests: boolean("notify_board_requests").notNull().default(true),
   // Tell people when they are invited to a meeting / a Terminfindung (default on).
   notifyMeetingInvites: boolean("notify_meeting_invites").notNull().default(true),
+  // Tell members (and guardians) when the age transition moved them to another member category (default on).
+  notifyAgeTransition: boolean("notify_age_transition").notNull().default(true),
   // Tell people when a loan or a key is handed out, returned or extended (default on).
   notifyHandover: boolean("notify_handover").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

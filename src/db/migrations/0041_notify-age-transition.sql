@@ -1,0 +1,1 @@
+ALTER TABLE "club_settings" ADD COLUMN "notify_age_transition" boolean DEFAULT true NOT NULL;

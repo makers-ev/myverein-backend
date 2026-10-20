@@ -6,11 +6,12 @@ import { z } from "zod";
 import { member, organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
+import { clubRoles } from "../db/schema/club-roles.js";
 import { notificationPreferences } from "../db/schema/communication.js";
 import { EXCLUDED_RECIPIENT_STATUSES } from "../lib/audience.js";
-import { hasClubPermission } from "../lib/club-permissions.js";
+import { hasClubPermission, roleTypesWithPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
-import { NOTIFICATION_CATEGORIES, type NotificationCategory } from "../lib/notify/types.js";
+import { BOARD_CATEGORY, NOTIFICATION_CATEGORIES, type NotificationCategory } from "../lib/notify/types.js";
 import { verifyUnsubscribeToken, type UnsubscribePayload } from "../lib/notify/unsubscribe-token.js";
 import { dbRateLimit, envInt, HOUR_MS } from "../lib/rate-limits.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
@@ -67,9 +68,21 @@ async function loadPrefs(userId: string): Promise<Prefs> {
   return prefs;
 }
 
-function shapePrefs(prefs: Prefs) {
+/** Whether the account holds a role with `members:write` (the audience of the `board` digests) in any club. */
+async function holdsBoardRole(userId: string): Promise<boolean> {
+  const rows = await db
+    .select({ id: clubRoles.id })
+    .from(clubRoles)
+    .innerJoin(member, eq(member.id, clubRoles.memberId))
+    .where(and(eq(member.userId, userId), inArray(clubRoles.roleType, roleTypesWithPermission("members:write"))))
+    .limit(1);
+  return rows.length > 0;
+}
+
+/** `board` is only listed for accounts that can receive it; everybody else keeps the three categories every client knows. */
+function shapePrefs(prefs: Prefs, includeBoard: boolean) {
   return {
-    categories: NOTIFICATION_CATEGORIES.map((category) => ({
+    categories: NOTIFICATION_CATEGORIES.filter((category) => includeBoard || category !== BOARD_CATEGORY).map((category) => ({
       category,
       channels: [
         { channel: "in_app", enabled: true, switchable: false },
@@ -83,7 +96,8 @@ function shapePrefs(prefs: Prefs) {
 
 notificationPreferenceRoutes.get("/", async (c) => {
   c.header("Cache-Control", "private, no-store");
-  return c.json({ data: shapePrefs(await loadPrefs(c.get("user").id)) });
+  const userId = c.get("user").id;
+  return c.json({ data: shapePrefs(await loadPrefs(userId), await holdsBoardRole(userId)) });
 });
 
 const putSchema = z.object({
@@ -124,7 +138,7 @@ notificationPreferenceRoutes.put("/", zValidator("json", putSchema, validationHo
     }
   });
   c.header("Cache-Control", "private, no-store");
-  return c.json({ data: shapePrefs(await loadPrefs(userId)) });
+  return c.json({ data: shapePrefs(await loadPrefs(userId), await holdsBoardRole(userId)) });
 });
 
 // --- Leadership view: yes/no only ----------------------------------------------------------------------------------------------
@@ -185,7 +199,7 @@ const wantsHtml = (c: Context) => (c.req.header("accept") ?? "").includes("text/
 const INVALID = "This link is invalid or has expired";
 
 const esc = (v: string) => v.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
-const CATEGORY_LABEL: Record<NotificationCategory, string> = { announcements: "Ankündigungen", events: "Termine", reminders: "Erinnerungen" };
+const CATEGORY_LABEL: Record<NotificationCategory, string> = { announcements: "Ankündigungen", events: "Termine", reminders: "Erinnerungen", board: "Vorstandsmeldungen" };
 
 function page(title: string, body: string): string {
   return `<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)}</title></head><body style="font-family:system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem"><h1 style="font-size:1.25rem">${esc(title)}</h1>${body}</body></html>`;

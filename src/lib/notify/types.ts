@@ -9,8 +9,16 @@ export const NOTIFY_TEMPLATES = ["announcement", "urgent", "reminder", "decision
 export type NotifyTemplate = (typeof NOTIFY_TEMPLATES)[number];
 
 /** Preference categories of `notification_preferences.category` (B9 exposes them). `decisions` is mandatory-only, never stored as a preference. */
-export const NOTIFICATION_CATEGORIES = ["announcements", "events", "reminders"] as const;
+export const NOTIFICATION_CATEGORIES = ["announcements", "events", "reminders", "board"] as const;
 export type NotificationCategory = (typeof NOTIFICATION_CATEGORIES)[number];
+/**
+ * `board` = digests for the people who run the club (age-transition summary, exit effective); GET /notification-preferences only
+ * lists it for accounts that hold a role with `members:write`, so ordinary members never see it. Kept apart from `reminders` so
+ * switching off personal reminders does not silence what the board has to act on.
+ */
+export const BOARD_CATEGORY: NotificationCategory = "board";
+/** The categories every member sees; "push off everywhere" (mandatory push) is judged on these. */
+export const CORE_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = ["announcements", "events", "reminders"];
 
 export interface NotifyContent {
   title: string;

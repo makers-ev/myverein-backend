@@ -12,6 +12,7 @@ import { addDays, isDigestTime, localDate, safeTimezone } from "./club-time.js";
 import { enqueue } from "./jobs/queue.js";
 import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
+import { BOARD_CATEGORY } from "./notify/types.js";
 import { notify } from "./notify/dispatcher.js";
 
 /**
@@ -106,7 +107,7 @@ export async function handleExitEffectiveNotify(job: JobContext): Promise<void> 
       eventKey: "member.exit_effective",
       refId: `${clubMemberId}#${leftAt}`,
       audience: { roleTypes: roleTypesWithPermission("members:write"), includeGuardians: false },
-      content: { title: lines.length > 0 ? `Austritt wirksam – Rückgabe offen: ${member.displayName}` : `Austritt wirksam: ${member.displayName}`, body, template: "reminder", category: "reminders" },
+      content: { title: lines.length > 0 ? `Austritt wirksam – Rückgabe offen: ${member.displayName}` : `Austritt wirksam: ${member.displayName}`, body, template: "reminder", category: BOARD_CATEGORY },
       channels: ["in_app", "email"],
     });
   } catch (err) {

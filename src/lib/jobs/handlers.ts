@@ -1,6 +1,6 @@
 import { handlePublishAnnouncement, PUBLISH_JOB_TYPE } from "../announcements.js";
 import { EVENT_CHANGED_JOB_TYPE, handleEventChanged } from "../event-notify.js";
-import { AGE_TRANSITION_INTERVAL_MS, AGE_TRANSITION_JOB_TYPE, handleAgeTransitionSweep } from "../age-transition.js";
+import { AGE_TRANSITION_INTERVAL_MS, AGE_TRANSITION_JOB_TYPE, AGE_TRANSITION_MEMBER_JOB_TYPE, handleAgeTransitionMemberNotify, handleAgeTransitionSweep } from "../age-transition.js";
 import { EXIT_EFFECTIVE_INTERVAL_MS, EXIT_EFFECTIVE_NOTIFY_JOB_TYPE, EXIT_EFFECTIVE_SWEEP_JOB_TYPE, handleExitEffectiveNotify, handleExitEffectiveSweep } from "../exit-effective.js";
 import { runFormCleanup } from "../form-sweeper.js";
 import { handleRetentionSweep, registerRetentionTasks, RETENTION_SWEEP_INTERVAL_MS, RETENTION_SWEEP_JOB_TYPE } from "../retention.js";
@@ -28,6 +28,7 @@ export function registerAllJobs(): void {
   registerRecurringJob({ type: REMINDER_SWEEP_JOB_TYPE, intervalMs: REMINDER_SWEEP_INTERVAL_MS }, handleReminderSweep);
   registerJob(REMINDER_JOB_TYPE, handleReminder);
   registerRecurringJob({ type: AGE_TRANSITION_JOB_TYPE, intervalMs: AGE_TRANSITION_INTERVAL_MS }, handleAgeTransitionSweep);
+  registerJob(AGE_TRANSITION_MEMBER_JOB_TYPE, handleAgeTransitionMemberNotify);
   registerRecurringJob({ type: EXIT_EFFECTIVE_SWEEP_JOB_TYPE, intervalMs: EXIT_EFFECTIVE_INTERVAL_MS }, handleExitEffectiveSweep);
   registerJob(EXIT_EFFECTIVE_NOTIFY_JOB_TYPE, handleExitEffectiveNotify);
   registerRecurringJob({ type: FORM_CLEANUP_JOB_TYPE, intervalMs: FORM_CLEANUP_INTERVAL_MS }, async () => {

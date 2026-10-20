@@ -35,6 +35,7 @@ import { createInvite, previewInvite, acceptInvite, unlinkAccount } from "../lib
 import { APP_NAME, buildMemberInviteEmail, SITE_URL } from "../lib/emailTemplate.js";
 import { notify } from "../lib/notify/dispatcher.js";
 import { clubMemberInvites, type ClubMemberInviteRow } from "../db/schema/club-member-invites.js";
+import { enqueueMemberCategoryNotices } from "../lib/age-transition.js";
 import { effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
 import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "../lib/member-read-scope.js";
 import { findMemberPhotoMedia, canSeeMemberPhoto, isMinor, memberPhotoUrls, removeMemberPhoto, replaceMemberPhoto, type PhotoCaller } from "../lib/member-photos.js";
@@ -1355,6 +1356,8 @@ clubMemberRoutes.post("/transition-suggestions/apply", zValidator("json", applyS
     }
     if (applied.length > 0) {
       await tx.insert(auditLog).values({ eventType: "club_member.age_transition", subjectId: clubId, payload: { clubId, count: applied.length, memberIds: applied.map((a) => a.id), changedBy: actor.id } });
+      // The moved members (and guardians) are told, in the same transaction as the move (switch `notify_age_transition`).
+      await enqueueMemberCategoryNotices(tx, clubId, applied.map((a) => ({ id: a.id, fromId: a.fromCategoryId, toId: a.toCategoryId })), today);
     }
     return { applied, skipped };
   });

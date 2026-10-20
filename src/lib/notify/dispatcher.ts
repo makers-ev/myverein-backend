@@ -7,7 +7,7 @@ import { logger } from "../logger.js";
 import { enqueue } from "../jobs/queue.js";
 import { handleEmailDelivery } from "./email-job.js";
 import { PUSH_DELIVERIES_PER_JOB } from "./push.js";
-import { EMAIL_JOB_TYPE, NOTIFICATION_CATEGORIES, PUSH_JOB_TYPE, type DeliveryContent, type NotificationCategory, type NotifyInput, type NotifyRecipient, type NotifyResult, type NotifyTemplate } from "./types.js";
+import { CORE_NOTIFICATION_CATEGORIES, EMAIL_JOB_TYPE, PUSH_JOB_TYPE, type DeliveryContent, type NotificationCategory, type NotifyInput, type NotifyRecipient, type NotifyResult, type NotifyTemplate } from "./types.js";
 
 /**
  * Central delivery layer (Wave 9 B6, ADR-006). `notify` writes one `message_deliveries` row per recipient and channel
@@ -92,7 +92,7 @@ async function loadOptOuts(category: string, targets: Target[], pushOnlyIfAllOff
         if (key) seen.set(key, (seen.get(key) ?? new Set()).add(r.category));
       }
     }
-    for (const [key, categories] of seen) if (NOTIFICATION_CATEGORIES.every((c) => categories.has(c))) out.add(`push:${key}`);
+    for (const [key, categories] of seen) if (CORE_NOTIFICATION_CATEGORIES.every((c) => categories.has(c))) out.add(`push:${key}`);
     return out;
   }
   for (const r of rows) {

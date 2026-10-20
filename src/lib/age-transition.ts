@@ -11,7 +11,11 @@ import { enqueue } from "./jobs/queue.js";
 import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
 import { suggestCategory } from "./member-lifecycle.js";
+import { loadClubSettings } from "./club-settings.js";
+import { AudienceLimitError } from "./audience.js";
+import { notify } from "./notify/dispatcher.js";
 import { REMINDER_JOB_TYPE, reminderDedupeKey, type ReminderPayload } from "./reminders.js";
+import type { DbExecutor } from "./club-members.js";
 
 /**
  * Age transition as a job (Wave 9 B13, formerly only suggested -- `GET /club-members/transition-suggestions`). The recurring
@@ -20,13 +24,40 @@ import { REMINDER_JOB_TYPE, reminderDedupeKey, type ReminderPayload } from "./re
  * archived), on the club's calendar day. Each move is written to `club_member_status_history` with `changed_by = NULL`
  * (the actor "system") and the reason `Altersübergang (automatisch)`, plus one audit entry per club and run. The
  * leadership (`members:write` roles) gets a summary without names (counts per category move); it is enqueued in the same
- * transaction as the moves, so there is no summary without moves and no moves without a summary. A second run finds
- * nothing to do (idempotent).
+ * transaction as the moves, so there is no summary without moves and no moves without a summary (category `board`, its own
+ * switch in the notification preferences). The moved members (and their guardians) get a notice of their own, one job
+ * `age_transition_member_notify` per move, also enqueued in that transaction (G10, switch `club_settings.notify_age_transition`,
+ * optional, category announcements). A second run finds nothing to do (idempotent).
  */
 
 export const AGE_TRANSITION_JOB_TYPE = "age_transition_sweep";
 export const AGE_TRANSITION_INTERVAL_MS = 60 * 60 * 1000;
 export const AGE_TRANSITION_REASON = "Altersübergang (automatisch)";
+
+export const AGE_TRANSITION_MEMBER_JOB_TYPE = "age_transition_member_notify";
+export const ageTransitionMemberDedupeKey = (clubMemberId: string, date: string, toCategoryId: string): string => `age_transition_member:${clubMemberId}:${date}:${toCategoryId}`;
+
+export interface AgeTransitionMove {
+  id: string;
+  fromId: string;
+  toId: string;
+}
+
+/**
+ * Enqueues the member notices of applied moves, inside the transaction of the moves (exactly once per move: the job key
+ * carries member, day and target). Nothing is queued while the club switched `notify_age_transition` off; the handler checks
+ * the switch again at send time.
+ */
+export async function enqueueMemberCategoryNotices(tx: DbExecutor, clubId: string, moves: AgeTransitionMove[], today: string): Promise<number> {
+  if (moves.length === 0 || !(await loadClubSettings(tx, clubId)).notifyAgeTransition) return 0;
+  for (const m of moves) {
+    await enqueue(
+      { type: AGE_TRANSITION_MEMBER_JOB_TYPE, payload: { clubId, clubMemberId: m.id, fromCategoryId: m.fromId, toCategoryId: m.toId, date: today }, dedupeKey: ageTransitionMemberDedupeKey(m.id, today, m.toId) },
+      tx,
+    );
+  }
+  return moves.length;
+}
 
 export interface AgeTransitionResult {
   clubs: number;
@@ -87,6 +118,7 @@ export async function applyAgeTransitionsForClub(clubId: string, today: string):
     };
     // One summary per run: the first moved member makes the key unique (a member moves once per category).
     await enqueue({ type: REMINDER_JOB_TYPE, payload, dedupeKey: reminderDedupeKey("age_transition", clubId, `${today}:${moves[0]!.id}`) }, tx);
+    await enqueueMemberCategoryNotices(tx, clubId, moves, today);
     return moves.length;
   });
 }
@@ -114,4 +146,42 @@ export async function runAgeTransitionSweep(now: Date = new Date(), scope: { clu
 
 export async function handleAgeTransitionSweep(_job: JobContext): Promise<void> {
   await runAgeTransitionSweep();
+}
+
+/**
+ * Job handler `age_transition_member_notify`: tells ONE moved member (and the guardians, e.g. of a child) about the new
+ * category. Optional (category announcements: mail and push can be switched off, the in-app copy stays). Skipped when the club
+ * switched the notice off meanwhile or the member is no longer in the target category (moved again / reverted). Delivery
+ * `ref_id` `<member>#<day>:<target>`: a re-run is the same delivery.
+ */
+export async function handleAgeTransitionMemberNotify(job: JobContext): Promise<void> {
+  const p = job.payload as { clubId?: unknown; clubMemberId?: unknown; fromCategoryId?: unknown; toCategoryId?: unknown; date?: unknown };
+  if (![p.clubId, p.clubMemberId, p.fromCategoryId, p.toCategoryId, p.date].every((v) => typeof v === "string" && v)) return;
+  const { clubId, clubMemberId, fromCategoryId, toCategoryId, date } = p as Record<"clubId" | "clubMemberId" | "fromCategoryId" | "toCategoryId" | "date", string>;
+  if (!(await loadClubSettings(db, clubId)).notifyAgeTransition) return;
+  const [row] = await db.select({ name: clubMembers.displayName, categoryId: clubMembers.categoryId }).from(clubMembers).where(and(eq(clubMembers.id, clubMemberId), eq(clubMembers.clubId, clubId)));
+  if (!row || row.categoryId !== toCategoryId) return;
+  const names = await db.select({ id: memberCategories.id, name: memberCategories.name }).from(memberCategories).where(and(eq(memberCategories.clubId, clubId), inArray(memberCategories.id, [fromCategoryId, toCategoryId])));
+  const from = names.find((n) => n.id === fromCategoryId)?.name;
+  const to = names.find((n) => n.id === toCategoryId)?.name;
+  if (!from || !to) return;
+  try {
+    await notify({
+      clubId,
+      class: "optional",
+      eventKey: "member.category_changed",
+      refId: `${clubMemberId}#${date}:${toCategoryId}`,
+      audience: { memberIds: [clubMemberId], includeGuardians: true },
+      content: {
+        title: `Neue Mitgliedskategorie: ${to}`,
+        body: `Für ${row.name} wurde die Mitgliedskategorie geändert: von „${from}“ zu „${to}“.\nGrund: Die Altersgrenze der bisherigen Kategorie ist erreicht.\nBei Fragen melde dich beim Vorstand.`,
+        category: "announcements",
+        template: "announcement",
+      },
+      channels: ["in_app", "email"],
+    });
+  } catch (err) {
+    if (err instanceof AudienceLimitError) return;
+    throw err;
+  }
 }

@@ -24,6 +24,7 @@ import { enqueue } from "./jobs/queue.js";
 import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
 import { notify } from "./notify/dispatcher.js";
+import { BOARD_CATEGORY } from "./notify/types.js";
 
 /**
  * Reminders (Wave 9 B12). The recurring registry job `reminder-sweep` (every 15 min, see `registerAllJobs`) decides WHAT is
@@ -418,7 +419,8 @@ export async function handleReminder(job: JobContext): Promise<void> {
       // The date makes a legitimately repeating reminder (overdue steps, daily digests) a new delivery, a re-run the same one.
       refId: `${p.refId}#${p.date ?? ""}`,
       audience: p.audience,
-      content: { title: p.title, body: p.body, template: "reminder", category: "reminders" },
+      // The age-transition summary is a leadership digest: its own switchable category, not tied to personal reminders.
+      content: { title: p.title, body: p.body, template: "reminder", category: p.kind === "age_transition" ? BOARD_CATEGORY : "reminders" },
       channels: PUSH_REMINDER_KINDS.includes(p.kind) ? ["in_app", "email", "push"] : ["in_app", "email"],
     });
   } catch (err) {

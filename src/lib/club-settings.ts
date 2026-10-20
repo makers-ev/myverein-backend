@@ -34,6 +34,8 @@ export interface EffectiveClubSettings {
   notifyBoardRequests: boolean;
   /** Tell people when they are invited to a meeting or a Terminfindung (optional message, category events). */
   notifyMeetingInvites: boolean;
+  /** Tell a member (and the guardians) when the age transition moved them to another category (optional message, category announcements). */
+  notifyAgeTransition: boolean;
   /** Tell the borrower / key holder when a loan or key is handed out, returned or a loan extended (optional message). */
   notifyHandover: boolean;
 }
@@ -68,6 +70,7 @@ export async function loadClubSettings(executor: DbExecutor, clubId: string): Pr
     ageTransitionAuto: row?.ageTransitionAuto ?? false,
     notifyBoardRequests: row?.notifyBoardRequests ?? true,
     notifyMeetingInvites: row?.notifyMeetingInvites ?? true,
+    notifyAgeTransition: row?.notifyAgeTransition ?? true,
     notifyHandover: row?.notifyHandover ?? true,
   };
 }
