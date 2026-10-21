@@ -86,6 +86,9 @@ export const clubMembers = pgTable(
     // Art. 14 GDPR: when and which version of the privacy notice was handed to a member who has no account.
     privacyNoticeSentAt: timestamp("privacy_notice_sent_at", { withTimezone: true }),
     privacyNoticeVersionId: uuid("privacy_notice_version_id").references(() => clubPrivacyNotices.id, { onDelete: "set null" }),
+    // Legal hold (Wave 10 B8): while set, erasure and anonymisation of this member are refused (409). Not shown to the member.
+    legalHoldAt: timestamp("legal_hold_at", { withTimezone: true }),
+    legalHoldReason: text("legal_hold_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

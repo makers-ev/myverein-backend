@@ -21,6 +21,9 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from ".
 import { levelAllows, levelsOf } from "../lib/field-visibility.js";
 import { activeWardLinks, requireWard, type WardLink } from "../lib/guardian-scope.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
+import { openRequest } from "../lib/privacy/requests.js";
+import { respondWithExport } from "../lib/privacy/respond.js";
+import { dbRateLimit, envInt, HOUR_MS } from "../lib/rate-limits.js";
 import { confirmedAccountSeats, confirmedWardSeats, promoteWaitingWard, wardCalendarIds } from "../lib/ward-events.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -230,6 +233,20 @@ guardianRoutes.get("/wards/:wardId/consents", async (c) => {
   const consents = await memberConsentViews(ward.clubId, ward.id);
   // Granting and revoking: POST / DELETE /club-members/:wardId/consents/:purposeId (same service, same rules).
   return c.json({ data: { clubMemberId: ward.id, canConsent: link.canConsent, consents, open: consents.filter((v) => v.open).length } });
+});
+
+/** Art. 15 for the child: the guardian receives the data export of the ward (same document as the board's). */
+guardianRoutes.get("/wards/:wardId/data-export", dbRateLimit({ bucket: "data-export.user", windowMs: HOUR_MS, max: () => envInt("DATA_EXPORT_PER_HOUR", 5), subject: (c) => c.get("user").id, message: "Too many exports, try again later" }), async (c) => {
+  const { ward } = await wardOf(c);
+  const format = c.req.query("format") === "html" ? "html" : "json";
+  return respondWithExport(c, { clubId: ward.clubId, clubMemberId: ward.id, format, via: "guardian", userId: c.get("user").id, closeAccessRequests: true });
+});
+
+/** The guardian asks for the child's data to be erased: a request with a deadline for the board. */
+guardianRoutes.post("/wards/:wardId/erasure-request", async (c) => {
+  const { ward } = await wardOf(c);
+  const { row, created } = await db.transaction((tx) => openRequest(tx, { clubId: ward.clubId, clubMemberId: ward.id, kind: "erasure", requestedByUserId: c.get("user").id }));
+  return c.json({ data: { id: row.id, kind: row.kind, status: row.status, receivedAt: row.receivedAt, dueAt: row.dueAt } }, created ? 201 : 200);
 });
 
 guardianRoutes.get("/wards/:wardId/absences", async (c) => {

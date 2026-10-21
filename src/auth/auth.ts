@@ -140,6 +140,21 @@ export const auth = betterAuth({
   user: {
     deleteUser: {
       enabled: true,
+      // Wave 10 B8: deleting the account runs the same erasure process as the board's (anonymise the club records instead of
+      // letting the FK cascades wipe attendance and role history). Blockers (sole owner, board role, open loans, legal hold,
+      // pending exit) stop the deletion before anything changes. Dynamic import: the erasure code imports modules that import this file.
+      beforeDelete: async (deleting) => {
+        const { eraseAccountMemberships } = await import("../lib/privacy/erasure.js");
+        try {
+          await eraseAccountMemberships(deleting.id);
+        } catch (err) {
+          const details = (err as { details?: { code?: string } }).details;
+          if (err instanceof ConflictError && details?.code) {
+            throw new APIError("BAD_REQUEST", { message: err.message, code: `ERASURE_${details.code.toUpperCase()}` });
+          }
+          throw err;
+        }
+      },
     },
   },
   plugins: [

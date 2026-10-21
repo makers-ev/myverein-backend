@@ -56,7 +56,10 @@ export const meetingInvitees = pgTable(
   (table) => [uniqueIndex("meeting_invitees_meeting_member_uidx").on(table.meetingId, table.memberId)],
 );
 
-/** Actual attendance and voting eligibility recorded for a meeting. */
+/**
+ * Actual attendance and voting eligibility recorded for a meeting. Kept for the minutes when the person is erased
+ * (Wave 10 B8): `member_id` becomes NULL (pseudonymised), present / voting right stay so quorum and votes remain verifiable.
+ */
 export const meetingAttendance = pgTable(
   "meeting_attendance",
   {
@@ -64,9 +67,7 @@ export const meetingAttendance = pgTable(
     meetingId: uuid("meeting_id")
       .notNull()
       .references(() => meetings.id, { onDelete: "cascade" }),
-    memberId: text("member_id")
-      .notNull()
-      .references(() => member.id, { onDelete: "cascade" }),
+    memberId: text("member_id").references(() => member.id, { onDelete: "set null" }),
     present: boolean("present").notNull().default(false),
     hasVotingRight: boolean("has_voting_right").notNull().default(true),
     proxyForMemberId: text("proxy_for_member_id").references(() => member.id, { onDelete: "set null" }),

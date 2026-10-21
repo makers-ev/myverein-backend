@@ -21,6 +21,7 @@ import { clubExitRequestRoutes } from "./club-exit-requests.js";
 import { clubAnnouncementRoutes, clubInboxRoutes } from "./club-announcements.js";
 import { notificationPreferenceRoutes, unsubscribeRoutes } from "./notification-preferences.js";
 import { absenceRoutes } from "./absences.js";
+import { dataSubjectRequestRoutes } from "./data-subject-requests.js";
 import { guardianRoutes, myWardsRoutes } from "./guardian.js";
 import { consentOverviewRoutes, consentPurposeRoutes } from "./consent-purposes.js";
 import { clubSettingsRoutes } from "./club-settings.js";
@@ -74,6 +75,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/consent-purposes", "consentPurposeRoutes", consentPurposeRoutes],
   ["/consents", "consentOverviewRoutes", consentOverviewRoutes],
   ["/absences", "absenceRoutes", absenceRoutes],
+  ["/data-subject-requests", "dataSubjectRequestRoutes", dataSubjectRequestRoutes],
   ["/my-wards", "myWardsRoutes", myWardsRoutes],
   ["/guardian", "guardianRoutes", guardianRoutes],
   ["/club-settings", "clubSettingsRoutes", clubSettingsRoutes],
@@ -172,6 +174,8 @@ const SELF_SERVICE: Record<string, string> = {
   "POST /guardian/wards/:wardId/absences": "guardian reports an absence for a ward (guardianScope + can_report_absence)",
   "PATCH /guardian/wards/:wardId/absences/:id": "guardian changes an absence of a ward (guardianScope + can_report_absence)",
   "DELETE /guardian/wards/:wardId/absences/:id": "guardian withdraws an absence of a ward (guardianScope + can_report_absence)",
+  "POST /club-members/me/erasure-request": "the member's own erasure request (a request with a deadline for the board; nothing is erased by it)",
+  "POST /guardian/wards/:wardId/erasure-request": "guardian files an erasure request for a ward (guardianScope: a ward that is not the caller's is 404)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
 };
 
@@ -209,6 +213,11 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /consent-purposes": { name: "Neuer Zweck" },
   "PATCH /consent-purposes/:id": { requested: true },
   "POST /consent-purposes/:id/texts": { body: "Ein Einwilligungstext von ausreichender Länge." },
+  "POST /club-members/:id/data-export": { identityChecked: true },
+  "POST /club-members/:id/erasure/execute": { planDigest: "a".repeat(64), confirm: true },
+  "PUT /club-members/:id/legal-hold": { active: false },
+  "POST /data-subject-requests": { clubMemberId: SOME_ID, kind: "access" },
+  "PATCH /data-subject-requests/:id": { status: "in_progress" },
   "POST /departments": { name: "Abteilung" },
   "PUT /club-info/:slug": { title: "Titel" },
   "POST /calendars": { name: "Kalender" },

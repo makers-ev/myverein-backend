@@ -46,6 +46,7 @@ import { buildCsv, importMaxBytes } from "../lib/member-csv.js";
 import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADERS, importFingerprint, importTokenDuplicates, importTokenId, verifyImportToken } from "../lib/member-import.js";
 import { nextMemberNumber } from "../lib/member-number.js";
 import { memberConsentRoutes } from "./member-consents.js";
+import { memberPrivacyRoutes } from "./member-privacy.js";
 import { memberVisibilityRoutes } from "./member-visibility.js";
 import { levelAllows, levelsOf, type FieldLevels } from "../lib/field-visibility.js";
 import { liveLinkOf } from "../lib/guardian-scope.js";
@@ -1969,5 +1970,6 @@ clubMemberRoutes.patch("/:id/guardians/:guardianMemberId", zValidator("json", gu
 
 // Consents of a member (Wave 10 B3): own file, mounted behind the session/club guards above.
 clubMemberRoutes.route("/:id/consents", memberConsentRoutes);
+clubMemberRoutes.route("/", memberPrivacyRoutes);
 // Which of phone / e-mail / address / photo trainers and members may see (Wave 10 B12).
 clubMemberRoutes.route("/:id/visibility", memberVisibilityRoutes);
