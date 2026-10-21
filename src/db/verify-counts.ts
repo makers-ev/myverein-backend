@@ -105,6 +105,15 @@ export async function collectReport(client: Pool): Promise<VerifyReport> {
     zero("location_key_holders.holder_without_any_history_entry", await scalar(ro, `SELECT count(*)::int AS n FROM "location_key_holders" h WHERE NOT EXISTS (SELECT 1 FROM "location_key_history" x WHERE x."location_id" = h."location_id" AND x."member_id" = h."member_id")`));
     zero("location_wifi_networks.open_with_password", await scalar(ro, `SELECT count(*)::int AS n FROM "location_wifi_networks" WHERE "security" = 'open' AND "password" <> ''`));
     zero("meetings.type_outside_controlled_values", await scalar(ro, `SELECT count(*)::int AS n FROM "meetings" WHERE "type" NOT IN ('vorstandssitzung','mitgliederversammlung','sonstige')`));
+
+    // Wave 10 (0043): privacy foundation.
+    if (await exists(ro, "consent_purposes")) {
+      zero("consent_purposes.clubs_missing_system_purposes", await scalar(ro, `SELECT count(*)::int AS n FROM "organization" o WHERE (SELECT count(*) FROM "consent_purposes" p WHERE p."club_id" = o."id" AND p."system") < 5`));
+      zero("consent_purposes.active_without_published_text", await scalar(ro, `SELECT count(*)::int AS n FROM "consent_purposes" p WHERE p."active" AND NOT EXISTS (SELECT 1 FROM "consent_texts" t WHERE t."purpose_id" = p."id" AND t."published_at" IS NOT NULL)`));
+      zero("guardian_links.unconfirmed_legacy_links", await scalar(ro, `SELECT count(*)::int AS n FROM "guardian_links" WHERE "confirmed_at" IS NULL AND "created_at" < (SELECT coalesce(min("created_at"), now()) FROM "consent_purposes")`));
+      zero("audit_log.payload_club_id_not_copied", await scalar(ro, `SELECT count(*)::int AS n FROM "audit_log" WHERE "club_id" IS NULL AND jsonb_typeof("payload") = 'object' AND jsonb_typeof("payload"->'clubId') = 'string'`));
+      lines.push({ kind: "count", name: "audit_log.without_club_id", value: await scalar(ro, `SELECT count(*)::int AS n FROM "audit_log" WHERE "club_id" IS NULL`) });
+    }
   } finally {
     await conn.query("ROLLBACK").catch(() => undefined);
     conn.release();

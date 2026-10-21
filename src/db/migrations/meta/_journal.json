@@ -302,6 +302,13 @@
       "when": 1792484617007,
       "tag": "0042_preferences-per-club",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1792581170067,
+      "tag": "0043_privacy-consent-foundation",
+      "breakpoints": true
     }
   ]
 }

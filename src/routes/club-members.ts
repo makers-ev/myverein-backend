@@ -1816,7 +1816,7 @@ clubMemberRoutes.post("/:id/guardians", zValidator("json", guardianLinkSchema, v
 
   let created;
   try {
-    [created] = await db.insert(guardianLinks).values({ guardianMemberId: guardianAccountId, wardClubMemberId: ward.id }).returning();
+    [created] = await db.insert(guardianLinks).values({ guardianMemberId: guardianAccountId, wardClubMemberId: ward.id, confirmedAt: new Date(), confirmedBy: c.get("membership").id }).returning();
   } catch (err) {
     if (isUniqueViolation(err)) throw new ConflictError("Guardian link already exists");
     throw err;

@@ -168,7 +168,7 @@ export async function linkGuardian(tx: DbExecutor, input: { clubId: string; guar
   if (guardian.account.role === "guest") {
     await tx.insert(clubRoles).values({ memberId: guardian.account.id, roleType: "erziehungsberechtigt" }).onConflictDoNothing();
   }
-  const inserted = await tx.insert(guardianLinks).values({ guardianMemberId: guardian.account.id, wardClubMemberId: childClubMemberId }).onConflictDoNothing().returning({ id: guardianLinks.id });
+  const inserted = await tx.insert(guardianLinks).values({ guardianMemberId: guardian.account.id, wardClubMemberId: childClubMemberId, confirmedAt: new Date(), confirmedBy: decidedBy }).onConflictDoNothing().returning({ id: guardianLinks.id });
   if (inserted.length > 0) {
     await tx.insert(auditLog).values({ eventType: "guardian_link.create", subjectId: childClubMemberId, payload: { clubId, guardianMemberId: guardian.account.id, via: "application", decidedBy } });
   }

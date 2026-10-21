@@ -9,6 +9,7 @@ import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plu
 import { organization as organizationTable, user as userTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { ensureConsentPurposes } from "../lib/consent-purposes.js";
 import { assertRejoinAllowed, ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
 import { recordKeyReturnsForRemovedAccount } from "../lib/key-returns.js";
 import { ConflictError } from "../lib/errors.js";
@@ -166,6 +167,15 @@ export const auth = betterAuth({
       // registration would be left with club_id NULL. (Deleting is a platform/DB operation.)
       disableOrganizationDeletion: true,
       organizationHooks: {
+        // Wave 10: every new club gets its (inactive) system consent purposes. A failure is logged, not thrown; the
+        // consent routes call ensureConsentPurposes again and repair it.
+        afterCreateOrganization: async ({ organization: created }) => {
+          try {
+            await ensureConsentPurposes(created.id);
+          } catch (err) {
+            logger.error({ err, clubId: created.id }, "[auth] could not seed consent purposes for new club");
+          }
+        },
         // ADR-003: every account member (founder via createOrganization, addMember, accepted invitation) gets its
         // club_members row, so no join path can slip past. A failure is logged, not thrown: the account membership
         // already exists at this point and the explicit join flows (application approval, club approval, seed) as well

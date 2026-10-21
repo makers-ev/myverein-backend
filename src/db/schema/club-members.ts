@@ -3,6 +3,7 @@ import { boolean, date, index, integer, pgTable, text, timestamp, uniqueIndex, u
 
 import { member, organization } from "../../auth/auth-schema.js";
 import { departments } from "./departments.js";
+import { clubPrivacyNotices } from "./club-privacy-notices.js";
 import { mediaFiles } from "./media-files.js";
 
 /** Allowed values of `club_members.status` (free text in the DB, validated with Zod in the routes). */
@@ -82,6 +83,9 @@ export const clubMembers = pgTable(
     accountUnlinkedAt: timestamp("account_unlinked_at", { withTimezone: true }),
     // Profile photo: storage key of a `media_files` row (never a URL; B13). NULL = no photo.
     photoKey: text("photo_key").references(() => mediaFiles.storageKey, { onDelete: "set null" }),
+    // Art. 14 GDPR: when and which version of the privacy notice was handed to a member who has no account.
+    privacyNoticeSentAt: timestamp("privacy_notice_sent_at", { withTimezone: true }),
+    privacyNoticeVersionId: uuid("privacy_notice_version_id").references(() => clubPrivacyNotices.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

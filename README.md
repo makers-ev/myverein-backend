@@ -141,7 +141,8 @@ src/
 ├── auth/             # Better Auth instance, generated schema, RBAC statements
 ├── db/                # Drizzle client, migrations, app-owned schema (club_members, member_categories, club_member_departments,
 │                       #   club_member_status_history, club_member_invites, club_settings, club_exit_requests, club_memberships [deprecated, read-only], departments,
-│                       #   club_roles, guardian_links, club_info_pages, club_applications, audit_log, calendars,
+│                       #   club_roles, guardian_links, club_info_pages, club_applications, audit_log, consent_*, absence_reports,
+│                       #   ward_event_responses, data_subject_requests, retention_*, dpa_*, club_privacy_notices, member_field_visibility, calendars,
 │                       #   calendar_visibility, events, event_attendees, availability_slots,
 │                       #   availability_exceptions, meetings, meeting_invitees, meeting_attendance,
 │                       #   meeting_resolutions, club_registrations, club_registration_documents, media_files,
@@ -391,6 +392,14 @@ erDiagram
         uuid id PK
         text guardian_member_id FK "member.id (account required)"
         uuid ward_club_member_id FK "club_members.id (account optional)"
+        text relationship "Wave 10"
+        boolean has_custody "default true"
+        boolean can_consent "default true"
+        boolean can_report_absence "default true"
+        date valid_from "checked at read time"
+        date valid_until "null = open"
+        timestamptz confirmed_at "null = not confirmed, grants nothing"
+        text confirmed_by FK "member.id"
     }
     club_info_pages {
         uuid id PK
@@ -404,7 +413,10 @@ erDiagram
         uuid id PK
         text event_type
         text subject_id
-        jsonb payload
+        text club_id "Wave 10, null = platform event; no FK"
+        text actor_user_id "null = system job; no FK"
+        text subject_member_id "club_members.id the event is about; no FK"
+        jsonb payload "whitelisted per event type (lib/audit.ts)"
     }
     calendars {
         uuid id PK
@@ -1019,7 +1031,7 @@ Recipients of exit messages are resolved explicitly (the audience resolver skips
 
 Tests: `registration-mail-snapshot.test.ts`, the decision assertions in `club-applications.test.ts`, `club-exit-requests.test.ts`, `club-member-invites.test.ts` and `club-registrations.test.ts`.
 
-### Migrations 0014-0034 (Wave 7, Wave 8, Wave 9)
+### Migrations 0014-0043 (Wave 7, Wave 8, Wave 9, Wave 10)
 
 Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runtime` (Docker boot) or `npm run db:migrate`.
 
@@ -1054,6 +1066,7 @@ Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runti
 | `0040_registration-dedupe` | Additive: `notification.dedupe_key` + unique index `notification_target_dedupe_uidx`; `message_deliveries_address_event_uidx` (event key, ref, channel, address) for deliveries to bare addresses, restricted to `ref_id LIKE '%#%'`; as insurance (like 0035) a pre-dedupe `UPDATE` first gives later repeats of an existing key a unique `#dup-<id>` suffix, so the index build cannot fail on pre-existing data. No backfill |
 | `0041_notify-age-transition` | Additive: `club_settings.notify_age_transition` (boolean, default `true`); no backfill |
 | `0042_preferences-per-club` | G12: `notification_preferences.club_id` (nullable, existing rows stay global defaults) with the two global unique indexes re-created for `club_id IS NULL` and two new ones per club; `club_settings.mail_language` (text, default `de`). No data is touched; tested in `src/db/migration-communication-gaps.test.ts` |
+| `0043_privacy-consent-foundation` | Wave 10 B1, additive. New tables `consent_purposes` (per club, `system`, `requested` = asked at joining / reminders, **never** a condition; `active` stays false until a text is published), `consent_texts` (versioned, SHA-256, immutable once `published_at` is set), `consent_records` (append-only events `granted`/`revoked`, `given_by` self/guardian/board_paper, paper proof needs `proof_date` + `proof_source`), `absence_reports` (kind, period, short note, **no diagnosis field**), `ward_event_responses`, `data_subject_requests` (deadline `due_at`), `retention_policies` / `retention_runs` (counters only), `dpa_versions` / `dpa_acceptances`, `club_privacy_notices`, `member_field_visibility`. Extended: `guardian_links` (`relationship`, `has_custody`, `can_consent`, `can_report_absence`, `valid_from`, `valid_until`, `confirmed_at/by`; existing links backfilled `valid_from = created_at::date`, confirmed), `audit_log` (`club_id`, `actor_user_id`, `subject_member_id` + indexes, backfilled from `payload->>'clubId'` / `clubMemberId`, `session.create` actor = subject), `club_settings` (`consent_age_limit` default 18, `consent_both_guardians`, `privacy_contact`, `privacy_controller`), `club_members` (`privacy_notice_sent_at`, `privacy_notice_version_id`, Art. 14), `club_applications` (`privacy_notice_version_id`, `privacy_notice_acknowledged_at`). Seeds the five system purposes (`foto_video`, `veroeffentlichung`, `messenger_verteiler`, `verbandsweitergabe`, `profilfoto_ausweis`) for every existing club (`ON CONFLICT DO NOTHING`, idempotent); new clubs get them from the `afterCreateOrganization` hook (`lib/consent-purposes.ts`). Test: `migration-privacy-foundation.test.ts`; `db:verify-counts` checks the seed and the audit backfill. |
 
 #### Verifying the Wave 7 migrations (B12)
 

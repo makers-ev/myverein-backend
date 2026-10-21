@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 
 import * as authSchema from "../auth/auth-schema.js";
 import { logger } from "../lib/logger.js";
+import * as absencesSchema from "./schema/absences.js";
 import * as auditLogSchema from "./schema/audit-log.js";
 import * as availabilitySchema from "./schema/availability.js";
 import * as calendarVisibilitySchema from "./schema/calendar-visibility.js";
@@ -13,6 +14,8 @@ import * as jobsSchema from "./schema/jobs.js";
 import * as rateLimitsSchema from "./schema/rate-limits.js";
 import * as clubApplicationsSchema from "./schema/club-applications.js";
 import * as clubInfoPagesSchema from "./schema/club-info-pages.js";
+import * as clubPrivacyNoticesSchema from "./schema/club-privacy-notices.js";
+import * as privacySchema from "./schema/privacy.js";
 import * as clubRegistrationsSchema from "./schema/club-registrations.js";
 import * as clubExitRequestsSchema from "./schema/club-exit-requests.js";
 import * as clubMemberInvitesSchema from "./schema/club-member-invites.js";
@@ -90,6 +93,9 @@ export const schema = {
   ...jobsSchema,
   ...rateLimitsSchema,
   ...communicationSchema,
+  ...absencesSchema,
+  ...clubPrivacyNoticesSchema,
+  ...privacySchema,
 };
 
 export const db = drizzle(pool, { schema });
