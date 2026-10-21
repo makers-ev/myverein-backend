@@ -15,6 +15,7 @@ import { adminClubRegistrationRoutes } from "./routes/admin-club-registrations.j
 import { adminNotificationRoutes } from "./routes/admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./routes/admin-notification-templates.js";
 import { adminClubRoutes } from "./routes/admin-clubs.js";
+import { adminUserRoutes } from "./routes/admin-users.js";
 import { adminJobRoutes } from "./routes/admin-jobs.js";
 import { adminDpaAcceptanceRoutes, adminDpaVersionRoutes } from "./routes/admin-dpa.js";
 import { dpaRoutes } from "./routes/dpa.js";
@@ -105,6 +106,7 @@ app.route("/internal", internalStatsRoutes);
 app.route("/admin", adminStatsRoutes);
 app.route("/admin", adminEmailRoutes);
 app.route("/admin", adminClubRoutes);
+app.route("/admin", adminUserRoutes);
 app.route("/notifications", notificationRoutes);
 app.route("/admin/jobs", adminJobRoutes);
 app.route("/admin/retention-runs", adminRetentionRoutes);

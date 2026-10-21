@@ -25,6 +25,7 @@ export const AUDIT_EVENTS = {
   "absence.update": spec(["absenceId", "changedFields", "clubId", "clubMemberId"], "clubMemberId"),
   "absence.withdraw": spec(["absenceId", "clubId", "clubMemberId"], "clubMemberId"),
   "admin.job_retry": spec(["actor", "type"]),
+  "admin.user_remove": spec(["userId"]),
   "audit_log.export": spec(["clubId", "filters", "rows"]),
   "calendar.create": spec(["calendarId", "clubId"]),
   "calendar.default_create": spec(["calendarId", "clubId", "promoted", "source"]),

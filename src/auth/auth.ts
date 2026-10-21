@@ -136,6 +136,9 @@ export const auth = betterAuth({
     window: 60,
     max: 20,
   },
+  // The admin plugin's remove-user would delete the account without the erasure process (blockers, anonymisation):
+  // platform admins use DELETE /admin/users/:id, which runs it first (routes/admin-users.ts).
+  disabledPaths: ["/admin/remove-user"],
   // Off by default in Better Auth -- without this, /delete-user 404s.
   user: {
     deleteUser: {
