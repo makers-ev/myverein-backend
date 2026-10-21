@@ -142,6 +142,10 @@ describe("exit workflow (B6)", () => {
         notifyAgeTransition: true,
         notifyHandover: true,
         mailLanguage: "de",
+        consentAgeLimit: 18,
+        consentBothGuardians: false,
+        privacyContact: null,
+        privacyController: null,
         // mail template fields are only visible with announcements:write (B15)
         senderName: null,
         signature: null,

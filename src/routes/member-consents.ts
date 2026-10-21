@@ -53,7 +53,7 @@ memberConsentRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
   const ward = await clubMemberOf(clubId, c.req.param("id")!);
   const rel = await relationOf(c, ward);
-  if (!rel.isSelf && rel.link === null && !rel.canRead && !rel.canManage) throw new ForbiddenError("Not allowed to see the consents of this member");
+  if (!rel.isSelf && rel.link === null && !rel.canRead && !rel.canManage) throw new NotFoundError("Member not found"); // same answer as for an unknown id: no existence oracle
 
   const views = await memberConsentViews(clubId, ward.id);
   const events = await db

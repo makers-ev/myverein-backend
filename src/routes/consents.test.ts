@@ -297,15 +297,20 @@ describe("consents (B3)", () => {
       expect((await grant(stranger, childId, purposeFoto, textFoto)).status).toBe(403);
       expect((await revoke(stranger, childId, purposeFoto)).status).toBe(403);
       expect((await grant(adult, stranger.clubMemberId, purposeFoto, textFoto)).status).toBe(403);
-      expect((await call(stranger, `/club-members/${childId}/consents`)).status).toBe(403);
-      expect((await call(stranger, `/club-members/${adult.clubMemberId}/consents`)).status).toBe(403);
+      // Reading: a forbidden existing member answers exactly like an unknown id (no existence oracle).
+      const forbidden = await call(stranger, `/club-members/${childId}/consents`);
+      const unknown = await call(stranger, `/club-members/${randomUUID()}/consents`);
+      expect(forbidden.status).toBe(404);
+      expect(unknown.status).toBe(404);
+      expect(await forbidden.json()).toEqual(await unknown.json());
+      expect((await call(stranger, `/club-members/${adult.clubMemberId}/consents`)).status).toBe(404);
       expect((await grant(adult, randomUUID(), purposeFoto, textFoto)).status).toBe(404);
     });
 
     it("a guardian link that expired (valid_until) or is unconfirmed grants nothing, without any job running", async () => {
       await db.update(guardianLinks).set({ validUntil: "2020-01-01" }).where(eq(guardianLinks.guardianMemberId, guardian.memberId));
       expect((await grant(guardian, childId, purposeFoto, textFoto)).status).toBe(403);
-      expect((await call(guardian, `/club-members/${childId}/consents`)).status).toBe(403);
+      expect((await call(guardian, `/club-members/${childId}/consents`)).status).toBe(404);
       await db.update(guardianLinks).set({ validUntil: null, confirmedAt: null }).where(eq(guardianLinks.guardianMemberId, guardian.memberId));
       expect((await grant(guardian, childId, purposeFoto, textFoto)).status).toBe(403);
       await db.update(guardianLinks).set({ confirmedAt: new Date() }).where(eq(guardianLinks.guardianMemberId, guardian.memberId));
