@@ -21,6 +21,7 @@ import { clubExitRequestRoutes } from "./club-exit-requests.js";
 import { clubAnnouncementRoutes, clubInboxRoutes } from "./club-announcements.js";
 import { notificationPreferenceRoutes, unsubscribeRoutes } from "./notification-preferences.js";
 import { clubSettingsRoutes } from "./club-settings.js";
+import { auditLogRoutes } from "./audit-log.js";
 import { adminEmailRoutes } from "./admin-emails.js";
 import { adminNotificationRoutes } from "./admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./admin-notification-templates.js";
@@ -68,6 +69,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/admin", "adminClubRoutes", adminClubRoutes],
   ["/club-stats", "clubStatsRoutes", clubStatsRoutes],
   ["/club-settings", "clubSettingsRoutes", clubSettingsRoutes],
+  ["/audit-log", "auditLogRoutes", auditLogRoutes],
   ["/club-exit-requests", "clubExitRequestRoutes", clubExitRequestRoutes],
   ["/club-announcements", "clubAnnouncementRoutes", clubAnnouncementRoutes],
   ["/club-inbox", "clubInboxRoutes", clubInboxRoutes],
@@ -354,6 +356,18 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     expect((await req(`/club-applications/${appId}`, cookieFounder)).status).toBe(404);
   });
 
+  it("keeps the audit log behind privacy:read (board allowed; mitglied and guest denied on every route)", async () => {
+    const someMember = "00000000-0000-4000-8000-0000000000bb";
+    for (const cookie of [cookiePlain, cookieGuest]) {
+      for (const path of ["/audit-log", "/audit-log/export", "/audit-log/export.csv", `/audit-log/members/${someMember}`]) {
+        const res = await req(path, cookie);
+        expect(res.status, `${path} -> ${res.status}`).toBe(403);
+      }
+    }
+    expect((await req("/audit-log", cookieFounder)).status).toBe(200);
+    expect((await req(`/audit-log/members/${someMember}`, cookieFounder)).status).toBe(404);
+  });
+
   it("keeps the form builder behind forms:write (board allowed, mitglied and guest denied, reads included)", async () => {
     expect((await req("/forms", cookieFounder)).status).toBe(200);
     for (const cookie of [cookiePlain, cookieGuest]) {
@@ -401,6 +415,15 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
       for (const role of ["mitglied", "kassenwart", "beisitzer", "abteilungsleitung", "trainer", "erziehungsberechtigt"]) expect(clubPermissionsFor([role])).not.toContain("announcements:write");
       for (const role of ["abteilungsleitung", "trainer"]) expect(clubPermissionsFor([role])).toContain("announcements:write_department");
       for (const role of ["mitglied", "vorsitz", "kassenwart", "beisitzer", "erziehungsberechtigt"]) expect(clubPermissionsFor([role])).not.toContain("announcements:write_department");
+    });
+
+    it("grants the Wave 10 privacy permissions deny-by-default (B2)", () => {
+      for (const role of ["vorsitz", "stellv_vorsitz"]) expect(clubPermissionsFor([role])).toEqual(expect.arrayContaining(["privacy:read", "privacy:manage", "absences:read"]));
+      for (const role of ["mitglied", "schriftfuehrer", "kassenwart", "beisitzer", "erziehungsberechtigt"]) expect(clubPermissionsFor([role])).not.toEqual(expect.arrayContaining(["privacy:read"]));
+      for (const role of ["abteilungsleitung", "trainer"]) {
+        expect(clubPermissionsFor([role])).toContain("absences:read");
+        expect(clubPermissionsFor([role])).not.toContain("privacy:read");
+      }
     });
 
     it("cannot be assigned (422) or revoked (409) and is listed as implicit, not as a deletable row", async () => {

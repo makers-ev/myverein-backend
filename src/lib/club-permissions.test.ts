@@ -80,6 +80,25 @@ describe("announcements permissions (Wave 9 B7)", () => {
   it("announcements:write_department is held by abteilungsleitung and trainer only (scope comes from club_roles.department_id)", () => {
     for (const role of ["abteilungsleitung", "trainer"]) expect(hasClubPermission([role], "announcements:write_department")).toBe(true);
     for (const role of ["mitglied", "vorsitz", "kassenwart", "beisitzer", "erziehungsberechtigt"]) expect(hasClubPermission([role], "announcements:write_department")).toBe(false);
-    expect(clubPermissionsFor(["trainer"])).toEqual(["announcements:write_department"]);
+    expect(clubPermissionsFor(["trainer"]).sort()).toEqual(["absences:read", "announcements:write_department"]);
+  });
+});
+
+describe("privacy permissions (Wave 10 B2)", () => {
+  it("privacy:read and privacy:manage are held by vorsitz and stellv_vorsitz only", () => {
+    for (const permission of ["privacy:read", "privacy:manage"] as const) {
+      for (const role of ["vorsitz", "stellv_vorsitz"]) expect(hasClubPermission([role], permission)).toBe(true);
+      for (const role of CLUB_ROLE_TYPES.filter((r) => !["vorsitz", "stellv_vorsitz"].includes(r))) expect(hasClubPermission([role], permission)).toBe(false);
+      expect(hasClubPermission([], permission)).toBe(false);
+    }
+  });
+
+  it("absences:read goes to the board chairs and to trainer/abteilungsleitung (scope = own departments, checked in the route)", () => {
+    for (const role of ["vorsitz", "stellv_vorsitz", "abteilungsleitung", "trainer"]) expect(hasClubPermission([role], "absences:read")).toBe(true);
+    for (const role of ["mitglied", "schriftfuehrer", "kassenwart", "beisitzer", "erziehungsberechtigt"]) expect(hasClubPermission([role], "absences:read")).toBe(false);
+  });
+
+  it("a guardian gets no permission at all", () => {
+    expect(clubPermissionsFor(["erziehungsberechtigt"])).toEqual([]);
   });
 });
