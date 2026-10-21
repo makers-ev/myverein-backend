@@ -160,6 +160,8 @@ export const retentionRuns = pgTable(
     clubId: text("club_id").references(() => organization.id, { onDelete: "cascade" }),
     category: text("category").notNull(),
     dryRun: boolean("dry_run").notNull().default(true),
+    // The announcement run before the first real deletion of a club category (`affected` = how many items it will concern).
+    notice: boolean("notice").notNull().default(false),
     scanned: integer("scanned").notNull().default(0),
     affected: integer("affected").notNull().default(0),
     errors: integer("errors").notNull().default(0),

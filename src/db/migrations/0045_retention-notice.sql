@@ -1,0 +1,1 @@
+ALTER TABLE "retention_runs" ADD COLUMN "notice" boolean DEFAULT false NOT NULL;

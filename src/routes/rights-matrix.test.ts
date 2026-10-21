@@ -30,6 +30,8 @@ import { adminEmailRoutes } from "./admin-emails.js";
 import { adminNotificationRoutes } from "./admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./admin-notification-templates.js";
 import { adminJobRoutes } from "./admin-jobs.js";
+import { adminRetentionRoutes } from "./admin-retention.js";
+import { retentionPolicyRoutes } from "./retention-policies.js";
 import { adminStatsRoutes } from "./admin-stats.js";
 import { availabilityRoutes } from "./availability.js";
 import { calendarRoutes } from "./calendars.js";
@@ -88,6 +90,8 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/push-tokens", "pushTokenRoutes", pushTokenRoutes],
   ["/notifications", "notificationRoutes", notificationRoutes],
   ["/admin/jobs", "adminJobRoutes", adminJobRoutes],
+  ["/admin/retention-runs", "adminRetentionRoutes", adminRetentionRoutes],
+  ["/retention-policies", "retentionPolicyRoutes", retentionPolicyRoutes],
   ["/admin/notifications", "adminNotificationRoutes", adminNotificationRoutes],
   ["/admin/notification-templates", "adminNotificationTemplateRoutes", adminNotificationTemplateRoutes],
   ["/admin/club-registrations", "adminClubRegistrationRoutes", adminClubRegistrationRoutes],
@@ -218,6 +222,7 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "PUT /club-members/:id/legal-hold": { active: false },
   "POST /data-subject-requests": { clubMemberId: SOME_ID, kind: "access" },
   "PATCH /data-subject-requests/:id": { status: "in_progress" },
+  "PUT /retention-policies/:category": { retainDays: 100 },
   "POST /departments": { name: "Abteilung" },
   "PUT /club-info/:slug": { title: "Titel" },
   "POST /calendars": { name: "Kalender" },

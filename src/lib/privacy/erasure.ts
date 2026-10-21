@@ -130,7 +130,7 @@ export interface ExecuteInput {
   clubId: string;
   clubMemberId: string;
   actorUserId: string | null;
-  via: "board" | "account_deletion";
+  via: "board" | "account_deletion" | "retention";
   /** Required for the board path: the digest of the plan the board confirmed. */
   planDigest?: string;
 }

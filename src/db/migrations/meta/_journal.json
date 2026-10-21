@@ -316,6 +316,13 @@
       "when": 1792584430242,
       "tag": "0044_privacy-erasure",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1792585376631,
+      "tag": "0045_retention-notice",
+      "breakpoints": true
     }
   ]
 }

@@ -168,6 +168,8 @@ export const AUDIT_EVENTS = {
   "profile_module.deactivate": spec(["by", "clubId", "moduleId"]),
   "rate_limit.exceeded": spec(["limit", "rule", "windowSeconds"]),
   "ward_event_response.set": spec(["clubId", "eventId", "status", "wardClubMemberId"], "wardClubMemberId"),
+  "retention_policy.reset": spec(["category", "changedBy", "clubId"]),
+  "retention_policy.update": spec(["category", "changedBy", "clubId", "retainDays"]),
   "session.create": spec(["ipAddress", "sessionId", "userAgent"]),
 } as const satisfies Record<string, AuditEventSpec>;
 
