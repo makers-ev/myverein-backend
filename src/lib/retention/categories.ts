@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNotNull, lt, ne, notExists, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt, ne, notExists, sql } from "drizzle-orm";
 
 import { db } from "../../db/client.js";
 import { absenceReports } from "../../db/schema/absences.js";
@@ -36,6 +36,9 @@ export interface CategoryResult {
 
 const cutoffDate = (ctx: CategoryContext): string => todayBerlin(new Date(ctx.now.getTime() - ctx.days * 86_400_000));
 const cutoffTime = (ctx: CategoryContext): Date => new Date(ctx.now.getTime() - ctx.days * 86_400_000);
+
+/** A member under legal hold keeps everything: no retention category may touch their data. */
+const heldMember = (memberId: ReturnType<typeof sql>) => sql`EXISTS (SELECT 1 FROM club_members hm WHERE hm.id = ${memberId} AND hm.legal_hold_at IS NOT NULL)`;
 
 // --- registration proofs (platform) -------------------------------------------------------------------------------------------
 
@@ -109,6 +112,7 @@ export async function applicationsRejected(ctx: CategoryContext): Promise<Catego
   const due = and(
     eq(clubApplications.clubId, clubId),
     eq(formSubmissions.onBehalfOf, "self"),
+    sql`NOT ${heldMember(sql`${clubApplications.clubMemberId}`)} AND NOT ${heldMember(sql`${formSubmissions.subjectClubMemberId}`)}`,
     sql`(${clubApplications.status} = 'rejected' AND ${clubApplications.decidedAt} < ${cutoff}) OR (${formSubmissions.status} = 'withdrawn' AND ${formSubmissions.updatedAt} < ${cutoff})`,
   );
   const withAnswers = and(due, sql`${formSubmissions.answers} <> '{}'::jsonb`);
@@ -117,7 +121,7 @@ export async function applicationsRejected(ctx: CategoryContext): Promise<Catego
   const legacy = await db
     .select({ id: clubApplications.id })
     .from(clubApplications)
-    .where(and(eq(clubApplications.clubId, clubId), eq(clubApplications.status, "rejected"), lt(clubApplications.decidedAt, cutoff), notExists(db.select({ one: sql`1` }).from(formSubmissions).where(eq(formSubmissions.id, clubApplications.formSubmissionId))), isNotNull(clubApplications.birthDate)))
+    .where(and(eq(clubApplications.clubId, clubId), eq(clubApplications.status, "rejected"), lt(clubApplications.decidedAt, cutoff), sql`NOT ${heldMember(sql`${clubApplications.clubMemberId}`)}`, notExists(db.select({ one: sql`1` }).from(formSubmissions).where(eq(formSubmissions.id, clubApplications.formSubmissionId))), isNotNull(clubApplications.birthDate)))
     .limit(ctx.dryRun ? 100_000 : BATCH);
   if (ctx.dryRun) return { scanned: rows.length + legacy.length, affected: 0 };
   let affected = 0;
@@ -186,6 +190,7 @@ export async function emergencyContactsLeft(ctx: CategoryContext): Promise<Categ
   const where = and(
     eq(clubMembers.clubId, ctx.clubId!),
     isNotNull(clubMembers.leftAt),
+    isNull(clubMembers.legalHoldAt),
     lt(clubMembers.leftAt, cutoffDate(ctx)),
     sql`${clubMembers.status} IN ('ausgetreten', 'ausgeschlossen', 'verstorben')`,
     sql`(${clubMembers.emergencyContactName} IS NOT NULL OR ${clubMembers.emergencyContactPhone} IS NOT NULL)`,
@@ -201,7 +206,7 @@ export async function emergencyContactsLeft(ctx: CategoryContext): Promise<Categ
 
 /** Absence reports `days` after the absence ended. */
 export async function absenceReportsOld(ctx: CategoryContext): Promise<CategoryResult> {
-  const where = and(eq(absenceReports.clubId, ctx.clubId!), lt(absenceReports.endsOn, cutoffDate(ctx)));
+  const where = and(eq(absenceReports.clubId, ctx.clubId!), lt(absenceReports.endsOn, cutoffDate(ctx)), sql`NOT ${heldMember(sql`${absenceReports.clubMemberId}`)}`);
   if (ctx.dryRun) {
     const [row] = await db.select({ n: sql<number>`count(*)::int` }).from(absenceReports).where(where);
     return { scanned: row?.n ?? 0, affected: 0 };
@@ -221,6 +226,7 @@ export async function consentProofs(ctx: CategoryContext): Promise<CategoryResul
   const dueIds = sql`
     SELECT r.id FROM consent_records r
     WHERE r.club_id = ${ctx.clubId}
+      AND NOT ${heldMember(sql`r.club_member_id`)}
       AND (
         EXISTS (SELECT 1 FROM club_members m WHERE m.id = r.club_member_id AND m.left_at IS NOT NULL AND m.left_at < ${cutoffD})
         OR EXISTS (

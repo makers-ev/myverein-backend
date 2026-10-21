@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
 
 import { organization } from "../../auth/auth-schema.js";
 import { db } from "../../db/client.js";
@@ -6,7 +6,7 @@ import { retentionRuns } from "../../db/schema/privacy.js";
 import { roleTypesWithPermission } from "../club-permissions.js";
 import { clubMailLanguage } from "../club-settings.js";
 import { logger } from "../logger.js";
-import { notifySafely } from "../notify/dispatcher.js";
+import { notify } from "../notify/dispatcher.js";
 import { formatIsoDay, tr } from "../notify/i18n.js";
 import { BOARD_CATEGORY } from "../notify/types.js";
 import { todayBerlin } from "../member-lifecycle.js";
@@ -59,27 +59,33 @@ async function logRun(entry: { clubId: string | null; category: string; dryRun: 
   });
 }
 
-/** The state of the announcement for one club category. */
-async function noticeState(clubId: string, category: string, now: Date): Promise<"given" | "waiting" | "none"> {
-  const [given] = await db
-    .select({ id: retentionRuns.id })
+/**
+ * The announcement that currently allows deleting in one club category, and whether a newer one is still waiting. A notice
+ * covers the data that was due when it was given (the deletion is pinned to its `startedAt`); whatever becomes due later
+ * needs a fresh notice.
+ */
+async function noticeState(clubId: string, category: string, now: Date): Promise<{ effective: Date | null; newerWaiting: boolean }> {
+  const notices = await db
+    .select({ startedAt: retentionRuns.startedAt })
     .from(retentionRuns)
-    .where(and(eq(retentionRuns.clubId, clubId), eq(retentionRuns.category, category), eq(retentionRuns.notice, true), gt(retentionRuns.affected, 0), lte(retentionRuns.startedAt, new Date(now.getTime() - retentionNoticeDays() * 86_400_000))))
-    .limit(1);
-  if (given) return "given";
-  const [any] = await db.select({ id: retentionRuns.id }).from(retentionRuns).where(and(eq(retentionRuns.clubId, clubId), eq(retentionRuns.category, category), eq(retentionRuns.notice, true))).limit(1);
-  return any ? "waiting" : "none";
+    .where(and(eq(retentionRuns.clubId, clubId), eq(retentionRuns.category, category), eq(retentionRuns.notice, true), gt(retentionRuns.affected, 0)))
+    .orderBy(desc(retentionRuns.startedAt))
+    .limit(20);
+  const ripe = now.getTime() - retentionNoticeDays() * 86_400_000;
+  const effective = notices.find((n) => n.startedAt.getTime() <= ripe)?.startedAt ?? null;
+  return { effective, newerWaiting: notices.some((n) => effective === null || n.startedAt.getTime() > effective.getTime()) };
 }
 
 async function announce(clubId: string, items: Array<{ rule: RetentionRule; count: number }>, now: Date): Promise<void> {
   const lang = await clubMailLanguage(db, clubId);
   const from = todayBerlin(new Date(now.getTime() + retentionNoticeDays() * 86_400_000));
   const lines = items.map((i) => `- ${i.rule.label}: ${i.count}`).join("\n");
-  await notifySafely({
+  const sent = await notify({
     clubId,
     class: "optional",
     eventKey: "retention.notice",
-    refId: `${clubId}#${todayBerlin(now)}`,
+    // One announcement per run: a second cohort on the same day is a new notice, not a duplicate.
+    refId: `${clubId}#${now.toISOString()}`,
     audience: { roleTypes: roleTypesWithPermission("privacy:manage"), includeGuardians: false },
     content: {
       title: tr(lang, "Aufbewahrungsfristen: Daten werden bald gelöscht", "Retention periods: data will be deleted soon"),
@@ -94,6 +100,8 @@ async function announce(clubId: string, items: Array<{ rule: RetentionRule; coun
     },
     channels: ["in_app", "email"],
   });
+  // Nobody was told: deleting must not start (the next run tries again).
+  if (sent.recipients === 0) throw new Error("retention notice reached nobody");
 }
 
 export async function runRetentionRules(now: Date = new Date(), options: SweepOptions = {}): Promise<SweepSummary> {
@@ -128,23 +136,36 @@ export async function runRetentionRules(now: Date = new Date(), options: SweepOp
 
   const clubs = await db.select({ id: organization.id }).from(organization).where(options.clubId ? eq(organization.id, options.clubId) : sql`true`).orderBy(asc(organization.id));
   for (const club of clubs) {
-    const toAnnounce: Array<{ rule: RetentionRule; count: number }> = [];
+    const toAnnounce: Array<{ rule: RetentionRule; count: number; startedAt: Date }> = [];
     for (const { rule, effectiveDays } of await effectiveRules(club.id)) {
       if (rule.scope !== "club") continue;
       await attempt(rule, club.id, async () => {
-        const ctx = { clubId: club.id, days: effectiveDays, now };
-        if (globalDry) return { result: await rule.run({ ...ctx, dryRun: true }), dryRun: true };
+        const ctx = { clubId: club.id, days: effectiveDays };
+        if (globalDry) return { result: await rule.run({ ...ctx, now, dryRun: true }), dryRun: true };
+        const startedAt = new Date();
         const state = await noticeState(club.id, rule.category, now);
-        if (state === "given") return { result: await rule.run({ ...ctx, dryRun: false }), dryRun: false };
-        if (state === "waiting") return null;
-        // No announcement yet: count only, and tell the club when there is something to delete.
-        const counted = await rule.run({ ...ctx, dryRun: true });
-        if (counted.scanned === 0) return null;
-        toAnnounce.push({ rule, count: counted.scanned });
-        return { result: counted, dryRun: true, notice: true };
+        // Delete only what was due when the notice was given ...
+        const deleted = state.effective ? await rule.run({ ...ctx, now: state.effective, dryRun: false }) : null;
+        // ... and announce what became due since (a notice is written only after it was sent).
+        if (!state.newerWaiting) {
+          const counted = await rule.run({ ...ctx, now, dryRun: true });
+          const covered = state.effective ? await rule.run({ ...ctx, now: state.effective, dryRun: true }) : { scanned: 0, affected: 0 };
+          if (counted.scanned > covered.scanned) toAnnounce.push({ rule, count: counted.scanned, startedAt });
+        }
+        return deleted ? { result: deleted, dryRun: false } : null;
       });
     }
-    if (toAnnounce.length > 0) await announce(club.id, toAnnounce, now).catch((err) => logger.error({ errName: (err as Error)?.name, clubId: club.id }, "[retention] could not announce"));
+    if (toAnnounce.length > 0) {
+      try {
+        await announce(club.id, toAnnounce, now);
+        for (const n of toAnnounce) {
+          await logRun({ clubId: club.id, category: n.rule.category, dryRun: true, notice: true, result: { scanned: n.count, affected: 0 }, startedAt: n.startedAt });
+          summary.runs += 1;
+        }
+      } catch (err) {
+        logger.error({ errName: (err as Error)?.name, clubId: club.id }, "[retention] could not announce, trying again at the next run");
+      }
+    }
   }
 
   return summary;
