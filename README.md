@@ -744,7 +744,7 @@ A key the caller may not see is indistinguishable from one that does not exist (
 | `number` | finite number | `min`, `max` |
 | `date` | ISO `YYYY-MM-DD` (real calendar date) | `minDate`, `maxDate` |
 | `select` / `multiselect` | option value / unique list of values | `options` (max 50) **or** `optionsSource: "member_categories"` (the club's active category keys) |
-| `checkbox` / `consent` | boolean | `required` means "must be `true"` |
+| `checkbox` / `consent` | boolean | `required` means "must be `true`" for a `checkbox`; for a `consent` it is **ignored at submit validation** (Koppelungsverbot, Art. 7(4) GDPR; also for versions published earlier with `required`) |
 | `credential` | object `{ valid: true, level?, obtainedOn?, validUntil? }` — see [Credential type](#profile-modules-profil-bausteine-and-the-credential-type) | **Member custom fields only**: forms refuse it (`422 credential_not_supported` when saving/publishing); `options` = levels, or `validation.maxLength` = free-text level (not both) |
 | `file` / `image` | none in `answers` (uploads live in `form_submission_files`) | `required` is checked against `uploadedFieldKeys` |
 | `info` | none (display only; `infoKind: "privacy_notice"` renders the version's `privacy_notice`) | carries no `required`/mapping |

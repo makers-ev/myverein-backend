@@ -360,11 +360,13 @@ export function validateAnswers(fields: readonly FormField[], answers: unknown, 
       continue;
     }
 
+    // Koppelungsverbot (Art. 7(4) GDPR): a consent is never enforced, not even in a form version published with `required`.
+    const required = field.type === "consent" ? false : field.required;
     const raw = Object.hasOwn(answers, field.key) ? answers[field.key] : undefined;
     const optionValues = field.options ? field.options.map((o) => o.value) : field.optionsSource === "member_categories" ? [...(ctx.categoryKeys ?? [])] : [];
 
-    if (isEmpty(raw) || (raw === false && (field.type === "checkbox" || field.type === "consent") && !field.required)) {
-      if (ctx.mode === "submit" && field.required) errors[field.key] = "required";
+    if (isEmpty(raw) || (raw === false && (field.type === "checkbox" || field.type === "consent") && !required)) {
+      if (ctx.mode === "submit" && required) errors[field.key] = "required";
       continue;
     }
     const result = cleanValue(field, raw, optionValues);
@@ -372,7 +374,7 @@ export function validateAnswers(fields: readonly FormField[], answers: unknown, 
       errors[field.key] = result.error;
       continue;
     }
-    if ((field.type === "checkbox" || field.type === "consent") && field.required && result.value !== true) {
+    if ((field.type === "checkbox" || field.type === "consent") && required && result.value !== true) {
       if (ctx.mode === "submit") errors[field.key] = "required";
       continue;
     }

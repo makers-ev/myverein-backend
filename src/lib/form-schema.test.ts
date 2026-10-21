@@ -134,12 +134,13 @@ describe("validateAnswers", () => {
     expect(validateAnswers(fields, { first: "x".repeat(300) }, { mode: "draft" })).toMatchObject({ ok: false, errors: { first: "too_long" } });
   });
 
-  it("requires consent and required checkboxes to be true", () => {
-    const fields = defs([f({ key: "agree", type: "consent", label: "Ja", required: true }), f({ key: "opt", type: "checkbox" })]);
-    expect(validateAnswers(fields, { agree: false }, submit)).toEqual({ ok: false, errors: { agree: "required" } });
-    expect(validateAnswers(fields, {}, submit)).toEqual({ ok: false, errors: { agree: "required" } });
-    expect(validateAnswers(fields, { agree: true, opt: false }, submit)).toEqual({ ok: true, answers: { agree: true } });
-    expect(validateAnswers(fields, { agree: "true" }, submit)).toMatchObject({ ok: false, errors: { agree: "invalid_type" } });
+  it("never enforces a consent, even in a legacy version published with required (Koppelungsverbot)", () => {
+    const fields = defs([f({ key: "agree", type: "consent", label: "Ja", required: true }), f({ key: "opt", type: "checkbox", required: true })]);
+    expect(validateAnswers(fields, { agree: false, opt: true }, submit)).toEqual({ ok: true, answers: { opt: true } });
+    expect(validateAnswers(fields, { opt: true }, submit)).toEqual({ ok: true, answers: { opt: true } });
+    expect(validateAnswers(fields, { agree: true, opt: true }, submit)).toEqual({ ok: true, answers: { agree: true, opt: true } });
+    expect(validateAnswers(fields, { agree: false }, submit)).toEqual({ ok: false, errors: { opt: "required" } });
+    expect(validateAnswers(fields, { agree: "true", opt: true }, submit)).toMatchObject({ ok: false, errors: { agree: "invalid_type" } });
   });
 
   it("drops hidden fields and does not require them", () => {
