@@ -8,6 +8,7 @@ import { db } from "../db/client.js";
 import type { ClubMemberRow } from "../db/schema/club-members.js";
 import { consentPurposes, consentRecords, consentTexts, type ConsentGivenBy } from "../db/schema/privacy.js";
 import { afterConsentRevoked, clubMemberOf, consentAgeLimitOf, isUnderConsentAge, memberConsentViews, PROOF_SOURCE_MAX, recordConsent } from "../lib/consent.js";
+import { isUuid } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { liveLinkOf } from "../lib/guardian-scope.js";
@@ -99,7 +100,7 @@ async function decide(c: Ctx, action: "granted" | "revoked", body: z.infer<typeo
   const clubId = c.get("clubId");
   const ward = await clubMemberOf(clubId, c.req.param("id")!);
   const purposeId = c.req.param("purposeId")!;
-  const [purpose] = await db.select().from(consentPurposes).where(eq(consentPurposes.id, purposeId));
+  const [purpose] = isUuid(purposeId) ? await db.select().from(consentPurposes).where(eq(consentPurposes.id, purposeId)) : [];
   // A foreign club's purpose id answers like an unknown one.
   const own = purpose && purpose.clubId === clubId ? purpose : undefined;
   if (!own) {

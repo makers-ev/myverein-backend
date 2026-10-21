@@ -46,6 +46,9 @@ import { buildCsv, importMaxBytes } from "../lib/member-csv.js";
 import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADERS, importFingerprint, importTokenDuplicates, importTokenId, verifyImportToken } from "../lib/member-import.js";
 import { nextMemberNumber } from "../lib/member-number.js";
 import { memberConsentRoutes } from "./member-consents.js";
+import { memberVisibilityRoutes } from "./member-visibility.js";
+import { levelAllows, levelsOf, type FieldLevels } from "../lib/field-visibility.js";
+import { liveLinkOf } from "../lib/guardian-scope.js";
 import { memberCustomFieldRoutes } from "./club-member-custom-fields.js";
 import { applicationPendingError } from "../lib/form-applications.js";
 import type { FormField } from "../lib/form-schema.js";
@@ -105,7 +108,10 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: PhotoCaller, forc
       .orderBy(asc(departments.name), asc(clubMemberDepartments.since)),
   ]);
 
-  // Signed photo URLs, only for rows the caller may see a photo of (own / members:write / read_sensitive / guardian).
+  // Phone / e-mail / address the person opened for the caller's group (B12); default and fallback: nothing.
+  const shared = caller.viewer !== undefined && !caller.canReadSensitive && !forceSensitive ? await levelsOf(rows.filter((r) => r.memberId === null || r.memberId !== caller.memberId).map((r) => r.id)) : new Map<string, FieldLevels>();
+
+  // Signed photo URLs, only for rows the caller may see a photo of (own / members:write / read_sensitive / guardian / opened).
   const photoUrls = await memberPhotoUrls(rows[0]!.clubId, rows, caller, (row) => forceSensitive || (row.memberId !== null && row.memberId === caller.memberId));
 
   const accountById = new Map(accountRows.map((a) => [a.member.id, a]));
@@ -145,6 +151,13 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: PhotoCaller, forc
       roles: (account ? (rolesByMember.get(account.member.id) ?? []) : []).map((r) => ({ id: r.id, roleType: r.roleType, departmentId: r.departmentId, termEndsAt: r.termEndsAt })),
       departments: departmentsByMember.get(row.id) ?? [],
       photoUrl: photoUrls.get(row.id) ?? null,
+      ...(!sensitive && shared.has(row.id)
+        ? {
+            ...(levelAllows(shared.get(row.id)!.phone, caller.viewer) ? { phone: row.phone } : {}),
+            ...(levelAllows(shared.get(row.id)!.email, caller.viewer) ? { email: account?.email ?? null, contactEmail: row.contactEmail } : {}),
+            ...(levelAllows(shared.get(row.id)!.address, caller.viewer) ? { street: row.street, postalCode: row.postalCode, city: row.city } : {}),
+          }
+        : {}),
       ...(sensitive
         ? {
             email: account?.email ?? null,
@@ -189,11 +202,14 @@ async function auditSensitiveRead(c: Context<ClubEnv>, scope: "list" | "detail",
   });
 }
 
-function callerOf(c: { get(k: "membership"): { id: string }; get(k: "clubRoleTypes"): string[] }) {
+function callerOf(c: { get(k: "membership"): { id: string; role: string }; get(k: "clubRoleTypes"): string[] }) {
+  const roleTypes = c.get("clubRoleTypes");
   return {
     memberId: c.get("membership").id,
-    canReadSensitive: hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive"),
-    canWrite: hasClubPermission(c.get("clubRoleTypes"), "members:write"),
+    canReadSensitive: hasClubPermission(roleTypes, "members:read_sensitive"),
+    canWrite: hasClubPermission(roleTypes, "members:write"),
+    // Wave 10 B12: what the person opened for trainers / members (phone, e-mail, address, photo). Guests (guardians) are neither.
+    ...(c.get("membership").role === "guest" ? {} : { viewer: roleTypes.includes("trainer") || roleTypes.includes("abteilungsleitung") ? ("trainer" as const) : ("member" as const) }),
   };
 }
 
@@ -1789,10 +1805,22 @@ clubMemberRoutes.post("/:id/unlink", zValidator("json", z.object({ force: z.bool
 // MyVerein Backend §6. The ward is a club_members row (may have no account);
 // the guardian must have an account (ADR-003).
 
+const guardianTerms = {
+  relationship: z.union([cleanText(z.string().trim().max(60)), z.null()]).optional().transform((v) => (v === "" ? null : v)),
+  hasCustody: z.boolean().optional(),
+  canConsent: z.boolean().optional(),
+  canReportAbsence: z.boolean().optional(),
+  validFrom: z.iso.date().optional(),
+  validUntil: z.union([z.iso.date(), z.null()]).optional(),
+};
+
 const guardianLinkSchema = z.object({
   // A club_members.id (preferred) or, for older clients, the guardian's Better Auth member.id.
   guardianMemberId: z.string().min(1),
+  ...guardianTerms,
 });
+
+const guardianLinkUpdateSchema = z.object(guardianTerms).refine((v) => Object.keys(v).length > 0, { message: "Nothing to update" });
 
 type GuardianLinkRow = typeof guardianLinks.$inferSelect;
 
@@ -1805,6 +1833,14 @@ function shapeGuardianLink(link: GuardianLinkRow, ward: ClubMemberRow, guardian:
     wardClubMemberId: link.wardClubMemberId,
     // Compatibility: the ward's account id (null for members without an account).
     wardMemberId: ward.memberId,
+    // Wave 10 B4: what the guardian may do; the link grants nothing before `confirmedAt`, outside `validFrom`/`validUntil`, or once the ward is 18.
+    relationship: link.relationship,
+    hasCustody: link.hasCustody,
+    canConsent: link.canConsent,
+    canReportAbsence: link.canReportAbsence,
+    validFrom: link.validFrom,
+    validUntil: link.validUntil,
+    confirmedAt: link.confirmedAt,
     createdAt: link.createdAt,
   };
 }
@@ -1820,7 +1856,7 @@ clubMemberRoutes.get("/:id/guardians", async (c) => {
     .where(eq(guardianLinks.wardClubMemberId, ward.id))
     .orderBy(asc(guardianLinks.createdAt), asc(guardianLinks.id));
   // Names of a child's guardians are personal data: board with members:read_sensitive, or the guardian themself.
-  const isGuardianOfWard = rows.some((r) => r.link.guardianMemberId === caller.memberId);
+  const isGuardianOfWard = (await liveLinkOf(caller.memberId, ward.id)) !== null;
   if (!caller.canReadSensitive && !isGuardianOfWard) throw new ForbiddenError("Missing members:read_sensitive permission");
   return c.json({ data: rows.map((r) => shapeGuardianLink(r.link, ward, r.guardian)) });
 });
@@ -1836,21 +1872,39 @@ clubMemberRoutes.post("/:id/guardians", zValidator("json", guardianLinkSchema, v
   const guardianAccountId = requireAccount(guardian);
   if (guardian.id === ward.id) throw new ValidationError("A member cannot be their own guardian");
 
+  const body = c.req.valid("json");
+  if (body.validUntil && body.validFrom && body.validUntil < body.validFrom) throw new ValidationError("validUntil must not be before validFrom");
   let created;
   try {
-    [created] = await db.insert(guardianLinks).values({ guardianMemberId: guardianAccountId, wardClubMemberId: ward.id, confirmedAt: new Date(), confirmedBy: c.get("membership").id }).returning();
+    created = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(guardianLinks)
+        .values({
+          guardianMemberId: guardianAccountId,
+          wardClubMemberId: ward.id,
+          confirmedAt: new Date(),
+          confirmedBy: c.get("membership").id,
+          ...(body.relationship !== undefined ? { relationship: body.relationship } : {}),
+          ...(body.hasCustody !== undefined ? { hasCustody: body.hasCustody } : {}),
+          ...(body.canConsent !== undefined ? { canConsent: body.canConsent } : {}),
+          ...(body.canReportAbsence !== undefined ? { canReportAbsence: body.canReportAbsence } : {}),
+          ...(body.validFrom !== undefined ? { validFrom: body.validFrom } : {}),
+          ...(body.validUntil !== undefined ? { validUntil: body.validUntil } : {}),
+        })
+        .returning();
+      // An external guest (not a member of the club) becomes a guardian: role `erziehungsberechtigt`, no `mitglied`.
+      if ((await tx.query.member.findFirst({ where: eq(member.id, guardianAccountId), columns: { role: true } }))?.role === "guest") {
+        await tx.insert(clubRoles).values({ memberId: guardianAccountId, roleType: "erziehungsberechtigt" }).onConflictDoNothing();
+      }
+      await writeAudit(tx, { eventType: "guardian_link.create", subjectId: ward.id, payload: { clubId, guardianMemberId: guardianAccountId, decidedBy: c.get("membership").id, via: "board" } });
+      return row!;
+    });
   } catch (err) {
     if (isUniqueViolation(err)) throw new ConflictError("Guardian link already exists");
     throw err;
   }
 
-  await writeAudit(db, {
-    eventType: "guardian_link.create",
-    subjectId: ward.id,
-    payload: { clubId, guardianMemberId: guardianAccountId },
-  });
-
-  return c.json({ data: shapeGuardianLink(created!, ward, guardian) }, 201);
+  return c.json({ data: shapeGuardianLink(created, ward, guardian) }, 201);
 });
 
 clubMemberRoutes.delete("/:id/guardians/:guardianMemberId", async (c) => {
@@ -1861,20 +1915,59 @@ clubMemberRoutes.delete("/:id/guardians/:guardianMemberId", async (c) => {
   const guardian = await resolveClubMember(clubId, c.req.param("guardianMemberId")).catch(() => null);
   if (!guardian?.memberId) throw new NotFoundError("Guardian link not found");
 
-  const [removed] = await db
-    .delete(guardianLinks)
-    .where(and(eq(guardianLinks.wardClubMemberId, ward.id), eq(guardianLinks.guardianMemberId, guardian.memberId)))
-    .returning();
-  if (!removed) throw new NotFoundError("Guardian link not found");
-
-  await writeAudit(db, {
-    eventType: "guardian_link.delete",
-    subjectId: ward.id,
-    payload: { clubId, guardianMemberId: guardian.memberId },
+  const accountId = guardian.memberId;
+  await db.transaction(async (tx) => {
+    const [removed] = await tx
+      .delete(guardianLinks)
+      .where(and(eq(guardianLinks.wardClubMemberId, ward.id), eq(guardianLinks.guardianMemberId, accountId)))
+      .returning();
+    if (!removed) throw new NotFoundError("Guardian link not found");
+    // The last link of an external guest ends the guardian role with it (no stale role without a ward).
+    const remaining = await tx.select({ id: guardianLinks.id }).from(guardianLinks).where(eq(guardianLinks.guardianMemberId, accountId)).limit(1);
+    const account = await tx.query.member.findFirst({ where: eq(member.id, accountId), columns: { role: true } });
+    if (remaining.length === 0 && account?.role === "guest") {
+      await tx.delete(clubRoles).where(and(eq(clubRoles.memberId, accountId), eq(clubRoles.roleType, "erziehungsberechtigt")));
+    }
+    await writeAudit(tx, { eventType: "guardian_link.delete", subjectId: ward.id, payload: { clubId, guardianMemberId: accountId } });
   });
 
   return c.body(null, 204);
 });
 
+clubMemberRoutes.patch("/:id/guardians/:guardianMemberId", zValidator("json", guardianLinkUpdateSchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const ward = await resolveClubMember(clubId, c.req.param("id"));
+  const guardian = await resolveClubMember(clubId, c.req.param("guardianMemberId")).catch(() => null);
+  if (!guardian?.memberId) throw new NotFoundError("Guardian link not found");
+  const body = c.req.valid("json");
+
+  const updated = await db.transaction(async (tx) => {
+    const [current] = await tx.select().from(guardianLinks).where(and(eq(guardianLinks.wardClubMemberId, ward.id), eq(guardianLinks.guardianMemberId, guardian.memberId!))).for("update");
+    if (!current) throw new NotFoundError("Guardian link not found");
+    const from = body.validFrom ?? current.validFrom;
+    const until = body.validUntil === undefined ? current.validUntil : body.validUntil;
+    if (until && until < from) throw new ValidationError("validUntil must not be before validFrom");
+    const [row] = await tx
+      .update(guardianLinks)
+      .set({
+        ...(body.relationship !== undefined ? { relationship: body.relationship } : {}),
+        ...(body.hasCustody !== undefined ? { hasCustody: body.hasCustody } : {}),
+        ...(body.canConsent !== undefined ? { canConsent: body.canConsent } : {}),
+        ...(body.canReportAbsence !== undefined ? { canReportAbsence: body.canReportAbsence } : {}),
+        ...(body.validFrom !== undefined ? { validFrom: body.validFrom } : {}),
+        ...(body.validUntil !== undefined ? { validUntil: body.validUntil } : {}),
+      })
+      .where(eq(guardianLinks.id, current.id))
+      .returning();
+    await writeAudit(tx, { eventType: "guardian_link.update", subjectId: ward.id, payload: { clubId, guardianMemberId: guardian.memberId!, changedFields: Object.keys(body) } });
+    return row!;
+  });
+  return c.json({ data: shapeGuardianLink(updated, ward, guardian) });
+});
+
 // Consents of a member (Wave 10 B3): own file, mounted behind the session/club guards above.
 clubMemberRoutes.route("/:id/consents", memberConsentRoutes);
+// Which of phone / e-mail / address / photo trainers and members may see (Wave 10 B12).
+clubMemberRoutes.route("/:id/visibility", memberVisibilityRoutes);

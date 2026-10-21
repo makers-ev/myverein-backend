@@ -4,6 +4,7 @@ import { member, organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMembers, type ClubMemberRow } from "../db/schema/club-members.js";
 import { guardianLinks, type GuardianLinkRow } from "../db/schema/guardian-links.js";
+import { isUuid } from "./club-members.js";
 import { NotFoundError } from "./errors.js";
 import { ageOn, effectiveStatus, todayBerlin } from "./member-lifecycle.js";
 
@@ -71,6 +72,7 @@ export async function liveLinkOf(guardianAccountMemberId: string, wardClubMember
 
 /** The ward of a guardian route: the caller's live link in this club, else 404 (never 403: no oracle for foreign children). */
 export async function requireWard(userId: string, clubId: string, wardId: string): Promise<WardLink> {
+  if (!isUuid(wardId)) throw new NotFoundError("Ward not found");
   const [found] = await activeWardLinks(userId, { clubId, wardId });
   if (!found) throw new NotFoundError("Ward not found");
   return found;

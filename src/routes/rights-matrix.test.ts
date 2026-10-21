@@ -20,6 +20,8 @@ import { clubStatsRoutes } from "./club-stats.js";
 import { clubExitRequestRoutes } from "./club-exit-requests.js";
 import { clubAnnouncementRoutes, clubInboxRoutes } from "./club-announcements.js";
 import { notificationPreferenceRoutes, unsubscribeRoutes } from "./notification-preferences.js";
+import { absenceRoutes } from "./absences.js";
+import { guardianRoutes, myWardsRoutes } from "./guardian.js";
 import { consentOverviewRoutes, consentPurposeRoutes } from "./consent-purposes.js";
 import { clubSettingsRoutes } from "./club-settings.js";
 import { auditLogRoutes } from "./audit-log.js";
@@ -71,6 +73,9 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/club-stats", "clubStatsRoutes", clubStatsRoutes],
   ["/consent-purposes", "consentPurposeRoutes", consentPurposeRoutes],
   ["/consents", "consentOverviewRoutes", consentOverviewRoutes],
+  ["/absences", "absenceRoutes", absenceRoutes],
+  ["/my-wards", "myWardsRoutes", myWardsRoutes],
+  ["/guardian", "guardianRoutes", guardianRoutes],
   ["/club-settings", "clubSettingsRoutes", clubSettingsRoutes],
   ["/audit-log", "auditLogRoutes", auditLogRoutes],
   ["/club-exit-requests", "clubExitRequestRoutes", clubExitRequestRoutes],
@@ -158,6 +163,15 @@ const SELF_SERVICE: Record<string, string> = {
   "POST /club-inbox/:id/read": "own in-app message (bound to user and club; foreign ids are 404)",
   "POST /club-members/:id/consents/:purposeId": "consent of the person itself or of a linked guardian (decided in the route: foreign members are 403, unknown ones 404; the board needs privacy:manage and a paper proof)",
   "DELETE /club-members/:id/consents/:purposeId": "revocation by the person itself or a linked guardian (same rules as the grant)",
+  "POST /absences": "own absence report (external guests get 403; the member row is the caller's own)",
+  "PATCH /absences/:id": "own absence report (ownership checked, foreign ids are 404)",
+  "DELETE /absences/:id": "withdrawing the own absence report (ownership checked)",
+  "PUT /club-members/:id/visibility": "the person itself, a guardian with a live link and custody, or members:write; others 403, unknown ids 404",
+  "PUT /guardian/wards/:wardId/events/:eventId/response": "guardian answers for a ward (guardianScope: a ward that is not the caller's, foreign club or expired link is 404)",
+  "DELETE /guardian/wards/:wardId/events/:eventId/response": "guardian withdraws the answer for a ward (guardianScope, 404 otherwise)",
+  "POST /guardian/wards/:wardId/absences": "guardian reports an absence for a ward (guardianScope + can_report_absence)",
+  "PATCH /guardian/wards/:wardId/absences/:id": "guardian changes an absence of a ward (guardianScope + can_report_absence)",
+  "DELETE /guardian/wards/:wardId/absences/:id": "guardian withdraws an absence of a ward (guardianScope + can_report_absence)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
 };
 
@@ -184,6 +198,13 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /club-exit-requests/:id/reject": { note: "Nein" },
   "POST /club-members/:id/roles": { roleType: "kassenwart" },
   "POST /club-members/:id/guardians": { guardianMemberId: SOME_ID },
+  "PATCH /club-members/:id/guardians/:guardianMemberId": { canConsent: true },
+  "PUT /club-members/:id/visibility": { phone: "mitglieder" },
+  "POST /absences": { kind: "krank", startsOn: "2030-01-01", endsOn: "2030-01-02" },
+  "PATCH /absences/:id": { note: "kurz" },
+  "PUT /guardian/wards/:wardId/events/:eventId/response": { status: "angemeldet" },
+  "POST /guardian/wards/:wardId/absences": { kind: "krank", startsOn: "2030-01-01", endsOn: "2030-01-02" },
+  "PATCH /guardian/wards/:wardId/absences/:id": { note: "kurz" },
   "POST /club-members/:id/consents/:purposeId": { textVersionId: SOME_ID },
   "POST /consent-purposes": { name: "Neuer Zweck" },
   "PATCH /consent-purposes/:id": { requested: true },

@@ -8,6 +8,7 @@ import { clubMembers, LEFT_STATUSES } from "../db/schema/club-members.js";
 import { consentPurposes, consentRecords, consentTexts } from "../db/schema/privacy.js";
 import { writeAudit } from "../lib/audit.js";
 import { askablePurposes, consentAgeLimitOf, currentTexts, isUnderConsentAge, sha256Hex } from "../lib/consent.js";
+import { isUuid } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
@@ -73,6 +74,7 @@ function shapePurpose(p: PurposeRow, text: TextRow | undefined) {
 }
 
 async function purposeOf(clubId: string, id: string): Promise<PurposeRow> {
+  if (!isUuid(id)) throw new NotFoundError("Consent purpose not found");
   const [row] = await db.select().from(consentPurposes).where(and(eq(consentPurposes.id, id), eq(consentPurposes.clubId, clubId)));
   if (!row) throw new NotFoundError("Consent purpose not found");
   return row;

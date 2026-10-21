@@ -7,7 +7,7 @@ import { clubMembers, type ClubMemberRow } from "../db/schema/club-members.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import { consentPurposes, consentRecords, consentTexts, type ConsentAction, type ConsentGivenBy, type ConsentPurposeRow, type ConsentRecordRow, type ConsentTextRow } from "../db/schema/privacy.js";
 import { writeAudit } from "./audit.js";
-import type { DbExecutor } from "./club-members.js";
+import { isUuid, type DbExecutor } from "./club-members.js";
 import { ConflictError, NotFoundError, ValidationError } from "./errors.js";
 import { logger } from "./logger.js";
 import { ageOn, todayBerlin } from "./member-lifecycle.js";
@@ -228,6 +228,7 @@ export async function afterConsentRevoked(purpose: Pick<ConsentPurposeRow, "key"
 
 /** Club member of a club, 404 otherwise (club scoping of every consent route). */
 export async function clubMemberOf(clubId: string, clubMemberId: string, executor: DbExecutor = db): Promise<ClubMemberRow> {
+  if (!isUuid(clubMemberId)) throw new NotFoundError("Member not found");
   const [row] = await executor.select().from(clubMembers).where(and(eq(clubMembers.id, clubMemberId), eq(clubMembers.clubId, clubId)));
   if (!row) throw new NotFoundError("Member not found");
   return row;

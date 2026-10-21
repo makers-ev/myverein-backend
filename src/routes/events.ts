@@ -12,6 +12,7 @@ import { locations } from "../db/schema/locations.js";
 import { AudienceLimitError, resolveClubAudience, summarizeAudience } from "../lib/audience.js";
 import { clubTimezone, composeEventMessage, essentialDiff, eventAudience, locationName, notifyWaitlistPromoted, scheduleEventChanged } from "../lib/event-notify.js";
 import { buildIcs } from "../lib/ics.js";
+import { confirmedWardSeats, promoteWaitingWard } from "../lib/ward-events.js";
 import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
@@ -367,7 +368,8 @@ eventRoutes.post("/:id/rsvp", async (c) => {
     const confirmed = await tx.query.eventAttendees.findMany({
       where: and(eq(eventAttendees.eventId, id), eq(eventAttendees.status, "angemeldet")),
     });
-    const othersConfirmed = confirmed.filter((r) => r.memberId !== membership.id).length;
+    // Seats taken by guardians' responses for wards without account count too (Wave 10 B4).
+    const othersConfirmed = confirmed.filter((r) => r.memberId !== membership.id).length + (await confirmedWardSeats(tx, id));
     const status = event.capacity === null || othersConfirmed < event.capacity ? "angemeldet" : "warteliste";
 
     const [created] = await tx
@@ -430,6 +432,8 @@ eventRoutes.delete("/:id/rsvp", async (c) => {
         });
         return { memberId: nextInLine.memberId, respondedAt: nextInLine.respondedAt };
       }
+      // Nobody waits with an account: a waiting ward (response of a guardian) moves up.
+      await promoteWaitingWard(tx, id);
     }
     return null;
   });
