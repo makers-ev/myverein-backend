@@ -228,7 +228,8 @@ const CUSTOM_FIELD_TYPE: Record<string, string> = { consent: "checkbox" };
 
 /**
  * Checks a draft must pass to be published (the shape itself was validated by `formFieldsSchema`):
- * - `aufnahme`: a privacy notice block with text and a mandatory, unconditional consent;
+ * - `aufnahme`: a privacy notice block with text. NO consent is required (Wave 10 B11, Art. 7(4) GDPR: consent is voluntary and never
+ *   a condition of an application); consent fields stay possible but optional;
  * - mapping to club master data / custom fields only on `aufnahme` (only acceptance writes them);
  * - `austritt` forms must not contain `file`/`image` fields (`file_not_supported`);
  * - every `customField` key refers to a non-archived definition of the club with a matching type.
@@ -237,12 +238,13 @@ export async function publishProblems(input: { clubId: string; purpose: string; 
   const problems: PublishProblem[] = [];
   const { fields, purpose } = input;
   problems.push(...fileFieldProblems(purpose, fields), ...credentialFieldProblems(fields));
+  // A consent is voluntary (Art. 7(4) GDPR): no form may make it a condition of submitting.
+  for (const f of fields) if (f.type === "consent" && f.required === true) problems.push({ code: "required_consent_not_allowed", fieldKey: f.key });
 
   if (purpose === "aufnahme") {
     const notice = fields.find((f) => f.type === "info" && f.infoKind === "privacy_notice");
     if (!notice) problems.push({ code: "privacy_notice_missing" });
     else if (!(input.privacyNotice?.trim() || notice.text?.trim())) problems.push({ code: "privacy_notice_text_missing", fieldKey: notice.key });
-    if (!fields.some((f) => f.type === "consent" && f.required === true && f.visibleIf === undefined)) problems.push({ code: "required_consent_missing" });
   }
 
   for (const f of fields) if (f.sensitive && f.mapsTo !== undefined) problems.push({ code: "sensitive_mapping_not_allowed", fieldKey: f.key });

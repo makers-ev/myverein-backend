@@ -199,7 +199,7 @@ function consentEvidenceOf(sub: FormSubmissionRow, version: FormVersionRow): Con
 
 export interface ApplicationReview {
   /** `birthDate` is null without `members:read_sensitive`. */
-  application: { id: string; status: string; onBehalfOf: string; legacy: boolean; createdAt: Date; decidedAt: Date | null; decidedBy: string | null; clubMemberId: string | null; category: string; birthDate: string | null };
+  application: { id: string; status: string; onBehalfOf: string; legacy: boolean; createdAt: Date; decidedAt: Date | null; decidedBy: string | null; clubMemberId: string | null; category: string; birthDate: string | null; privacyNoticeVersionId: string | null; privacyNoticeAcknowledgedAt: Date | null };
   applicant: { userId: string; name: string; email: string };
   /** The person the application is for. */
   /** `birthDate` and `ageYears` need `members:read_sensitive`; everybody else gets `isMinor` and the `ageBand` only. */
@@ -249,7 +249,7 @@ export async function buildApplicationReview(application: ClubApplicationRow, in
     : [];
 
   const base = {
-    application: { id: application.id, status: application.status, onBehalfOf: application.onBehalfOf, legacy: application.formSubmissionId === null, createdAt: application.createdAt, decidedAt: application.decidedAt, decidedBy: application.decidedBy, clubMemberId: application.clubMemberId, category: application.category, birthDate: application.birthDate },
+    application: { id: application.id, status: application.status, onBehalfOf: application.onBehalfOf, legacy: application.formSubmissionId === null, createdAt: application.createdAt, decidedAt: application.decidedAt, decidedBy: application.decidedBy, clubMemberId: application.clubMemberId, category: application.category, birthDate: application.birthDate, privacyNoticeVersionId: application.privacyNoticeVersionId, privacyNoticeAcknowledgedAt: application.privacyNoticeAcknowledgedAt },
     applicant,
   };
   const pending = application.status === "pending";

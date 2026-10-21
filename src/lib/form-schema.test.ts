@@ -204,9 +204,11 @@ describe("validateAnswers", () => {
   it("resolves member_categories against the club's active categories", () => {
     const fields = defs(DEFAULT_APPLICATION_FIELDS);
     const ctx = { ...submit, categoryKeys: ["aktiv", "jugend"], uploadedFieldKeys: new Set<string>() };
-    expect(validateAnswers(fields, { category: "jugend", privacy_consent: true }, ctx)).toEqual({ ok: true, answers: { category: "jugend", privacy_consent: true } });
-    expect(validateAnswers(fields, { category: "passiv", privacy_consent: true }, ctx)).toEqual({ ok: false, errors: { category: "not_an_option" } });
-    expect(validateAnswers(fields, { category: "aktiv" }, ctx)).toEqual({ ok: false, errors: { privacy_consent: "required" } });
+    expect(validateAnswers(fields, { category: "jugend" }, ctx)).toEqual({ ok: true, answers: { category: "jugend" } });
+    expect(validateAnswers(fields, { category: "passiv" }, ctx)).toEqual({ ok: false, errors: { category: "not_an_option" } });
+    expect(validateAnswers(fields, {}, ctx)).toEqual({ ok: false, errors: { category: "required" } });
+    // The standard form carries no consent: an answer for the old consent key is an unknown field.
+    expect(validateAnswers(fields, { category: "aktiv", privacy_consent: true }, ctx)).toEqual({ ok: false, errors: { privacy_consent: "unknown_field" } });
     expect(resolveFieldOptions(fields[0]!, [{ key: "aktiv", name: "Aktiv" }])).toEqual([{ value: "aktiv", label: "Aktiv" }]);
   });
 });

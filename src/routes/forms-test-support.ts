@@ -65,22 +65,21 @@ export async function dropClubs(clubIds: string[], userIds: string[]): Promise<v
   for (const id of userIds) await db.delete(user).where(eq(user.id, id));
 }
 
-/** A complete, publishable Aufnahme definition (mirrors the standard form) plus one extra text field. */
+/** A complete, publishable Aufnahme definition (the standard form plus an OPTIONAL consent, a consent is never mandatory) and an extra field. */
 export const aufnahmeFields = (extra: unknown[] = []) => [
   { key: "category", type: "select", label: "Mitgliedschaft", required: true, optionsSource: "member_categories", mapsTo: "category" },
   { key: "birth_date", type: "date", label: "Geburtsdatum", required: false, mapsTo: "birthDate" },
   { key: "privacy_notice", type: "info", infoKind: "privacy_notice", label: "Datenschutzhinweis" },
-  { key: "privacy_consent", type: "consent", label: "Ich willige ein.", required: true },
+  { key: "privacy_consent", type: "consent", label: "Ich willige ein.", required: false },
   ...extra,
 ];
 
 /**
- * Turns an old-style apply body (`category`, `birthDate`) into the form-builder one against the STANDARD application form
- * (the legacy request is refused with `form_required` while the club's form asks for a consent). Bodies without a club
- * (validation tests) and bodies that already carry answers pass through.
+ * Turns an old-style apply body (`category`, `birthDate`) into the form-builder one against the STANDARD application form.
+ * Bodies without a club (validation tests) and bodies that already carry answers pass through.
  */
 export function withConsent<T extends Record<string, unknown>>(body: T): Record<string, unknown> {
   if (!("clubId" in body || "clubSlug" in body) || "answers" in body || "submissionId" in body) return body;
   const { category, birthDate, ...rest } = body;
-  return { ...rest, answers: { category: category ?? "aktiv", ...(birthDate ? { birth_date: birthDate } : {}), privacy_consent: true } };
+  return { ...rest, answers: { category: category ?? "aktiv", ...(birthDate ? { birth_date: birthDate } : {}) } };
 }

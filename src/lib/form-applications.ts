@@ -17,6 +17,7 @@ import type { FormField } from "./form-schema.js";
 import { markMediaDeleted, reassignMediaOwner } from "./media.js";
 import { writeAudit } from "./audit.js";
 import { recordConsent } from "./consent.js";
+import { latestPublishedNotice } from "./privacy-notice.js";
 import { consentPurposes } from "../db/schema/privacy.js";
 
 /**
@@ -42,12 +43,22 @@ export const applicationPendingError = (details: { clubId: string; applicationId
  * (only so lists and legacy readers keep working; the answers stay the source of truth). Must run in the transaction
  * that moved the submission to `submitted`.
  */
-export async function createApplicationForSubmission(tx: DbExecutor, sub: FormSubmissionRow, fields: readonly FormField[]): Promise<ClubApplicationRow> {
+export async function createApplicationForSubmission(tx: DbExecutor, sub: FormSubmissionRow, fields: readonly FormField[], opts: { privacyNoticeAcknowledged?: boolean } = {}): Promise<ClubApplicationRow> {
   const plan = planAcceptance(fields, sub.answers);
+  // Wave 10 B11: the applicant took note of the club's current privacy notice. Information only: without it the application is filed all the same.
+  const notice = opts.privacyNoticeAcknowledged === true ? await latestPublishedNotice(sub.clubId, tx) : null;
   try {
     const [row] = await tx
       .insert(clubApplications)
-      .values({ userId: sub.submittedByUserId, clubId: sub.clubId, category: plan.categoryKey ?? "aktiv", birthDate: plan.master.birthDate ?? null, formSubmissionId: sub.id, onBehalfOf: sub.onBehalfOf === "guardian" ? "guardian" : "self" })
+      .values({
+        userId: sub.submittedByUserId,
+        clubId: sub.clubId,
+        category: plan.categoryKey ?? "aktiv",
+        birthDate: plan.master.birthDate ?? null,
+        formSubmissionId: sub.id,
+        onBehalfOf: sub.onBehalfOf === "guardian" ? "guardian" : "self",
+        ...(notice ? { privacyNoticeVersionId: notice.id, privacyNoticeAcknowledgedAt: new Date() } : {}),
+      })
       .returning();
     return row!;
   } catch (err) {

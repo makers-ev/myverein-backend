@@ -33,6 +33,7 @@ import { adminJobRoutes } from "./admin-jobs.js";
 import { adminRetentionRoutes } from "./admin-retention.js";
 import { adminDpaAcceptanceRoutes, adminDpaVersionRoutes } from "./admin-dpa.js";
 import { dpaRoutes } from "./dpa.js";
+import { clubNoticeBySlugRoutes, clubPrivacyNoticeRoutes } from "./club-privacy-notices.js";
 import { retentionPolicyRoutes } from "./retention-policies.js";
 import { adminStatsRoutes } from "./admin-stats.js";
 import { availabilityRoutes } from "./availability.js";
@@ -96,6 +97,8 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/admin/dpa-versions", "adminDpaVersionRoutes", adminDpaVersionRoutes],
   ["/admin/dpa-acceptances", "adminDpaAcceptanceRoutes", adminDpaAcceptanceRoutes],
   ["/dpa", "dpaRoutes", dpaRoutes],
+  ["/club-privacy-notices", "clubPrivacyNoticeRoutes", clubPrivacyNoticeRoutes],
+  ["/clubs", "clubNoticeBySlugRoutes", clubNoticeBySlugRoutes],
   ["/retention-policies", "retentionPolicyRoutes", retentionPolicyRoutes],
   ["/admin/notifications", "adminNotificationRoutes", adminNotificationRoutes],
   ["/admin/notification-templates", "adminNotificationTemplateRoutes", adminNotificationTemplateRoutes],

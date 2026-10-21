@@ -50,7 +50,7 @@ const FIELDS = [
   { key: "birth_date", type: "date", label: "Geburtsdatum", mapsTo: "birthDate" },
   { key: "photo", type: "image", label: "Foto", mapsTo: "photo" },
   { key: "privacy_notice", type: "info", infoKind: "privacy_notice", label: "Datenschutz" },
-  { key: "privacy_consent", type: "consent", label: "Ich willige für mein Kind ein.", required: true },
+  { key: "privacy_consent", type: "consent", label: "Ich willige für mein Kind ein.", required: false },
 ];
 const child = (over: Record<string, unknown> = {}) => ({ first_name: CHILD_FIRST, last_name: CHILD_LAST, category: "jugend", birth_date: "2016-03-04", privacy_consent: true, ...over });
 

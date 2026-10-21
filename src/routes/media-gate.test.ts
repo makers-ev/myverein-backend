@@ -181,7 +181,7 @@ const FIELDS = [
   { key: "photo", type: "image", label: "Foto", mapsTo: "photo" },
   { key: "id_doc", type: "file", label: "Nachweis" },
   { key: "privacy_notice", type: "info", infoKind: "privacy_notice", label: "Datenschutz" },
-  { key: "privacy_consent", type: "consent", label: "Ich willige ein.", required: true },
+  { key: "privacy_consent", type: "consent", label: "Ich willige ein.", required: false },
 ];
 const answers = (over: Record<string, unknown> = {}) => ({ first_name: "Medi", last_name: "Agate", category: "aktiv", birth_date: "1990-04-02", privacy_consent: true, ...over });
 

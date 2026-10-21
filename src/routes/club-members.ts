@@ -45,6 +45,7 @@ import { MAX_PHOTO_BYTES, streamMedia } from "../lib/media.js";
 import { buildCsv, importMaxBytes } from "../lib/member-csv.js";
 import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADERS, importFingerprint, importTokenDuplicates, importTokenId, verifyImportToken } from "../lib/member-import.js";
 import { nextMemberNumber } from "../lib/member-number.js";
+import { latestPublishedNotice } from "../lib/privacy-notice.js";
 import { memberConsentRoutes } from "./member-consents.js";
 import { memberPrivacyRoutes } from "./member-privacy.js";
 import { memberVisibilityRoutes } from "./member-visibility.js";
@@ -306,6 +307,8 @@ const applySchema = z
     submissionId: z.uuid().optional(),
     // 'guardian': a parent applies for a child (Wave 8 B8); needs answers or a submissionId, never the legacy shape.
     onBehalfOf: z.enum(["self", "guardian"]).optional(),
+    // Wave 10 B11: the applicant took note of the club's privacy notice (stamped on the application; information, never required).
+    privacyNoticeAcknowledged: z.boolean().optional(),
   })
   .refine((body) => body.clubId ?? body.clubSlug, { message: "clubId or clubSlug is required" });
 
@@ -344,6 +347,7 @@ clubMemberRoutes.post(
         submissionId: body.submissionId,
         onBehalfOf: body.onBehalfOf,
         emailVerified: currentUser.emailVerified === true,
+        privacyNoticeAcknowledged: body.privacyNoticeAcknowledged === true,
       });
       if (filed.created) {
         await writeAudit(db, {
@@ -376,7 +380,11 @@ clubMemberRoutes.post(
         await assertMayApply(tx, clubId, currentUser.id);
         // Only categories an applicant may choose (like in the form), so "ehrenmitglied" cannot be self-assigned.
         if (!(await applicantCategories(clubId, tx)).some((k) => k.key === body.category)) throw new ValidationError("This category cannot be chosen when applying", { details: { fields: { category: "not_an_option" } } });
-        const [row] = await tx.insert(clubApplications).values({ userId: currentUser.id, clubId, category: body.category, birthDate: body.birthDate }).returning();
+        const notice = body.privacyNoticeAcknowledged === true ? await latestPublishedNotice(clubId, tx) : null;
+        const [row] = await tx
+          .insert(clubApplications)
+          .values({ userId: currentUser.id, clubId, category: body.category, birthDate: body.birthDate, ...(notice ? { privacyNoticeVersionId: notice.id, privacyNoticeAcknowledgedAt: new Date() } : {}) })
+          .returning();
         return row!;
       });
     } catch (err) {

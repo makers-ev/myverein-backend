@@ -92,7 +92,8 @@ describe("form management API", () => {
     for (const f of all) expect(f).toMatchObject({ publishedVersion: 1, draftVersion: null, versionCount: 1 });
     const detail = await body(await call(board, `/forms/${await aufnahmeId()}`, { clubId }));
     expect(detail.data.published.status).toBe("published");
-    expect(detail.data.published.fields.map((f: { key: string }) => f.key)).toContain("privacy_consent");
+    // Wave 10 B11: the standard form informs, it does not ask for a consent (Art. 7(4) GDPR).
+    expect(detail.data.published.fields.map((f: { key: string }) => f.key)).toEqual(["category", "birth_date", "photo", "privacy_notice"]);
     expect(detail.data.draft).toBeNull();
   });
 
@@ -229,8 +230,9 @@ describe("form management API", () => {
     const r2 = await publishWith(aufnahmeFields(), "   ");
     expect(await codes(r2)).toEqual(["privacy_notice_text_missing"]);
 
-    const optionalConsent = aufnahmeFields().map((f) => (f.key === "privacy_consent" ? { ...f, required: false } : f));
-    expect(await codes(await publishWith(optionalConsent, "Text"))).toEqual(["required_consent_missing"]);
+    // A consent is voluntary: it can be offered, never required.
+    const requiredConsent = aufnahmeFields().map((f) => (f.key === "privacy_consent" ? { ...f, required: true } : f));
+    expect(await codes(await publishWith(requiredConsent, "Text"))).toEqual(["required_consent_not_allowed"]);
 
     const unknownCustom = aufnahmeFields([{ key: "allergy", type: "text", label: "Allergien", customField: "allergien" }]);
     expect(await codes(await publishWith(unknownCustom, "Text"))).toEqual(["custom_field_unknown"]);

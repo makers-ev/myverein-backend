@@ -632,6 +632,7 @@ export async function submitDraftInTx(
   sub: FormSubmissionRow,
   userId: string,
   extraAnswers: unknown,
+  opts: { privacyNoticeAcknowledged?: boolean } = {},
 ): Promise<{ row: FormSubmissionRow; application: ClubApplicationRow | null; purge: string[]; warnings: ChildWarning[] }> {
   const purge: string[] = [];
   // The advisory lock orders parallel submits / applies of the same user and club behind each other.
@@ -667,7 +668,7 @@ export async function submitDraftInTx(
     .where(and(eq(formSubmissions.id, sub.id), eq(formSubmissions.status, "draft")))
     .returning();
   if (!row) throw new ConflictError("The submission can no longer be changed", { details: { code: "submission_not_editable" } });
-  const application = target.form.purpose === PURPOSE ? await createApplicationForSubmission(tx, row, fields) : null;
+  const application = target.form.purpose === PURPOSE ? await createApplicationForSubmission(tx, row, fields, opts) : null;
   await writeAudit(tx, {
     eventType: "form_submission.submit",
     subjectId: sub.id,
@@ -678,13 +679,14 @@ export async function submitDraftInTx(
 
 const applicationDto = (a: ClubApplicationRow) => ({ id: a.id, status: a.status, createdAt: a.createdAt });
 
-formSubmissionRoutes.post("/:id/submit", submitLimiter, jsonLimit, zValidator("json", z.object({ answers: z.unknown().optional() }).default({}), validationHook), async (c) => {
+// `privacyNoticeAcknowledged`: the applicant took note of the club's privacy notice (stamped on the application, never required).
+formSubmissionRoutes.post("/:id/submit", submitLimiter, jsonLimit, zValidator("json", z.object({ answers: z.unknown().optional(), privacyNoticeAcknowledged: z.boolean().optional() }).default({}), validationHook), async (c) => {
   const userId = c.get("user").id;
   const body = c.req.valid("json");
 
   const submitted = await db.transaction(async (tx) => {
     const sub = await loadOwn(tx, c.req.param("id"), userId, true);
-    return submitDraftInTx(tx, sub, userId, body.answers);
+    return submitDraftInTx(tx, sub, userId, body.answers, { privacyNoticeAcknowledged: body.privacyNoticeAcknowledged === true });
   });
   await purgeAll(submitted.purge);
   if (submitted.application) await notifyApplicationReceived({ clubId: submitted.application.clubId, applicationId: submitted.application.id, userId, onBehalfOf: submitted.application.onBehalfOf === "guardian" ? "guardian" : "self" });
@@ -706,6 +708,8 @@ export async function applyWithForm(input: {
   /** New answers only: who the application is for (a submissionId carries its own). */
   onBehalfOf?: "self" | "guardian";
   emailVerified?: boolean;
+  /** The applicant took note of the club's privacy notice (information, never required). */
+  privacyNoticeAcknowledged?: boolean;
 }): Promise<{ application: ClubApplicationRow; submission: FormSubmissionRow; created: boolean; warnings: ChildWarning[] }> {
   const { userId, clubId } = input;
   await ensureFormBasics(clubId);
@@ -730,7 +734,7 @@ export async function applyWithForm(input: {
             .limit(1);
           if (other) throw applicationPendingError({ clubId, applicationId: other.id, submittedAt: other.createdAt });
         }
-        return { application: await createApplicationForSubmission(tx, sub, pinned.version.fields as FormField[]), submission: sub, created: true, warnings: [] };
+        return { application: await createApplicationForSubmission(tx, sub, pinned.version.fields as FormField[], { privacyNoticeAcknowledged: input.privacyNoticeAcknowledged === true }), submission: sub, created: true, warnings: [] };
       }
       if (sub.status !== "draft") throw new ConflictError("The submission can no longer be changed", { details: { code: "submission_not_editable", status: sub.status } });
       if (input.onBehalfOf !== undefined && input.onBehalfOf !== sub.onBehalfOf) throw new ValidationError("onBehalfOf does not match the submission");
@@ -739,7 +743,7 @@ export async function applyWithForm(input: {
         const current = await findCurrentForm(clubId, PURPOSE, tx);
         if (!current || current.version.id !== input.formVersionId) throw outdatedError(await currentDefinition(clubId, tx), sub.id);
       }
-      const submitted = await submitDraftInTx(tx, sub, userId, input.answers);
+      const submitted = await submitDraftInTx(tx, sub, userId, input.answers, { privacyNoticeAcknowledged: input.privacyNoticeAcknowledged === true });
       purge.push(...submitted.purge);
       return { application: submitted.application!, submission: submitted.row, created: true, warnings: submitted.warnings };
     }
@@ -764,7 +768,7 @@ export async function applyWithForm(input: {
       .insert(formSubmissions)
       .values({ formId: current.form.id, formVersionId: current.version.id, clubId, submittedByUserId: userId, onBehalfOf, answers: draftAnswers.answers, status: "draft" })
       .returning();
-    const submitted = await submitDraftInTx(tx, draft!, userId, undefined);
+    const submitted = await submitDraftInTx(tx, draft!, userId, undefined, { privacyNoticeAcknowledged: input.privacyNoticeAcknowledged === true });
     purge.push(...submitted.purge);
     return { application: submitted.application!, submission: submitted.row, created: true, warnings: submitted.warnings };
   });

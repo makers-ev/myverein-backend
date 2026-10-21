@@ -5,12 +5,14 @@ import { z } from "zod";
 
 import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
+import { clubPrivacyNotices } from "../db/schema/club-privacy-notices.js";
 import { dataSubjectRequests } from "../db/schema/privacy.js";
 import { writeAudit } from "../lib/audit.js";
 import { ensureClubMember } from "../lib/club-members.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
-import { ForbiddenError, ValidationError } from "../lib/errors.js";
+import { ConflictError, ForbiddenError, ValidationError } from "../lib/errors.js";
 import { executeErasure, planErasure } from "../lib/privacy/erasure.js";
+import { latestPublishedNotice } from "../lib/privacy-notice.js";
 import { openRequest } from "../lib/privacy/requests.js";
 import { respondWithExport } from "../lib/privacy/respond.js";
 import { loadSubject } from "../lib/privacy/subject.js";
@@ -101,4 +103,32 @@ memberPrivacyRoutes.put("/:id/legal-hold", zValidator("json", legalHoldSchema, v
     await writeAudit(tx, { eventType: "member_legal_hold.update", subjectId: row.id, payload: { clubId: c.get("clubId"), active: body.active, changedBy: c.get("user").id } });
   });
   return c.json({ data: { clubMemberId: row.id, legalHold: body.active, reason: body.active ? (body.reason ?? null) : null } });
+});
+
+/**
+ * Art. 14 GDPR for members without an account (children, people the board entered): the board notes that the privacy notice was
+ * handed over, with the version. Information only: nothing depends on it, it is not a consent.
+ */
+memberPrivacyRoutes.get("/:id/privacy-notice", async (c) => {
+  if (!hasClubPermission(c.get("clubRoleTypes"), "privacy:manage") && !hasClubPermission(c.get("clubRoleTypes"), "members:write") && !hasClubPermission(c.get("clubRoleTypes"), "privacy:read")) throw new ForbiddenError("Missing privacy:read permission");
+  const { row } = await loadSubject(c.get("clubId"), c.req.param("id"));
+  const current = await latestPublishedNotice(c.get("clubId"));
+  const sent = row.privacyNoticeVersionId ? (await db.select({ version: clubPrivacyNotices.version }).from(clubPrivacyNotices).where(eq(clubPrivacyNotices.id, row.privacyNoticeVersionId)))[0] : undefined;
+  return c.json({ data: { sentAt: row.privacyNoticeSentAt, sentVersion: sent?.version ?? null, currentVersion: current?.version ?? null, upToDate: current !== null && row.privacyNoticeVersionId === current.id } });
+});
+
+memberPrivacyRoutes.post("/:id/privacy-notice-sent", async (c) => {
+  if (!hasClubPermission(c.get("clubRoleTypes"), "privacy:manage") && !hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+  const { row } = await loadSubject(c.get("clubId"), c.req.param("id"));
+  const current = await latestPublishedNotice(c.get("clubId"));
+  if (!current) throw new ConflictError("The club has not published a privacy notice yet", { details: { code: "no_published_notice" } });
+  const changed = row.privacyNoticeVersionId !== current.id;
+  const sentAt = changed || !row.privacyNoticeSentAt ? new Date() : row.privacyNoticeSentAt;
+  if (changed || !row.privacyNoticeSentAt) {
+    await db.transaction(async (tx) => {
+      await tx.update(clubMembers).set({ privacyNoticeSentAt: sentAt, privacyNoticeVersionId: current.id, updatedAt: new Date() }).where(eq(clubMembers.id, row.id));
+      await writeAudit(tx, { eventType: "club_member.privacy_notice_sent", subjectId: row.id, payload: { clubId: c.get("clubId"), version: current.version } });
+    });
+  }
+  return c.json({ data: { sentAt, sentVersion: current.version, currentVersion: current.version, upToDate: true } });
 });
