@@ -41,6 +41,11 @@ export interface EffectiveClubSettings {
   notifyHandover: boolean;
   /** Language of the system texts of club mails and pushes (decisions, reminders, event changes, invitations); text written by a person stays as written. */
   mailLanguage: MailLanguage;
+  /** Privacy (Wave 10): age from which a person consents alone (default 18), whether both guardians are needed, privacy contact and controller (free text for the privacy notice). */
+  consentAgeLimit: number;
+  consentBothGuardians: boolean;
+  privacyContact: string | null;
+  privacyController: string | null;
 }
 
 export const DEFAULT_CLUB_TIMEZONE = "Europe/Berlin";
@@ -76,6 +81,10 @@ export async function loadClubSettings(executor: DbExecutor, clubId: string): Pr
     notifyAgeTransition: row?.notifyAgeTransition ?? true,
     notifyHandover: row?.notifyHandover ?? true,
     mailLanguage: isMailLanguage(row?.mailLanguage) ? row.mailLanguage : DEFAULT_MAIL_LANGUAGE,
+    consentAgeLimit: row?.consentAgeLimit ?? 18,
+    consentBothGuardians: row?.consentBothGuardians ?? false,
+    privacyContact: row?.privacyContact ?? null,
+    privacyController: row?.privacyController ?? null,
   };
 }
 
