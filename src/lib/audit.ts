@@ -63,6 +63,7 @@ export const AUDIT_EVENTS = {
   "club_member.invite_accept": spec(["clubId", "inviteId", "memberId", "merged", "userId"], "subject"),
   "club_member.invite_resend": spec(["clubId", "inviteId", "previousInviteId", "resentBy"], "subject"),
   "club_member.invite_revoke": spec(["clubId", "revokedBy"], "subject"),
+  "club_member.majority": spec(["clubId", "links", "majority"], "subject"),
   "club_member.merge": spec(["clubId", "inviteId", "keptClubMemberId", "memberId", "note", "retiredClubMemberId", "userId"], "subject"),
   "club_member.photo_remove": spec(["changedBy", "clubId"], "subject"),
   "club_member.photo_set": spec(["changedBy", "clubId", "replaced"], "subject"),

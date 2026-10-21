@@ -98,11 +98,22 @@ export interface MemberConsentView {
   outdated: boolean;
   givenBy: ConsentGivenBy | null;
   decidedAt: Date | null;
+  /**
+   * Wave 10 B6: a consent a guardian (or the board on paper) gave while the person was a minor asks the now adult person to
+   * confirm it. Information only: the consent stays as it is until the person grants again or revokes; nothing is blocked.
+   */
+  confirmation: { pending: boolean; due: string | null; overdue: boolean };
 }
+
+/** Days after the 18th birthday in which the person is asked to confirm (see `lib/majority.ts`). */
+export const CONFIRM_DAYS = 90;
 
 /** Current state of every askable purpose for one member, in the order of the purposes. */
 export async function memberConsentViews(clubId: string, clubMemberId: string, executor: DbExecutor = db): Promise<MemberConsentView[]> {
   const [askable, latest] = await Promise.all([askablePurposes(clubId, executor), latestRecords(clubMemberId, executor)]);
+  const [person] = await executor.select({ birthDate: clubMembers.birthDate }).from(clubMembers).where(eq(clubMembers.id, clubMemberId));
+  const clubLimit = await consentAgeLimitOf(clubId, { minAge: null }, executor);
+  const today = todayBerlin();
   const versionIds = [...latest.values()].map((r) => r.textVersionId);
   const versions = versionIds.length > 0 ? await executor.select({ id: consentTexts.id, version: consentTexts.version }).from(consentTexts).where(inArray(consentTexts.id, versionIds)) : [];
   const versionOf = new Map(versions.map((v) => [v.id, v.version]));
@@ -122,8 +133,24 @@ export async function memberConsentViews(clubId: string, clubMemberId: string, e
       outdated: record !== undefined && record.textVersionId !== text.id,
       givenBy: (record?.givenBy as ConsentGivenBy | undefined) ?? null,
       decidedAt: record?.createdAt ?? null,
+      confirmation: confirmationOf(record, person?.birthDate ?? null, purpose.minAge ?? clubLimit, today),
     };
   });
+}
+
+/** "Confirmation pending" of a granted consent that somebody else gave while the person was a minor (derived at read time). */
+export function confirmationOf(record: Pick<ConsentRecordRow, "action" | "givenBy" | "createdAt"> | undefined, birthDate: string | null, limit: number, today: string): MemberConsentView["confirmation"] {
+  const none = { pending: false, due: null, overdue: false };
+  if (!record || record.action !== "granted" || record.givenBy === "self" || birthDate === null) return none;
+  const wasMinor = ageOn(birthDate, todayBerlin(record.createdAt)) < limit;
+  if (!wasMinor || ageOn(birthDate, today) < limit) return none;
+  const [y, m, d] = birthDate.split("-").map(Number) as [number, number, number];
+  const leap = (y + limit) % 4 === 0 && ((y + limit) % 100 !== 0 || (y + limit) % 400 === 0);
+  const birthday = m === 2 && d === 29 && !leap ? `${y + limit}-03-01` : `${y + limit}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  const due = new Date(`${birthday}T00:00:00Z`);
+  due.setUTCDate(due.getUTCDate() + CONFIRM_DAYS);
+  const dueDay = due.toISOString().slice(0, 10);
+  return { pending: true, due: dueDay, overdue: dueDay < today };
 }
 
 export interface RecordConsentInput {
@@ -181,7 +208,9 @@ export async function recordConsent(tx: DbExecutor, input: RecordConsentInput): 
       throw new ConflictError("The consent text changed; show the current text and ask again", { details: { code: "consent_text_outdated", currentTextVersionId: current.id } });
     }
     textVersionId = current.id;
-    if (last?.action === "granted" && last.textVersionId === textVersionId) return { record: last, changed: false, purpose };
+    // Repeating the current grant writes nothing -- except the person confirming what somebody else gave for them (B6).
+    const confirms = input.givenBy === "self" && last?.givenBy !== "self";
+    if (last?.action === "granted" && last.textVersionId === textVersionId && !confirms) return { record: last, changed: false, purpose };
   } else {
     const fallback = last?.textVersionId ?? current?.id;
     if (!fallback) throw new ConflictError("This consent has no published text", { details: { code: "consent_not_available" } });
