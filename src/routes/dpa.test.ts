@@ -192,8 +192,20 @@ describe("processor agreement (B10)", () => {
       expect((await call(plain, "/club-members/me/data-export")).status).toBe(200);
       expect((await call(board, `/club-members/${ownerClubMemberId}/data-export`, { method: "POST", json: { identityChecked: true } })).status).toBe(200);
       expect((await call(board, `/club-members/${ownerClubMemberId}/erasure/plan`, { method: "POST" })).status).toBe(200);
-      // Other writing stays locked, for members too.
-      expect((await call(plain, "/club-members/me", { method: "PATCH", json: { phone: "123" } })).status).toBe(403);
+      // Self-service writes of the person stay open (rectification, visibility, notification settings) ...
+      for (const [path, method, json] of [
+        ["/club-members/me", "PATCH", { phone: "123" }],
+        [`/club-members/${ownerClubMemberId}/visibility`, "PUT", { phone: "mitglieder" }],
+        ["/notification-preferences", "PUT", {}],
+      ] as const) {
+        const res = await call(plain, path, { method, json });
+        expect(await res.clone().text(), `${method} ${path}`).not.toContain("DPA_REQUIRED");
+      }
+      expect((await call(plain, "/club-members/me", { method: "PATCH", json: { phone: "123" } })).status).toBe(200);
+      // ... other writing stays locked, for members too.
+      const locked = await addDepartment(plain);
+      expect(locked.status).toBe(403);
+      expect((await json(locked)).error.code).toBe("DPA_REQUIRED");
     });
 
     it("lets only the owner accept the current version, idempotently, and then unlocks writing", async () => {
