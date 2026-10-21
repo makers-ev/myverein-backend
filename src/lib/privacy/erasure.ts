@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 
-import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 
 import { member, session } from "../../auth/auth-schema.js";
 import { db } from "../../db/client.js";
+import { clubApplications } from "../../db/schema/club-applications.js";
 import { clubExitRequests } from "../../db/schema/club-exit-requests.js";
 import { clubMembers, type ClubMemberRow } from "../../db/schema/club-members.js";
 import { clubRoles } from "../../db/schema/club-roles.js";
@@ -137,9 +138,22 @@ export interface ExecuteInput {
   planDigest?: string;
 }
 
+async function lockFormsOf(tx: DbExecutor, clubId: string, clubMemberId: string): Promise<void> {
+  const viaApplication = await tx.select({ id: clubApplications.formSubmissionId }).from(clubApplications).where(and(eq(clubApplications.clubId, clubId), eq(clubApplications.clubMemberId, clubMemberId)));
+  const linked = viaApplication.map((r) => r.id).filter((id): id is string => id !== null);
+  await tx
+    .select({ id: formSubmissions.id })
+    .from(formSubmissions)
+    .where(and(eq(formSubmissions.clubId, clubId), or(eq(formSubmissions.subjectClubMemberId, clubMemberId), linked.length > 0 ? inArray(formSubmissions.id, linked) : undefined)))
+    .orderBy(formSubmissions.id)
+    .for("update");
+}
+
 export async function executeErasure(input: ExecuteInput): Promise<{ steps: ErasureStep[] }> {
   const { steps, purge } = await db.transaction(async (tx) => {
-    const { row, subject } = await loadSubject(input.clubId, input.clubMemberId, tx);
+    // Lock order (see form-retention.ts): submissions first, then the member row, which stays locked while the blockers are checked.
+    await lockFormsOf(tx, input.clubId, input.clubMemberId);
+    const { row, subject } = await loadSubject(input.clubId, input.clubMemberId, tx, { lock: true });
     const blockers = await blockersOf(tx, row, subject);
     if (blockers.length > 0) throw new ConflictError(blockers[0]!.message, { details: { code: blockers[0]!.code, blockers } });
     if (input.planDigest !== undefined) {

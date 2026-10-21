@@ -17,6 +17,7 @@ import { meetingAttendance, meetings } from "../db/schema/meetings.js";
 import { forms, formSubmissions, formVersions } from "../db/schema/forms.js";
 import { consentRecords, dataSubjectRequests } from "../db/schema/privacy.js";
 import { toAppError } from "../lib/errors.js";
+import { executeErasure } from "../lib/privacy/erasure.js";
 import { clubMemberRoutes } from "./club-members.js";
 import { consentPurposeRoutes } from "./consent-purposes.js";
 import { dataSubjectRequestRoutes } from "./data-subject-requests.js";
@@ -367,6 +368,25 @@ describe("member data export and erasure (B7/B8)", () => {
       expect(attendance).toHaveLength(2);
       expect(attendance.every((a) => a.memberId === null)).toBe(true);
       expect(attendance.map((a) => a.hasVotingRight).sort()).toEqual([false, true]);
+    });
+  });
+
+  describe("erasure locks the member row (L3)", () => {
+    it("sees a legal hold that is committed while the erasure waits", async () => {
+      const erin = await join("erin");
+      let setHold!: () => void;
+      const holdSet = new Promise<void>((resolve) => (setHold = resolve));
+      const holder = db.transaction(async (tx) => {
+        await tx.update(clubMembers).set({ legalHoldAt: new Date(), legalHoldReason: "Streit" }).where(eq(clubMembers.id, erin.clubMemberId));
+        setHold();
+        await new Promise((r) => setTimeout(r, 400));
+      });
+      await holdSet;
+      // Without the row lock this read the member before the hold was committed and erased anyway.
+      await expect(executeErasure({ clubId, clubMemberId: erin.clubMemberId, actorUserId: board.userId, via: "board" })).rejects.toMatchObject({ details: { code: "legal_hold" } });
+      await holder;
+      const [row] = await db.select().from(clubMembers).where(eq(clubMembers.id, erin.clubMemberId));
+      expect(row!.firstName).toBe("erin");
     });
   });
 
