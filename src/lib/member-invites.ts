@@ -340,7 +340,7 @@ async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberR
         eventType: "club_member.merge",
         subjectId: invited.id,
         // Ids only: the retired row is gone afterwards, this is the trace.
-        payload: { clubId, keptClubMemberId: invited.id, retiredClubMemberId: own.id, memberId: existing.id, userId: account.id, inviteId: invite.id, ...(ownNumberDiscarded ? { note: "own number discarded" } : {}) },
+        payload: { clubId, keptClubMemberId: invited.id, retiredClubMemberId: own.id, memberId: existing.id, userId: account.id, inviteId: invite.id, ...(ownNumberDiscarded ? { ownNumberDiscarded: true } : {}) },
       });
       await tx.delete(clubMembers).where(eq(clubMembers.id, own.id));
     }

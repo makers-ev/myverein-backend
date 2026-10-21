@@ -21,7 +21,7 @@ interface AuditEventSpec {
 const spec = <const K extends readonly string[]>(keys: K, member?: string): { keys: K; member?: string } => ({ keys, member });
 
 export const AUDIT_EVENTS = {
-  "absence.create": spec(["absenceId", "clubId", "clubMemberId", "kind", "reportedByKind"], "clubMemberId"),
+  "absence.create": spec(["absenceId", "clubId", "clubMemberId", "reportedByKind"], "clubMemberId"),
   "absence.update": spec(["absenceId", "changedFields", "clubId", "clubMemberId"], "clubMemberId"),
   "absence.withdraw": spec(["absenceId", "clubId", "clubMemberId"], "clubMemberId"),
   "admin.job_retry": spec(["actor", "type"]),
@@ -66,7 +66,7 @@ export const AUDIT_EVENTS = {
   "club_member.invite_revoke": spec(["clubId", "revokedBy"], "subject"),
   "club_member.majority": spec(["clubId", "links", "majority"], "subject"),
   "club_member.privacy_notice_sent": spec(["clubId", "version"], "subject"),
-  "club_member.merge": spec(["clubId", "inviteId", "keptClubMemberId", "memberId", "note", "retiredClubMemberId", "userId"], "subject"),
+  "club_member.merge": spec(["clubId", "inviteId", "keptClubMemberId", "memberId", "ownNumberDiscarded", "retiredClubMemberId", "userId"], "subject"),
   "club_member.photo_remove": spec(["changedBy", "clubId"], "subject"),
   "club_member.photo_set": spec(["changedBy", "clubId", "replaced"], "subject"),
   "club_member.sensitive_read": spec(["clubId", "count", "fields", "scope"], "subject"),
@@ -160,7 +160,7 @@ export const AUDIT_EVENTS = {
   "meeting_invitee.add": spec(["clubId", "memberId", "notify"]),
   "meeting_invitee.remove": spec(["clubId", "memberId"]),
   "meeting_invitee.respond": spec(["clubId", "memberId", "response"]),
-  "meeting_resolution.correct": spec(["after", "before", "clubId", "correctionNote", "meetingId"]),
+  "meeting_resolution.correct": spec(["changedFields", "clubId", "meetingId"]),
   "meeting_resolution.create": spec(["clubId", "meetingId"]),
   "member_category.archive": spec(["changedBy", "clearedAutoTransitions", "clubId", "key", "movedMembers", "movedTo"]),
   "member_category.create": spec(["clubId", "createdBy", "key"]),

@@ -568,16 +568,8 @@ meetingRoutes.patch(
       payload: {
         clubId,
         meetingId: id,
-        correctionNote,
-        before: {
-          description: existing.description,
-          votesFor: existing.votesFor,
-          votesAgainst: existing.votesAgainst,
-          votesAbstain: existing.votesAbstain,
-          result: existing.result,
-          correctionNote: existing.correctionNote,
-        },
-        after: changes,
+        // Field names only: the values and the note are club content (resolution text, counts), not audit data.
+        changedFields: Object.keys(changes),
       },
     });
 

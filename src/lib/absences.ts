@@ -61,7 +61,7 @@ export async function createAbsence(clubId: string, subject: ClubMemberRow, inpu
       .insert(absenceReports)
       .values({ clubId, clubMemberId: subject.id, kind: input.kind, startsOn: input.startsOn, endsOn: input.endsOn, note: input.note ?? null, reportedByUserId: by.userId, reportedByKind: by.kind })
       .returning();
-    await writeAudit(tx, { eventType: "absence.create", subjectId: created!.id, payload: { clubId, absenceId: created!.id, clubMemberId: subject.id, kind: input.kind, reportedByKind: by.kind } });
+    await writeAudit(tx, { eventType: "absence.create", subjectId: created!.id, payload: { clubId, absenceId: created!.id, clubMemberId: subject.id, reportedByKind: by.kind } });
     return created!;
   });
   await notifyAbsence("reported", clubId, subject, row, by.userId);

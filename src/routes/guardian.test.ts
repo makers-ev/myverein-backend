@@ -481,6 +481,7 @@ describe("guardian access, absences and field visibility (B4, B5, B12)", () => {
       expect(new Set(rows.map((r) => `${r.channel}`))).toEqual(new Set(["in_app", "push"]));
       const audits = await db.select().from(auditLog).where(and(eq(auditLog.clubId, clubId), eq(auditLog.eventType, "absence.create")));
       expect(JSON.stringify(audits.map((a) => a.payload))).not.toMatch(/Fieber|Erkältung/);
+      expect(audits.every((a) => !Object.hasOwn(a.payload as object, "kind"))).toBe(true); // not even "krank" is stored
     });
 
     it("withdraws (zurückziehen): the report disappears from the lists, repeating is harmless, changing is refused", async () => {
