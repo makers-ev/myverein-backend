@@ -95,4 +95,22 @@ describe("form builder consent block (purposeKey)", () => {
     const [purpose] = await db.select().from(consentPurposes).where(eq(consentPurposes.id, fotoPurposeId));
     expect(purpose?.requested).toBe(false);
   });
+
+  it("skips the consent of an under-age self applicant (a guardian or the board decides for a minor)", async () => {
+    const { member, mapping } = await applyAndApprove("minor", { foto_ok: true, birth_date: "2016-01-01" });
+    expect(await db.select().from(consentRecords).where(eq(consentRecords.clubMemberId, member.id))).toHaveLength(0);
+    expect(mapping.skipped).toEqual(expect.arrayContaining([expect.objectContaining({ fieldKey: "foto_ok", reason: "consent_requires_guardian" })]));
+  });
+
+  it("does not record a consent against a text that changed after the applicant saw it", async () => {
+    const who = await signUpAndVerify(`cblock-old-${suffix}@example.com`, "Applicant old");
+    applicants.push(who.userId);
+    const apply = await call(who, "/club-members/apply", { method: "POST", body: { clubId: club.clubId, answers: { category: "aktiv", privacy_consent: true, foto_ok: true } } });
+    const applicationId = ((await apply.json()) as Json).data.application.id as string;
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await call(club.founder, `/consent-purposes/${fotoPurposeId}/texts`, { method: "POST", clubId: club.clubId, body: { body: "Neuer Text: Fotos auch auf Instagram." } })).status).toBe(201);
+    const approve = (await (await call(club.founder, `/club-applications/${applicationId}/approve`, { method: "POST", clubId: club.clubId })).json()) as Json;
+    expect(approve.data.mapping.skipped).toEqual(expect.arrayContaining([expect.objectContaining({ fieldKey: "foto_ok", reason: "consent_text_outdated" })]));
+    expect(await db.select().from(consentRecords).where(eq(consentRecords.clubMemberId, approve.data.clubMember.id))).toHaveLength(0);
+  });
 });
