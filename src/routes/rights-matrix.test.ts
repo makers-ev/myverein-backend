@@ -31,6 +31,8 @@ import { adminNotificationRoutes } from "./admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./admin-notification-templates.js";
 import { adminJobRoutes } from "./admin-jobs.js";
 import { adminRetentionRoutes } from "./admin-retention.js";
+import { adminDpaAcceptanceRoutes, adminDpaVersionRoutes } from "./admin-dpa.js";
+import { dpaRoutes } from "./dpa.js";
 import { retentionPolicyRoutes } from "./retention-policies.js";
 import { adminStatsRoutes } from "./admin-stats.js";
 import { availabilityRoutes } from "./availability.js";
@@ -91,6 +93,9 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/notifications", "notificationRoutes", notificationRoutes],
   ["/admin/jobs", "adminJobRoutes", adminJobRoutes],
   ["/admin/retention-runs", "adminRetentionRoutes", adminRetentionRoutes],
+  ["/admin/dpa-versions", "adminDpaVersionRoutes", adminDpaVersionRoutes],
+  ["/admin/dpa-acceptances", "adminDpaAcceptanceRoutes", adminDpaAcceptanceRoutes],
+  ["/dpa", "dpaRoutes", dpaRoutes],
   ["/retention-policies", "retentionPolicyRoutes", retentionPolicyRoutes],
   ["/admin/notifications", "adminNotificationRoutes", adminNotificationRoutes],
   ["/admin/notification-templates", "adminNotificationTemplateRoutes", adminNotificationTemplateRoutes],
@@ -223,6 +228,7 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /data-subject-requests": { clubMemberId: SOME_ID, kind: "access" },
   "PATCH /data-subject-requests/:id": { status: "in_progress" },
   "PUT /retention-policies/:category": { retainDays: 100 },
+  "POST /dpa/accept": { dpaVersionId: SOME_ID, signerName: "Max Mustermann", authorized: true },
   "POST /departments": { name: "Abteilung" },
   "PUT /club-info/:slug": { title: "Titel" },
   "POST /calendars": { name: "Kalender" },

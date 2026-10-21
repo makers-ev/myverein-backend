@@ -94,7 +94,7 @@ describe("media gate (static scan)", () => {
   it("nothing redirects to a file, builds a raw Response from bytes or serves with a hand-made Content-Disposition", () => {
     expect(offenders(/\b(?:c|ctx|res)\.redirect\s*\(|\bResponse\.redirect\s*\(/)).toEqual([]);
     expect(offenders(/\bnew Response\s*\(/)).toEqual([]);
-    expect(offenders(/Content-Disposition/i, ["lib/media.ts", "lib/privacy/respond.ts", "routes/audit-log.ts", "routes/club-members.ts", "routes/media.ts"])).toEqual([]);
+    expect(offenders(/Content-Disposition/i, ["lib/media.ts", "lib/privacy/respond.ts", "routes/audit-log.ts", "routes/club-members.ts", "routes/dpa.ts", "routes/media.ts"])).toEqual([]);
   });
 
   it("only the media layer streams bytes: `c.body(new Uint8Array(...))` of a file exists only in lib/media.ts", () => {

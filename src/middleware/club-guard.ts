@@ -10,6 +10,7 @@ import { auditContext } from "../lib/audit.js";
 import { IMPLICIT_ROLE_TYPE } from "../lib/club-permissions.js";
 import { BadRequestError, NotFoundError } from "../lib/errors.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "../lib/member-lifecycle.js";
+import { dpaGate } from "./dpa-gate.js";
 import type { SessionEnv } from "./session-guard.js";
 
 type MemberRow = typeof member.$inferSelect;
@@ -76,6 +77,9 @@ export const clubGuard = createMiddleware<ClubEnv>(async (c: Context, next: Next
   const effective = [...roleTypes];
   if (membership.role !== "guest") effective.unshift(IMPLICIT_ROLE_TYPE);
   c.set("clubRoleTypes", effective);
+
+  // Wave 10 B10: no writing while the club has not accepted the processor agreement (DPA_REQUIRED, grace period).
+  await dpaGate(c, clubId);
 
   await next();
 });
