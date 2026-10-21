@@ -89,6 +89,8 @@ export interface MemberConsentView {
   description: string | null;
   requested: boolean;
   state: ConsentState;
+  /** The purpose was archived or switched off while this consent is still granted: it can only be revoked, not given again. */
+  retired: boolean;
   /** `requested` and no decision yet: appears in the "open" list. Granting is voluntary, declining has no consequence. */
   open: boolean;
   text: { id: string; version: number; body: string };
@@ -110,14 +112,27 @@ export const CONFIRM_DAYS = 90;
 
 /** Current state of every askable purpose for one member, in the order of the purposes. */
 export async function memberConsentViews(clubId: string, clubMemberId: string, executor: DbExecutor = db): Promise<MemberConsentView[]> {
-  const [askable, latest] = await Promise.all([askablePurposes(clubId, executor), latestRecords(clubMemberId, executor)]);
+  const [askableNow, latest] = await Promise.all([askablePurposes(clubId, executor), latestRecords(clubMemberId, executor)]);
+  // A consent that is still granted for a purpose that is no longer askable stays listed (as `retired`) so it can be revoked (Art. 7(3)).
+  const askableIds = new Set(askableNow.map((a) => a.purpose.id));
+  const grantedIds = [...latest.values()].filter((r) => r.action === "granted" && !askableIds.has(r.purposeId)).map((r) => r.purposeId);
+  const retiredPurposes = grantedIds.length > 0 ? await executor.select().from(consentPurposes).where(and(eq(consentPurposes.clubId, clubId), inArray(consentPurposes.id, grantedIds))).orderBy(asc(consentPurposes.sortOrder), asc(consentPurposes.name)) : [];
+  const retiredTexts = retiredPurposes.length > 0 ? await executor.select().from(consentTexts).where(inArray(consentTexts.id, retiredPurposes.map((p) => latest.get(p.id)!.textVersionId))) : [];
+  const textById = new Map(retiredTexts.map((t) => [t.id, t]));
+  const askable = [
+    ...askableNow.map((a) => ({ ...a, retired: false })),
+    ...retiredPurposes.flatMap((purpose) => {
+      const text = textById.get(latest.get(purpose.id)!.textVersionId);
+      return text ? [{ purpose, text, retired: true }] : [];
+    }),
+  ];
   const [person] = await executor.select({ birthDate: clubMembers.birthDate }).from(clubMembers).where(eq(clubMembers.id, clubMemberId));
   const clubLimit = await consentAgeLimitOf(clubId, { minAge: null }, executor);
   const today = todayBerlin();
   const versionIds = [...latest.values()].map((r) => r.textVersionId);
   const versions = versionIds.length > 0 ? await executor.select({ id: consentTexts.id, version: consentTexts.version }).from(consentTexts).where(inArray(consentTexts.id, versionIds)) : [];
   const versionOf = new Map(versions.map((v) => [v.id, v.version]));
-  return askable.map(({ purpose, text }) => {
+  return askable.map(({ purpose, text, retired }) => {
     const record = latest.get(purpose.id);
     const state: ConsentState = record ? (record.action === "granted" ? "granted" : "revoked") : "none";
     return {
@@ -126,8 +141,9 @@ export async function memberConsentViews(clubId: string, clubMemberId: string, e
       name: purpose.name,
       description: purpose.description,
       requested: purpose.requested,
+      retired,
       state,
-      open: purpose.requested && state === "none",
+      open: !retired && purpose.requested && state === "none",
       text: { id: text.id, version: text.version, body: text.body },
       recordedTextVersion: record ? (versionOf.get(record.textVersionId) ?? null) : null,
       outdated: record !== undefined && record.textVersionId !== text.id,
@@ -181,12 +197,13 @@ export interface RecordConsentResult {
 /**
  * Appends a consent event inside `tx`. Rules: the purpose must belong to the club and be askable (active, published
  * text); a grant refers to the currently published text version (409 `consent_text_outdated`); a revoke is allowed any
- * time (it refers to the version of the last event, else the current one); repeating the current state writes nothing.
+ * time (also for an archived or inactive purpose) (it refers to the version of the last event, else the current one); repeating the current state writes nothing.
  * Who may record for whom is decided by the callers.
  */
 export async function recordConsent(tx: DbExecutor, input: RecordConsentInput): Promise<RecordConsentResult> {
   const [purpose] = await tx.select().from(consentPurposes).where(and(eq(consentPurposes.id, input.purposeId), eq(consentPurposes.clubId, input.clubId)));
-  if (!purpose || purpose.archivedAt !== null) throw new NotFoundError("Consent purpose not found");
+  // Revoking stays possible for an archived purpose (Art. 7(3) GDPR); only a new grant needs a live one.
+  if (!purpose || (purpose.archivedAt !== null && input.action === "granted")) throw new NotFoundError("Consent purpose not found");
   if (input.givenBy === "board_paper" && (!input.proofDate || !input.proofSource?.trim())) {
     throw new ValidationError("A paper proof needs the date and the source", { details: { code: "proof_required" } });
   }

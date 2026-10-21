@@ -221,6 +221,21 @@ describe("consents (B3)", () => {
       expect(view.data.history.every((h: Json) => h.version === 2 && h.givenBy === "self" && h.proofDate === null)).toBe(true);
     });
 
+    it("keeps the revocation possible after the purpose was archived (Art. 7(3)); granting stays blocked", async () => {
+      const created = (await json(await call(board, "/consent-purposes", { method: "POST", json: { name: "Archivtest" } }))).data;
+      const text = (await publish(created.id, "Archivtest Einwilligungstext")).data;
+      expect((await grant(adult, adult.clubMemberId, created.id, text.id)).status).toBe(201);
+      expect((await call(board, `/consent-purposes/${created.id}`, { method: "PATCH", json: { archived: true } })).status).toBe(200);
+
+      const listed = (await json(await call(adult, `/club-members/${adult.clubMemberId}/consents`))).data.consents.find((c: Json) => c.key === created.key);
+      expect(listed).toMatchObject({ state: "granted", retired: true, open: false });
+      expect((await grant(adult, adult.clubMemberId, created.id, text.id)).status).toBe(404);
+      expect((await revoke(adult, adult.clubMemberId, created.id)).status).toBe(200);
+      expect(await records(adult.clubMemberId, created.id)).toHaveLength(2);
+      const after = (await json(await call(adult, `/club-members/${adult.clubMemberId}/consents`))).data.consents;
+      expect(after.find((c: Json) => c.key === created.key)).toBeUndefined();
+    });
+
     it("only against the currently published text version: an old or foreign version is 409", async () => {
       const old = (await json(await call(board, `/consent-purposes/${purposeFoto}/texts`))).data.find((t: Json) => t.version === 1).id;
       const res = await grant(stranger, stranger.clubMemberId, purposeFoto, old);
