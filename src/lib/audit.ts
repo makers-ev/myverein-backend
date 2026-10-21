@@ -21,6 +21,9 @@ interface AuditEventSpec {
 const spec = <const K extends readonly string[]>(keys: K, member?: string): { keys: K; member?: string } => ({ keys, member });
 
 export const AUDIT_EVENTS = {
+  "absence.create": spec(["absenceId", "clubId", "clubMemberId", "kind", "reportedByKind"], "clubMemberId"),
+  "absence.update": spec(["absenceId", "changedFields", "clubId", "clubMemberId"], "clubMemberId"),
+  "absence.withdraw": spec(["absenceId", "clubId", "clubMemberId"], "clubMemberId"),
   "admin.job_retry": spec(["actor", "type"]),
   "audit_log.export": spec(["clubId", "filters", "rows"]),
   "calendar.create": spec(["calendarId", "clubId"]),
@@ -79,6 +82,11 @@ export const AUDIT_EVENTS = {
   "club_role.assign": spec(["clubId", "clubMemberId", "departmentId", "roleType"], "clubMemberId"),
   "club_role.revoke": spec(["clubId", "clubMemberId", "roleId", "roleType"], "clubMemberId"),
   "club_settings.update": spec(["changedBy", "changedFields", "clubId"]),
+  "consent.grant": spec(["clubId", "clubMemberId", "givenBy", "purposeId", "textVersionId", "via"], "clubMemberId"),
+  "consent.revoke": spec(["clubId", "clubMemberId", "givenBy", "purposeId", "textVersionId", "via"], "clubMemberId"),
+  "consent_purpose.create": spec(["clubId", "key"]),
+  "consent_purpose.update": spec(["changedFields", "clubId"]),
+  "consent_text.publish": spec(["clubId", "purposeId", "sha256", "version"]),
   "department.create": spec(["clubId", "name"]),
   "department.delete": spec(["clubId"]),
   "department.update": spec(["changedFields", "clubId"]),
@@ -108,6 +116,7 @@ export const AUDIT_EVENTS = {
   "form_submission.withdraw": spec(["clubId", "previousStatus", "userId"]),
   "guardian_link.create": spec(["clubId", "decidedBy", "guardianMemberId", "via"], "subject"),
   "guardian_link.delete": spec(["clubId", "guardianMemberId"], "subject"),
+  "guardian_link.update": spec(["changedFields", "clubId", "guardianMemberId"], "subject"),
   "inventory_damage_report.create": spec(["clubId", "itemId", "memberId"]),
   "inventory_damage_report.update": spec(["clubId", "itemId", "status"]),
   "inventory_item.create": spec(["clubId", "name"]),
@@ -128,6 +137,7 @@ export const AUDIT_EVENTS = {
   "location_wifi.delete": spec(["clubId", "locationId"]),
   "location_wifi.update": spec(["clubId", "label", "locationId"]),
   "media.sensitive_access": spec(["accessedBy", "mediaId", "ownerId", "ownerType", "reason"]),
+  "member_field_visibility.update": spec(["changedBy", "clubId", "fields"], "subject"),
   "meeting.create": spec(["clubId", "type"]),
   "meeting.delete": spec(["clubId", "notify"]),
   "meeting.notify_suppressed": spec(["actor", "cancelled", "clubId"]),
@@ -151,6 +161,7 @@ export const AUDIT_EVENTS = {
   "profile_module.activate": spec(["by", "clubId", "moduleId", "reactivated", "sensitive"]),
   "profile_module.deactivate": spec(["by", "clubId", "moduleId"]),
   "rate_limit.exceeded": spec(["limit", "rule", "windowSeconds"]),
+  "ward_event_response.set": spec(["clubId", "eventId", "status", "wardClubMemberId"], "wardClubMemberId"),
   "session.create": spec(["ipAddress", "sessionId", "userAgent"]),
 } as const satisfies Record<string, AuditEventSpec>;
 

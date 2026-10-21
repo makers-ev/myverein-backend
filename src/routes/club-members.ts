@@ -45,6 +45,7 @@ import { MAX_PHOTO_BYTES, streamMedia } from "../lib/media.js";
 import { buildCsv, importMaxBytes } from "../lib/member-csv.js";
 import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADERS, importFingerprint, importTokenDuplicates, importTokenId, verifyImportToken } from "../lib/member-import.js";
 import { nextMemberNumber } from "../lib/member-number.js";
+import { memberConsentRoutes } from "./member-consents.js";
 import { memberCustomFieldRoutes } from "./club-member-custom-fields.js";
 import { applicationPendingError } from "../lib/form-applications.js";
 import type { FormField } from "../lib/form-schema.js";
@@ -1874,3 +1875,6 @@ clubMemberRoutes.delete("/:id/guardians/:guardianMemberId", async (c) => {
 
   return c.body(null, 204);
 });
+
+// Consents of a member (Wave 10 B3): own file, mounted behind the session/club guards above.
+clubMemberRoutes.route("/:id/consents", memberConsentRoutes);

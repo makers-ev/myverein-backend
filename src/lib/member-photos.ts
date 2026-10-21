@@ -2,12 +2,12 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import { clubMembers, type ClubMemberRow } from "../db/schema/club-members.js";
-import { guardianLinks } from "../db/schema/guardian-links.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { NotFoundError } from "./errors.js";
 import { discardStoredFile, IMAGE_TYPES, MAX_PHOTO_BYTES, markMediaDeleted, purgeMediaFile, signedMediaUrls, storeUpload } from "./media.js";
 import { ageOn, todayBerlin } from "./member-lifecycle.js";
 import { writeAudit } from "./audit.js";
+import { liveWardIds } from "./guardian-scope.js";
 
 /**
  * Member profile photos (Wave 7 B13) on top of the central media layer.
@@ -33,14 +33,9 @@ export interface PhotoCaller {
   canWrite?: boolean;
 }
 
-/** Ids of the given club members that the caller is a linked guardian of. */
+/** Ids of the given club members that the caller is a (live, confirmed) guardian of -- see `guardianScope`. */
 export async function guardedWardIds(callerMemberId: string, clubMemberIds: string[]): Promise<Set<string>> {
-  if (clubMemberIds.length === 0) return new Set();
-  const links = await db
-    .select({ id: guardianLinks.wardClubMemberId })
-    .from(guardianLinks)
-    .where(and(eq(guardianLinks.guardianMemberId, callerMemberId), inArray(guardianLinks.wardClubMemberId, clubMemberIds)));
-  return new Set(links.map((l) => l.id));
+  return liveWardIds(callerMemberId, clubMemberIds);
 }
 
 /** May `caller` see the photo of `row`? (own / members:write / members:read_sensitive / guardian of the ward) */

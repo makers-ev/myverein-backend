@@ -20,6 +20,7 @@ import { clubStatsRoutes } from "./club-stats.js";
 import { clubExitRequestRoutes } from "./club-exit-requests.js";
 import { clubAnnouncementRoutes, clubInboxRoutes } from "./club-announcements.js";
 import { notificationPreferenceRoutes, unsubscribeRoutes } from "./notification-preferences.js";
+import { consentOverviewRoutes, consentPurposeRoutes } from "./consent-purposes.js";
 import { clubSettingsRoutes } from "./club-settings.js";
 import { auditLogRoutes } from "./audit-log.js";
 import { adminEmailRoutes } from "./admin-emails.js";
@@ -68,6 +69,8 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/admin", "adminEmailRoutes", adminEmailRoutes],
   ["/admin", "adminClubRoutes", adminClubRoutes],
   ["/club-stats", "clubStatsRoutes", clubStatsRoutes],
+  ["/consent-purposes", "consentPurposeRoutes", consentPurposeRoutes],
+  ["/consents", "consentOverviewRoutes", consentOverviewRoutes],
   ["/club-settings", "clubSettingsRoutes", clubSettingsRoutes],
   ["/audit-log", "auditLogRoutes", auditLogRoutes],
   ["/club-exit-requests", "clubExitRequestRoutes", clubExitRequestRoutes],
@@ -153,6 +156,8 @@ const SELF_SERVICE: Record<string, string> = {
   "POST /push-tokens": "own device token (bound to the caller's account; a token of another account is re-assigned, never read)",
   "DELETE /push-tokens/:token": "logout of an own device (only the caller's own token is removed)",
   "POST /club-inbox/:id/read": "own in-app message (bound to user and club; foreign ids are 404)",
+  "POST /club-members/:id/consents/:purposeId": "consent of the person itself or of a linked guardian (decided in the route: foreign members are 403, unknown ones 404; the board needs privacy:manage and a paper proof)",
+  "DELETE /club-members/:id/consents/:purposeId": "revocation by the person itself or a linked guardian (same rules as the grant)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
 };
 
@@ -179,6 +184,10 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /club-exit-requests/:id/reject": { note: "Nein" },
   "POST /club-members/:id/roles": { roleType: "kassenwart" },
   "POST /club-members/:id/guardians": { guardianMemberId: SOME_ID },
+  "POST /club-members/:id/consents/:purposeId": { textVersionId: SOME_ID },
+  "POST /consent-purposes": { name: "Neuer Zweck" },
+  "PATCH /consent-purposes/:id": { requested: true },
+  "POST /consent-purposes/:id/texts": { body: "Ein Einwilligungstext von ausreichender Länge." },
   "POST /departments": { name: "Abteilung" },
   "PUT /club-info/:slug": { title: "Titel" },
   "POST /calendars": { name: "Kalender" },

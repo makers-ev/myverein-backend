@@ -16,6 +16,8 @@ import { MASTER_TARGETS, planAcceptance } from "./form-acceptance.js";
 import type { FormField } from "./form-schema.js";
 import { markMediaDeleted, reassignMediaOwner } from "./media.js";
 import { writeAudit } from "./audit.js";
+import { recordConsent } from "./consent.js";
+import { consentPurposes } from "../db/schema/privacy.js";
 
 /**
  * Link between an application (`club_applications`) and its form submission, and the acceptance step (Wave 8 B6).
@@ -178,6 +180,8 @@ export async function applyAcceptance(
     }
   }
 
+  await recordFormConsents(tx, { clubId, context, clubMemberId, mapping });
+
   const now = new Date();
   await tx
     .update(formSubmissions)
@@ -185,6 +189,40 @@ export async function applyAcceptance(
     .where(eq(formSubmissions.id, sub.id));
 
   return { clubMember: clubMember!, mapping, purge };
+}
+
+/**
+ * The form builder's consent block (Wave 10 B3): every ticked consent field with a `purposeKey` becomes a consent event of
+ * that club purpose through the SAME service function as the consent routes (`recordConsent`). A guardian's child
+ * application records `guardian`, an own application `self`; the event is dated with the submission. Voluntary: a purpose
+ * that is unknown, inactive or without a published text is skipped (reported in the mapping), never an error for the acceptance.
+ */
+async function recordFormConsents(tx: DbExecutor, input: { clubId: string; context: DecisionContext; clubMemberId: string; mapping: MappingReport }): Promise<void> {
+  const { clubId, context, clubMemberId, mapping } = input;
+  const answers = (context.sub.answers ?? {}) as Record<string, unknown>;
+  const fields = (context.version.fields as FormField[]).filter((f) => f.type === "consent" && f.purposeKey !== undefined && Object.hasOwn(answers, f.key) && answers[f.key] === true);
+  for (const field of fields) {
+    const [purpose] = await tx.select({ id: consentPurposes.id }).from(consentPurposes).where(and(eq(consentPurposes.clubId, clubId), eq(consentPurposes.key, field.purposeKey!)));
+    if (!purpose) {
+      mapping.skipped.push({ fieldKey: field.key, reason: "consent_purpose_unknown" });
+      continue;
+    }
+    try {
+      await recordConsent(tx, {
+        clubId,
+        clubMemberId,
+        purposeId: purpose.id,
+        action: "granted",
+        givenBy: context.sub.onBehalfOf === "guardian" ? "guardian" : "self",
+        recordedByUserId: context.sub.submittedByUserId,
+        via: "application",
+        ...(context.sub.submittedAt ? { at: context.sub.submittedAt } : {}),
+      });
+    } catch (err) {
+      if (!(err instanceof ConflictError) && !(err instanceof NotFoundError)) throw err;
+      mapping.skipped.push({ fieldKey: field.key, reason: "consent_unavailable" });
+    }
+  }
 }
 
 /** The board rejected the application: the submission keeps its answers (record), its files stay for the retention window. */
