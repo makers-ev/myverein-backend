@@ -1867,7 +1867,9 @@ clubMemberRoutes.get("/:id/guardians", async (c) => {
   // Names of a child's guardians are personal data: board with members:read_sensitive, or the guardian themself.
   const isGuardianOfWard = (await liveLinkOf(caller.memberId, ward.id)) !== null;
   if (!caller.canReadSensitive && !isGuardianOfWard) throw new ForbiddenError("Missing members:read_sensitive permission");
-  return c.json({ data: rows.map((r) => shapeGuardianLink(r.link, ward, r.guardian)) });
+  // A guardian sees only their own link, never the co-guardians (names and rights of other people).
+  const visible = caller.canReadSensitive ? rows : rows.filter((r) => r.link.guardianMemberId === caller.memberId);
+  return c.json({ data: visible.map((r) => shapeGuardianLink(r.link, ward, r.guardian)) });
 });
 
 clubMemberRoutes.post("/:id/guardians", zValidator("json", guardianLinkSchema, validationHook), async (c) => {

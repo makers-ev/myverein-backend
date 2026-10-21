@@ -236,6 +236,16 @@ describe("consents (B3)", () => {
       expect(after.find((c: Json) => c.key === created.key)).toBeUndefined();
     });
 
+    it("shows a guardian only their own link, the board all of them (M6)", async () => {
+      // A guardian who is a club member (a guest guardian cannot read member rows at all).
+      expect((await call(board, `/club-members/${childId}/guardians`, { method: "POST", json: { guardianMemberId: stranger.clubMemberId } })).status).toBe(201);
+      const own = (await json(await call(stranger, `/club-members/${childId}/guardians`))).data as Json[];
+      expect(own.map((l) => l.guardianMemberId)).toEqual([stranger.memberId]);
+      const all = (await json(await call(board, `/club-members/${childId}/guardians`))).data as Json[];
+      expect(all).toHaveLength(3);
+      await db.delete(guardianLinks).where(eq(guardianLinks.guardianMemberId, stranger.memberId));
+    });
+
     it("only against the currently published text version: an old or foreign version is 409", async () => {
       const old = (await json(await call(board, `/consent-purposes/${purposeFoto}/texts`))).data.find((t: Json) => t.version === 1).id;
       const res = await grant(stranger, stranger.clubMemberId, purposeFoto, old);
