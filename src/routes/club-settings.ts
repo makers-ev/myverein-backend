@@ -6,7 +6,6 @@ import { eq } from "drizzle-orm";
 
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubSettings, NOTICE_MODES } from "../db/schema/club-settings.js";
 import { normalizeEmail } from "../lib/audience.js";
 import { formatFrom } from "../lib/email.js";
@@ -21,6 +20,7 @@ import { ForbiddenError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Club-wide parameters (Wave 7 B6). Every member reads the values that concern them (notice period/mode for the
@@ -132,7 +132,7 @@ clubSettingsRoutes.patch(
         .insert(clubSettings)
         .values({ clubId, ...changes })
         .onConflictDoUpdate({ target: clubSettings.clubId, set: { ...changes, updatedAt: new Date() } });
-      await tx.insert(auditLog).values({ eventType: "club_settings.update", subjectId: clubId, payload: { clubId, changedFields: Object.keys(changes), changedBy: c.get("membership").id } });
+      await writeAudit(tx, { eventType: "club_settings.update", subjectId: clubId, payload: { clubId, changedFields: Object.keys(changes), changedBy: c.get("membership").id } });
     });
 
     return c.json({ data: await loadClubSettings(db, clubId) });

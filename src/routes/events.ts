@@ -5,7 +5,6 @@ import { z } from "zod";
 
 import { db } from "../db/client.js";
 import { clubMailLanguage } from "../lib/club-settings.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { calendars } from "../db/schema/calendars.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
 import { events, type EventRow } from "../db/schema/events.js";
@@ -20,6 +19,7 @@ import { logger } from "../lib/logger.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 export const eventRoutes = new Hono<ClubEnv>();
 
@@ -180,7 +180,7 @@ eventRoutes.post(
       })
       .returning();
 
-    await db.insert(auditLog).values({ eventType: "event.create", subjectId: row.id, payload: { clubId, calendarId: body.calendarId } });
+    await writeAudit(db, { eventType: "event.create", subjectId: row.id, payload: { clubId, calendarId: body.calendarId } });
 
     return c.json({ data: shapeEvent(row) }, 201);
   },
@@ -230,7 +230,7 @@ eventRoutes.patch(
       .where(eq(events.id, id))
       .returning();
 
-    await db.insert(auditLog).values({ eventType: "event.update", subjectId: id, payload: { clubId, changes: body, ...(notifyFlag === false ? { notify: false } : {}) } });
+    await writeAudit(db, { eventType: "event.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body), ...(notifyFlag === false ? { notify: false } : {}) } });
 
     // Essential change (start, end, location) of an event that has not been cancelled: tell attendees and waitlist (B10).
     const diff = essentialDiff(existing, row!);
@@ -260,7 +260,7 @@ eventRoutes.delete("/:id", async (c) => {
   const hadRsvps = audienceBefore !== null && (await db.query.eventAttendees.findFirst({ where: eq(eventAttendees.eventId, id) })) !== undefined;
 
   await db.delete(events).where(eq(events.id, id));
-  await db.insert(auditLog).values({ eventType: "event.delete", subjectId: id, payload: { clubId, ...(notifyFlag === "false" ? { notify: false } : {}) } });
+  await writeAudit(db, { eventType: "event.delete", subjectId: id, payload: { clubId, ...(notifyFlag === "false" ? { notify: false } : {}) } });
   if (hadRsvps) {
     await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: { ...existing, updatedAt: new Date() }, departmentId: calendar.departmentId, cancelled: true, suppress: notifyFlag === "false", audience: audienceBefore });
   }
@@ -301,7 +301,7 @@ eventRoutes.post(
       .returning();
     if (!row) throw new ConflictError("Event is already cancelled");
 
-    await db.insert(auditLog).values({ eventType: "event.cancel", subjectId: id, payload: { clubId, hasReason: Boolean(body.reason?.trim()), ...(body.notify === false ? { notify: false } : {}) } });
+    await writeAudit(db, { eventType: "event.cancel", subjectId: id, payload: { clubId, hasReason: Boolean(body.reason?.trim()), ...(body.notify === false ? { notify: false } : {}) } });
     await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: row, departmentId: calendar.departmentId, cancelled: true, reason: row.cancelReason, suppress: body.notify === false });
 
     return c.json({ data: shapeEvent(row) });
@@ -379,7 +379,7 @@ eventRoutes.post("/:id/rsvp", async (c) => {
       })
       .returning();
 
-    await tx.insert(auditLog).values({ eventType: "event_attendee.rsvp", subjectId: id, payload: { clubId, memberId: membership.id, status } });
+    await writeAudit(tx, { eventType: "event_attendee.rsvp", subjectId: id, payload: { clubId, memberId: membership.id, status } });
 
     return created;
   });
@@ -408,7 +408,7 @@ eventRoutes.delete("/:id/rsvp", async (c) => {
     if (!existing) throw new NotFoundError("RSVP not found");
 
     await tx.delete(eventAttendees).where(eq(eventAttendees.id, existing.id));
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "event_attendee.cancel",
       subjectId: id,
       payload: { clubId, memberId: membership.id },
@@ -423,7 +423,7 @@ eventRoutes.delete("/:id/rsvp", async (c) => {
       });
       if (nextInLine) {
         await tx.update(eventAttendees).set({ status: "angemeldet" }).where(eq(eventAttendees.id, nextInLine.id));
-        await tx.insert(auditLog).values({
+        await writeAudit(tx, {
           eventType: "event_attendee.promote",
           subjectId: id,
           payload: { clubId, memberId: nextInLine.memberId },

@@ -1,13 +1,13 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers, type ClubMemberRow } from "../db/schema/club-members.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { NotFoundError } from "./errors.js";
 import { discardStoredFile, IMAGE_TYPES, MAX_PHOTO_BYTES, markMediaDeleted, purgeMediaFile, signedMediaUrls, storeUpload } from "./media.js";
 import { ageOn, todayBerlin } from "./member-lifecycle.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * Member profile photos (Wave 7 B13) on top of the central media layer.
@@ -122,7 +122,7 @@ export async function replaceMemberPhoto(input: { row: ClubMemberRow; file: File
       newKey = media.storageKey;
       const [saved] = await tx.update(clubMembers).set({ photoKey: media.storageKey, updatedAt: new Date() }).where(eq(clubMembers.id, row.id)).returning();
       if (oldKey) oldRemoved = await markMediaDeleted(oldKey, tx, row.clubId);
-      await tx.insert(auditLog).values({ eventType: "club_member.photo_set", subjectId: row.id, payload: { clubId: row.clubId, changedBy: input.changedBy, replaced: oldKey !== null } });
+      await writeAudit(tx, { eventType: "club_member.photo_set", subjectId: row.id, payload: { clubId: row.clubId, changedBy: input.changedBy, replaced: oldKey !== null } });
       return saved!;
     });
     if (oldKey && oldRemoved) await purgeMediaFile(oldKey);
@@ -142,7 +142,7 @@ export async function removeMemberPhoto(input: { row: ClubMemberRow; changedBy: 
     if (!locked || !locked.photoKey) return;
     await tx.update(clubMembers).set({ photoKey: null, updatedAt: new Date() }).where(eq(clubMembers.id, row.id));
     if (await markMediaDeleted(locked.photoKey, tx, row.clubId)) removedKey = locked.photoKey;
-    await tx.insert(auditLog).values({ eventType: "club_member.photo_remove", subjectId: row.id, payload: { clubId: row.clubId, changedBy: input.changedBy } });
+    await writeAudit(tx, { eventType: "club_member.photo_remove", subjectId: row.id, payload: { clubId: row.clubId, changedBy: input.changedBy } });
   });
   if (removedKey) await purgeMediaFile(removedKey);
 }

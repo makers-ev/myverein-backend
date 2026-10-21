@@ -7,7 +7,6 @@ import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMembers, clubMemberStatusHistory, type ClubMemberRow } from "../db/schema/club-members.js";
 import { forms, formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, type FormRow, type FormSubmissionRow, type FormVersionRow } from "../db/schema/forms.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { accountLinkLockKey, type DbExecutor } from "./club-members.js";
@@ -16,6 +15,7 @@ import { ConflictError, isUniqueViolation, NotFoundError } from "./errors.js";
 import { MASTER_TARGETS, planAcceptance } from "./form-acceptance.js";
 import type { FormField } from "./form-schema.js";
 import { markMediaDeleted, reassignMediaOwner } from "./media.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * Link between an application (`club_applications`) and its form submission, and the acceptance step (Wave 8 B6).
@@ -174,7 +174,7 @@ export async function applyAcceptance(
     mapping.customFields = changes.length;
     if (changes.length > 0) {
       // Same trail as a board write: definition ids only, never values.
-      await tx.insert(auditLog).values({ eventType: "member_field.write", subjectId: clubMemberId, payload: { clubId, clubMemberId, fieldIds: changes.map((x) => x.fieldId), changedBy: decidedBy, via: "application" } });
+      await writeAudit(tx, { eventType: "member_field.write", subjectId: clubMemberId, payload: { clubId, clubMemberId, fieldIds: changes.map((x) => x.fieldId), changedBy: decidedBy, via: "application" } });
     }
   }
 

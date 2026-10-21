@@ -5,7 +5,6 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { FIELD_EDITABLE_BY, FIELD_VISIBLE_TO, memberFieldDefinitions, memberFieldValues } from "../db/schema/forms.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { canReadValue, canSelfWrite } from "../lib/custom-field-access.js";
@@ -18,6 +17,7 @@ import { definitionTranslations, type Lang, localizedGroups, moduleText, moduleT
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Definitions of the custom fields of a club's members (Wave 8 B7): "Trikotgroesse", "Instrument", "Allergien", ...
@@ -194,7 +194,7 @@ memberFieldRoutes.post("/catalog/:moduleId/activate", async (c) => {
     if (existing && existing.archivedAt === null) return { row: existing, created: false, reactivated: false };
     if (existing) {
       const [row] = await tx.update(memberFieldDefinitions).set({ archivedAt: null }).where(eq(memberFieldDefinitions.id, existing.id)).returning();
-      await tx.insert(auditLog).values({ eventType: "profile_module.activate", subjectId: existing.id, payload: { clubId, moduleId: mod.id, reactivated: true, by: c.get("membership").id } });
+      await writeAudit(tx, { eventType: "profile_module.activate", subjectId: existing.id, payload: { clubId, moduleId: mod.id, reactivated: true, by: c.get("membership").id } });
       return { row: row!, created: false, reactivated: true };
     }
     const [{ n }] = await tx.select({ n: count() }).from(memberFieldDefinitions).where(eq(memberFieldDefinitions.clubId, clubId));
@@ -203,7 +203,7 @@ memberFieldRoutes.post("/catalog/:moduleId/activate", async (c) => {
       .insert(memberFieldDefinitions)
       .values({ clubId, key: mod.id, label: mod.label, helpText: mod.helpText ?? null, fieldType: mod.type, options: mod.options ?? null, validation: (mod.validation as FormField["validation"] | undefined) ?? null, visibleTo: mod.visibleTo, editableBy: mod.editableBy, sensitive: mod.sensitive, sortOrder: moduleSortOrder(mod.id) })
       .returning();
-    await tx.insert(auditLog).values({ eventType: "profile_module.activate", subjectId: row!.id, payload: { clubId, moduleId: mod.id, reactivated: false, sensitive: mod.sensitive, by: c.get("membership").id } });
+    await writeAudit(tx, { eventType: "profile_module.activate", subjectId: row!.id, payload: { clubId, moduleId: mod.id, reactivated: false, sensitive: mod.sensitive, by: c.get("membership").id } });
     return { row: row!, created: true, reactivated: false };
   });
   const lang = resolveLang(c.req.query("lang"), c.req.header("accept-language"));
@@ -223,7 +223,7 @@ memberFieldRoutes.post("/catalog/:moduleId/deactivate", async (c) => {
     if (!existing) return { row: undefined, changed: false };
     if (existing.archivedAt !== null) return { row: existing, changed: false };
     const [row] = await tx.update(memberFieldDefinitions).set({ archivedAt: new Date() }).where(eq(memberFieldDefinitions.id, existing.id)).returning();
-    await tx.insert(auditLog).values({ eventType: "profile_module.deactivate", subjectId: existing.id, payload: { clubId, moduleId: mod.id, by: c.get("membership").id } });
+    await writeAudit(tx, { eventType: "profile_module.deactivate", subjectId: existing.id, payload: { clubId, moduleId: mod.id, by: c.get("membership").id } });
     return { row: row!, changed: true };
   });
   return c.json({ data: { module: moduleDto(mod, result.row, resolveLang(c.req.query("lang"), c.req.header("accept-language"))), changed: result.changed } });
@@ -268,7 +268,7 @@ memberFieldRoutes.post("/", jsonLimit, zValidator("json", createSchema, validati
         .insert(memberFieldDefinitions)
         .values({ clubId, key: checked.key, label: checked.label, helpText: checked.helpText ?? null, fieldType: checked.type, options: checked.options ?? null, validation: checked.validation ?? null, visibleTo: body.visibleTo, editableBy: body.editableBy, sensitive: body.sensitive, sortOrder: body.sortOrder })
         .returning();
-      await tx.insert(auditLog).values({ eventType: "member_field.create", subjectId: row!.id, payload: { clubId, key: row!.key, sensitive: row!.sensitive, createdBy: c.get("membership").id } });
+      await writeAudit(tx, { eventType: "member_field.create", subjectId: row!.id, payload: { clubId, key: row!.key, sensitive: row!.sensitive, createdBy: c.get("membership").id } });
       return row!;
     });
     return c.json({ data: dto(created, 0) }, 201);
@@ -354,7 +354,7 @@ memberFieldRoutes.patch("/:id", jsonLimit, zValidator("json", updateSchema, vali
       })
       .where(eq(memberFieldDefinitions.id, current.id))
       .returning();
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "member_field.update",
       subjectId: current.id,
       // Property names and the old / new protection flags -- never values.
@@ -386,7 +386,7 @@ memberFieldRoutes.delete("/:id", async (c) => {
       await tx.delete(memberFieldDefinitions).where(eq(memberFieldDefinitions.id, current.id));
     }
     const result = values > 0 ? ("archived" as const) : ("deleted" as const);
-    await tx.insert(auditLog).values({ eventType: result === "archived" ? "member_field.archive" : "member_field.delete", subjectId: current.id, payload: { clubId, key: current.key, deletedBy: c.get("membership").id } });
+    await writeAudit(tx, { eventType: result === "archived" ? "member_field.archive" : "member_field.delete", subjectId: current.id, payload: { clubId, key: current.key, deletedBy: c.get("membership").id } });
     return { id: current.id, outcome: result };
   });
   return c.json({ data: outcome });
@@ -399,7 +399,7 @@ memberFieldRoutes.post("/:id/unarchive", async (c) => {
     const current = await loadLocked(tx, clubId, c.req.param("id"));
     if (current.archivedAt === null) throw new ConflictError("The custom field is not archived");
     const [row] = await tx.update(memberFieldDefinitions).set({ archivedAt: null }).where(eq(memberFieldDefinitions.id, current.id)).returning();
-    await tx.insert(auditLog).values({ eventType: "member_field.unarchive", subjectId: current.id, payload: { clubId, key: current.key, restoredBy: c.get("membership").id } });
+    await writeAudit(tx, { eventType: "member_field.unarchive", subjectId: current.id, payload: { clubId, key: current.key, restoredBy: c.get("membership").id } });
     return { row: row!, values: await countValues(tx, current.id) };
   });
   return c.json({ data: dto(restored.row, countFor(restored.row, restored.values, c.get("clubRoleTypes"))) });

@@ -7,7 +7,6 @@ import { z } from "zod";
 
 import { member, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { locationLinks } from "../db/schema/location-links.js";
 import { locationWifiNetworks, WIFI_SECURITY_TYPES, type LocationWifiNetworkRow } from "../db/schema/location-wifi.js";
 import { LOCATION_VISIBILITIES, locationKeyHistory, locationKeyHolders, locations, type LocationRow, type LocationVisibility } from "../db/schema/locations.js";
@@ -20,6 +19,7 @@ import { attachUploadedImage, markMediaDeleted, purgeMediaFile, signedMediaUrls 
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 export const locationRoutes = new Hono<ClubEnv>();
 
@@ -207,7 +207,7 @@ locationRoutes.post(
         })
         .returning();
       if (body.photoKey) await claimLocationPhoto(tx, clubId, c.get("user").id, created!.id, body.photoKey);
-      await tx.insert(auditLog).values({ eventType: "location.create", subjectId: created!.id, payload: { clubId, name: created!.name } });
+      await writeAudit(tx, { eventType: "location.create", subjectId: created!.id, payload: { clubId, name: created!.name } });
       return created!;
     });
 
@@ -257,7 +257,7 @@ locationRoutes.patch(
       if (body.photoKey && body.photoKey !== existing.photoKey) await claimLocationPhoto(tx, clubId, c.get("user").id, id, body.photoKey);
       // A replaced / removed photo is deleted (registry tombstone now, file after the commit).
       if (replaced) removedPhoto = await markMediaDeleted(existing.photoKey!, tx, clubId);
-      await tx.insert(auditLog).values({ eventType: "location.update", subjectId: id, payload: { clubId, changes: body } });
+      await writeAudit(tx, { eventType: "location.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body) } });
       return updated!;
     });
     if (removedPhoto) await purgeMediaFile(existing.photoKey!);
@@ -277,7 +277,7 @@ locationRoutes.delete("/:id", async (c) => {
   await db.transaction(async (tx) => {
     await tx.delete(locations).where(and(eq(locations.id, id), eq(locations.clubId, clubId)));
     if (existing.photoKey) removedPhoto = await markMediaDeleted(existing.photoKey, tx, clubId);
-    await tx.insert(auditLog).values({ eventType: "location.delete", subjectId: id, payload: { clubId } });
+    await writeAudit(tx, { eventType: "location.delete", subjectId: id, payload: { clubId } });
   });
   if (removedPhoto) await purgeMediaFile(existing.photoKey!);
 
@@ -336,7 +336,7 @@ locationRoutes.post(
           recordedByName: c.get("user").name,
         }).returning({ id: locationKeyHistory.id });
         historyId = entry!.id;
-        await tx.insert(auditLog).values({
+        await writeAudit(tx, {
           eventType: "location_key_holder.create",
           subjectId: created!.id,
           payload: { clubId, locationId: id, memberId: body.memberId },
@@ -407,7 +407,7 @@ locationRoutes.delete("/:id/key-holders/:memberId", returnBodyLimit, async (c) =
       recordedBy: c.get("membership").id,
       recordedByName: c.get("user").name,
     }).returning({ id: locationKeyHistory.id });
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "location_key_holder.delete",
       subjectId: existing.id,
       payload: { clubId, locationId: id, memberId },
@@ -514,7 +514,7 @@ locationRoutes.post(
       })
       .returning();
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "location_wifi.create",
       subjectId: row.id,
       payload: { clubId, locationId: id, label: row.label },
@@ -564,7 +564,7 @@ locationRoutes.patch(
     );
     const [row] = Object.keys(changes).length === 0 ? [existing] : await db.update(locationWifiNetworks).set(changes).where(eq(locationWifiNetworks.id, wifiId)).returning();
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "location_wifi.update",
       subjectId: wifiId,
       payload: { clubId, locationId: id, label: row.label },
@@ -589,7 +589,7 @@ locationRoutes.delete("/:id/wifi/:wifiId", async (c) => {
   if (!existing) throw new NotFoundError("WiFi network not found");
 
   await db.delete(locationWifiNetworks).where(eq(locationWifiNetworks.id, wifiId));
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "location_wifi.delete",
     subjectId: wifiId,
     payload: { clubId, locationId: id },
@@ -645,7 +645,7 @@ locationRoutes.post(
       })
       .returning();
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "location_link.create",
       subjectId: row.id,
       payload: { clubId, locationId: id, title: row.title },
@@ -688,10 +688,10 @@ locationRoutes.patch(
     );
     const [row] = Object.keys(changes).length === 0 ? [existing] : await db.update(locationLinks).set(changes).where(eq(locationLinks.id, linkId)).returning();
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "location_link.update",
       subjectId: linkId,
-      payload: { clubId, locationId: id, changes: body },
+      payload: { clubId, locationId: id, changedFields: Object.keys(body) },
     });
 
     return c.json({ data: withLegacyGuestFlag(row) });
@@ -713,7 +713,7 @@ locationRoutes.delete("/:id/links/:linkId", async (c) => {
   if (!existing) throw new NotFoundError("Link not found");
 
   await db.delete(locationLinks).where(eq(locationLinks.id, linkId));
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "location_link.delete",
     subjectId: linkId,
     payload: { clubId, locationId: id },

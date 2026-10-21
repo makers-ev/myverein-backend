@@ -57,6 +57,7 @@ import { listDefinitions, MAX_CUSTOM_FIELDS_PER_CLUB } from "../lib/custom-field
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 export const clubMemberRoutes = new Hono<ClubEnv>();
 
@@ -168,6 +169,23 @@ type ShapedMember = Awaited<ReturnType<typeof shapeClubMembers>>[number];
 
 async function shapeOne(row: ClubMemberRow, caller: PhotoCaller, forceSensitive = false): Promise<ShapedMember> {
   return (await shapeClubMembers([row], caller, forceSensitive))[0]!;
+}
+
+/** Master data fields that only `members:read_sensitive` (or the person themself) receives in a member response. */
+const SENSITIVE_MEMBER_FIELDS = ["email", "contactEmail", "memberNumber", "firstName", "lastName", "birthDate", "street", "postalCode", "city", "phone", "emergencyContactName", "emergencyContactPhone"];
+
+/**
+ * Read audit (Wave 10 B2): ONE aggregated entry per request when sensitive master data of OTHER people was delivered
+ * (a list page counts once, not per row). Own data and responses without sensitive fields write nothing.
+ */
+async function auditSensitiveRead(c: Context<ClubEnv>, scope: "list" | "detail", rows: ShapedMember[]): Promise<void> {
+  const others = rows.filter((r) => "birthDate" in r && r.memberId !== c.get("membership").id);
+  if (others.length === 0) return;
+  await writeAudit(db, {
+    eventType: "club_member.sensitive_read",
+    subjectId: scope === "detail" ? others[0]!.id : null,
+    payload: { clubId: c.get("clubId"), scope, count: others.length, fields: SENSITIVE_MEMBER_FIELDS },
+  });
 }
 
 function callerOf(c: { get(k: "membership"): { id: string }; get(k: "clubRoleTypes"): string[] }) {
@@ -310,7 +328,7 @@ clubMemberRoutes.post(
         emailVerified: currentUser.emailVerified === true,
       });
       if (filed.created) {
-        await db.insert(auditLog).values({
+        await writeAudit(db, {
           eventType: "club_member.apply",
           subjectId: filed.application.id,
           payload: { clubId, userId: currentUser.id, formSubmissionId: filed.submission.id, formVersionId: filed.submission.formVersionId, onBehalfOf: filed.submission.onBehalfOf },
@@ -352,7 +370,7 @@ clubMemberRoutes.post(
       throw err;
     }
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "club_member.apply",
       subjectId: application.id,
       payload: { clubId, userId: currentUser.id, category: body.category, legacy: true },
@@ -465,7 +483,7 @@ clubMemberRoutes.patch("/me", zValidator("json", updateSelfSchema, validationHoo
       .where(eq(clubMembers.id, locked.id))
       .returning();
     if (changedFields.length > 0) {
-      await tx.insert(auditLog).values({ eventType: "club_member.update_self", subjectId: locked.id, payload: { clubId, changedFields } });
+      await writeAudit(tx, { eventType: "club_member.update_self", subjectId: locked.id, payload: { clubId, changedFields } });
     }
     return row!;
   });
@@ -680,6 +698,7 @@ clubMemberRoutes.get("/", zValidator("query", listQuerySchema, validationHook), 
     .offset((query.page - 1) * query.pageSize);
 
   const data = await shapeClubMembers(pageRows.map((r) => r.row), caller, false, today);
+  await auditSensitiveRead(c, "list", data);
   return c.json({ data, page: query.page, pageSize: query.pageSize, total: totalRow?.n ?? 0 });
 });
 
@@ -736,7 +755,7 @@ clubMemberRoutes.post("/", zValidator("json", createMemberSchema, validationHook
       reason: "created",
       changedBy: actor.id,
     });
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.create",
       subjectId: row!.id,
       payload: { clubId, memberNumber: number, categoryId: category!.id, status: row!.status, createdBy: actor.id },
@@ -872,7 +891,7 @@ clubMemberRoutes.post("/import", csvWriteLimiter, requireMembersWriteMiddleware,
       created.map((m) => ({ clubMemberId: m.id, fromStatus: null, toStatus: m.status, toCategoryId: m.categoryId, effectiveOn: m.joinedAt, reason: "import", changedBy: actor.id })),
     );
     // No personal data in the audit trail: counts, actor and a hash of the file only.
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.import",
       subjectId: clubId,
       payload: { clubId, created: created.length, skippedDuplicates: analysis.summary.duplicates, rows: analysis.summary.rows, importedBy: actor.id, fileSha256: fingerprint, tokenId },
@@ -1042,7 +1061,7 @@ async function exportMembers(c: Context<ClubEnv>) {
   );
 
   // No personal data in the audit trail: who exported which columns/filters and how many rows.
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "club_member.export",
     subjectId: clubId,
     payload: { clubId, exportedBy: c.get("membership").id, columns: columnKeys, ...(customDefs.length > 0 ? { customFieldIds: customDefs.map((d) => d.id), sensitiveCustomFieldIds: customDefs.filter((d) => d.sensitive).map((d) => d.id) } : {}), rows: rows.length, filters: { status: query.status ?? null, category: query.category ?? null, departmentId: query.departmentId ?? null, includeFormer: query.includeFormer === "true" } },
@@ -1185,7 +1204,7 @@ clubMemberRoutes.post("/categories", zValidator("json", createCategorySchema, va
         .insert(memberCategories)
         .values({ clubId, name: body.name, votingRight: body.votingRight ?? true, applicantSelectable: body.applicantSelectable ?? false, ...rules, sortOrder: body.sortOrder ?? Number(last?.n ?? -1) + 1 })
         .returning();
-      await tx.insert(auditLog).values({ eventType: "member_category.create", subjectId: row!.id, payload: { clubId, key, createdBy: actor.id } });
+      await writeAudit(tx, { eventType: "member_category.create", subjectId: row!.id, payload: { clubId, key, createdBy: actor.id } });
       return row!;
     });
   } catch (err) {
@@ -1219,7 +1238,7 @@ clubMemberRoutes.patch("/categories/:id", zValidator("json", updateCategorySchem
     if (!current.archivedAt) validateCategoryRules(all, next);
 
     const [row] = await tx.update(memberCategories).set(changes).where(and(eq(memberCategories.id, current.id), eq(memberCategories.clubId, clubId))).returning();
-    await tx.insert(auditLog).values({ eventType: "member_category.update", subjectId: current.id, payload: { clubId, changedFields: Object.keys(changes), changedBy: actor.id } });
+    await writeAudit(tx, { eventType: "member_category.update", subjectId: current.id, payload: { clubId, changedFields: Object.keys(changes), changedBy: actor.id } });
     return row!;
   });
   const counts = await activeMemberCounts(clubId, todayBerlin());
@@ -1272,7 +1291,7 @@ clubMemberRoutes.delete("/categories/:id", async (c) => {
       .where(and(eq(memberCategories.clubId, clubId), eq(memberCategories.autoTransitionToKey, locked.key)))
       .returning({ id: memberCategories.id });
     const [archived] = await tx.update(memberCategories).set({ archivedAt: new Date() }).where(eq(memberCategories.id, locked.id)).returning();
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "member_category.archive",
       subjectId: locked.id,
       payload: { clubId, key: locked.key, movedMembers: active.length, movedTo: active.length > 0 ? moveToParam : null, clearedAutoTransitions: cleared.length, changedBy: actor.id },
@@ -1357,7 +1376,7 @@ clubMemberRoutes.post("/transition-suggestions/apply", zValidator("json", applyS
       applied.push({ id: row.id, fromCategoryId: s.from.id, toCategoryId: s.to.id });
     }
     if (applied.length > 0) {
-      await tx.insert(auditLog).values({ eventType: "club_member.age_transition", subjectId: clubId, payload: { clubId, count: applied.length, memberIds: applied.map((a) => a.id), changedBy: actor.id } });
+      await writeAudit(tx, { eventType: "club_member.age_transition", subjectId: clubId, payload: { clubId, count: applied.length, memberIds: applied.map((a) => a.id), changedBy: actor.id } });
       // The moved members (and guardians) are told, in the same transaction as the move (switch `notify_age_transition`).
       await enqueueMemberCategoryNotices(tx, clubId, applied.map((a) => ({ id: a.id, fromId: a.fromCategoryId, toId: a.toCategoryId })), today);
     }
@@ -1402,7 +1421,7 @@ clubMemberRoutes.post("/:id/transition", zValidator("json", transitionSchema, va
       // The exit forms of those requests follow (lock order as in the exit routes: member row, request row, submission row).
       for (const r of closed) await closeExitSubmission(tx, r.formSubmissionId, "rejected", actor.id);
     }
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.transition",
       subjectId: target.id,
       // Status/category ids and dates only; the free-text reason stays in club_member_status_history.
@@ -1444,7 +1463,9 @@ clubMemberRoutes.get("/:id/history", async (c) => {
 clubMemberRoutes.get("/:id", async (c) => {
   const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
   assertMemberReadable(c, row);
-  return c.json({ data: await shapeOne(row, callerOf(c)) });
+  const data = await shapeOne(row, callerOf(c));
+  await auditSensitiveRead(c, "detail", [data]);
+  return c.json({ data });
 });
 
 const updateMemberSchema = z.object({
@@ -1506,7 +1527,7 @@ clubMemberRoutes.patch("/:id", zValidator("json", updateMemberSchema, validation
         changedBy: actor.id,
       });
     }
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.update",
       subjectId: target.id,
       // Field names only -- master data (address, phone, birth date) must not be copied into the audit log.
@@ -1554,7 +1575,7 @@ clubMemberRoutes.post("/:id/departments", zValidator("json", assignDepartmentSch
     throw err;
   }
 
-  await db.insert(auditLog).values({ eventType: "club_member.department_assign", subjectId: target.id, payload: { clubId, departmentId: department.id } });
+  await writeAudit(db, { eventType: "club_member.department_assign", subjectId: target.id, payload: { clubId, departmentId: department.id } });
   return c.json({ data: { id: department.id, name: department.name, since: created!.since, until: created!.until } }, 201);
 });
 
@@ -1577,7 +1598,7 @@ clubMemberRoutes.delete("/:id/departments/:departmentId", async (c) => {
     .returning();
   if (!ended) throw new NotFoundError("Department assignment not found");
 
-  await db.insert(auditLog).values({ eventType: "club_member.department_remove", subjectId: target.id, payload: { clubId, departmentId, until } });
+  await writeAudit(db, { eventType: "club_member.department_remove", subjectId: target.id, payload: { clubId, departmentId, until } });
   return c.body(null, 204);
 });
 
@@ -1614,7 +1635,7 @@ clubMemberRoutes.post("/:id/roles", zValidator("json", assignRoleSchema, validat
     throw err;
   }
 
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "club_role.assign",
     subjectId: memberId,
     payload: { clubId, clubMemberId: row.id, roleType: body.roleType, departmentId: body.departmentId },
@@ -1637,7 +1658,7 @@ clubMemberRoutes.delete("/:id/roles/:roleId", async (c) => {
 
   await db.delete(clubRoles).where(eq(clubRoles.id, roleId));
 
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "club_role.revoke",
     subjectId: memberId,
     payload: { clubId, clubMemberId: row.id, roleId, roleType: existing.roleType },
@@ -1727,7 +1748,7 @@ clubMemberRoutes.post("/:id/invite/resend", inviteLimitPerUser, async (c) => {
   });
   if (!open || target.memberId) throw new NotFoundError("No open invitation");
   const { invite, token } = await createInvite(clubId, target.id, open.email, c.get("membership").id);
-  await db.insert(auditLog).values({ eventType: "club_member.invite_resend", subjectId: target.id, payload: { clubId, inviteId: invite.id, previousInviteId: open.id, resentBy: c.get("membership").id } });
+  await writeAudit(db, { eventType: "club_member.invite_resend", subjectId: target.id, payload: { clubId, inviteId: invite.id, previousInviteId: open.id, resentBy: c.get("membership").id } });
   const emailSent = await sendInviteMail(clubId, target, invite, token, open.email);
   return c.json({ data: { ...shapeInvite(invite), emailSent } }, 201);
 });
@@ -1749,7 +1770,7 @@ clubMemberRoutes.delete("/:id/invite", async (c) => {
   const target = await resolveClubMember(clubId, c.req.param("id"));
   const removed = await db.delete(clubMemberInvites).where(and(eq(clubMemberInvites.clubMemberId, target.id), isNull(clubMemberInvites.acceptedAt))).returning({ id: clubMemberInvites.id });
   if (removed.length === 0) throw new NotFoundError("No open invitation");
-  await db.insert(auditLog).values({ eventType: "club_member.invite_revoke", subjectId: target.id, payload: { clubId, revokedBy: c.get("membership").id } });
+  await writeAudit(db, { eventType: "club_member.invite_revoke", subjectId: target.id, payload: { clubId, revokedBy: c.get("membership").id } });
   return c.body(null, 204);
 });
 
@@ -1822,7 +1843,7 @@ clubMemberRoutes.post("/:id/guardians", zValidator("json", guardianLinkSchema, v
     throw err;
   }
 
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "guardian_link.create",
     subjectId: ward.id,
     payload: { clubId, guardianMemberId: guardianAccountId },
@@ -1845,7 +1866,7 @@ clubMemberRoutes.delete("/:id/guardians/:guardianMemberId", async (c) => {
     .returning();
   if (!removed) throw new NotFoundError("Guardian link not found");
 
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "guardian_link.delete",
     subjectId: ward.id,
     payload: { clubId, guardianMemberId: guardian.memberId },

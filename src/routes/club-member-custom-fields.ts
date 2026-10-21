@@ -6,7 +6,6 @@ import { createMiddleware } from "hono/factory";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { memberFieldDefinitions, memberFieldValues } from "../db/schema/forms.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
@@ -25,6 +24,7 @@ import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "
 import { effectiveStatus, isLeftStatus, todayBerlin } from "../lib/member-lifecycle.js";
 import type { ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Custom field VALUES of a club member (Wave 8 B7), mounted below `/club-members` (so `sessionGuard` + `clubGuard` already
@@ -123,7 +123,7 @@ async function buildView(c: { get(k: "clubId"): string; get(k: "clubRoleTypes"):
   // Reading somebody else's sensitive data (Art. 9 candidates: allergies, health, ...) is audited per retrieval, ids only.
   const sensitiveRead = items.filter((i) => i.sensitive && i.value !== null);
   if (!isSelf && sensitiveRead.length > 0) {
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "member_field.sensitive_read",
       subjectId: row.id,
       payload: { clubId: c.get("clubId"), clubMemberId: row.id, fieldIds: sensitiveRead.map((i) => i.id), readBy: c.get("membership").id },
@@ -181,7 +181,7 @@ async function writeView(
     if (forbidden) throw new ForbiddenError(mode === "board" ? "Missing permission to change one of these custom fields" : "One of these custom fields can only be changed by the board");
 
     await writeValues(tx, row.id, c.get("membership").id, changes, mode === "guardian" ? "guardian" : null);
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "member_field.write",
       subjectId: row.id,
       payload: { clubId: c.get("clubId"), clubMemberId: row.id, fieldIds: changes.map((x) => x.fieldId), changedBy: c.get("membership").id, via: mode },
@@ -289,7 +289,7 @@ memberCustomFieldRoutes.get("/credentials", requireAccountMember, overviewLimite
   const sensitiveSelected = selected.filter((d) => d.sensitive);
   if (sensitiveSelected.length > 0) {
     const sensitiveRows = rows.filter((r) => r.fieldId !== null && byId.get(r.fieldId)!.sensitive);
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "member_field.sensitive_read",
       subjectId: clubId,
       payload: { clubId, via: "credentials_overview", fieldIds: sensitiveSelected.map((d) => d.id), clubMemberIds: [...new Set(sensitiveRows.map((r) => r.clubMemberId))], readBy: c.get("membership").id },

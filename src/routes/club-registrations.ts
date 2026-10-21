@@ -5,7 +5,6 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import {
   CLAIMABLE_ROLES,
   CLUB_LEGAL_FORMS,
@@ -32,6 +31,7 @@ import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, Valida
 import { discardStoredFile, markMediaDeleted, MAX_DOCUMENT_BYTES, purgeMediaFile, storeUpload } from "../lib/media.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard, type SessionEnv } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Applicant side of "Verein gruenden" (Wave 6). Session-only (no clubGuard --
@@ -167,7 +167,7 @@ clubRegistrationRoutes.post(
             claimedRole: body.claimedRole,
           })
           .returning();
-        await tx.insert(auditLog).values({
+        await writeAudit(tx, {
           eventType: "club_registration.create",
           subjectId: created.id,
           payload: { userId: currentUser.id, clubName: created.clubName },
@@ -286,7 +286,7 @@ clubRegistrationRoutes.post(
           .insert(clubRegistrationDocuments)
           .values({ registrationId: registration.id, kind: kind.data, storageKey: media.storageKey, filename: media.originalFilename, mimeType: media.mimeType, sizeBytes: media.sizeBytes })
           .returning();
-        await tx.insert(auditLog).values({
+        await writeAudit(tx, {
           eventType: "club_registration.document_add",
           subjectId: registration.id,
           payload: { documentId: created.id, kind: kind.data, userId: registration.userId },
@@ -333,7 +333,7 @@ clubRegistrationRoutes.delete("/:id/documents/:docId", documentLimiter, async (c
     }
     const deleted = await tx.delete(clubRegistrationDocuments).where(eq(clubRegistrationDocuments.id, doc.id)).returning({ id: clubRegistrationDocuments.id });
     if (deleted.length === 0) throw new NotFoundError("Document not found");
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_registration.document_remove",
       subjectId: registration.id,
       payload: { documentId: doc.id, kind: doc.kind, userId: registration.userId },
@@ -387,7 +387,7 @@ clubRegistrationRoutes.post("/:id/submit", submitLimiter, async (c) => {
       .set({ status: "pending", submittedAt: new Date(), slugSuggestion, reviewNote: null, updatedAt: new Date() })
       .where(eq(clubRegistrations.id, locked.id))
       .returning();
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_registration.submit",
       subjectId: row.id,
       payload: { userId: currentUser.id, from: locked.status, slugSuggestion },

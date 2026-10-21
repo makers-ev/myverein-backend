@@ -5,7 +5,6 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { FORM_PURPOSES, forms, formVersions, type FormRow, type FormVersionRow } from "../db/schema/forms.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import type { DbExecutor } from "../lib/club-members.js";
@@ -17,6 +16,7 @@ import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { cleanText } from "../lib/text-policy.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Form management for the board (Wave 8 B4, ADR-005). EVERY route needs `forms:write` -- reads included, a draft may
@@ -138,7 +138,7 @@ formRoutes.post("/", jsonLimit, zValidator("json", createSchema, validationHook)
       if (active >= MAX_ACTIVE_FORMS_PER_CLUB) throw new ConflictError(`At most ${MAX_ACTIVE_FORMS_PER_CLUB} active forms per club`, { details: { code: "form_limit", limit: MAX_ACTIVE_FORMS_PER_CLUB } });
       const [form] = await tx.insert(forms).values({ clubId, purpose: body.purpose, name: body.name }).returning();
       const [draft] = await tx.insert(formVersions).values({ formId: form!.id, version: 1, status: "draft", fields, privacyNotice: body.privacyNotice ?? null }).returning();
-      await tx.insert(auditLog).values({ eventType: "form.create", subjectId: form!.id, payload: { clubId, purpose: form!.purpose, createdBy: c.get("membership").id } });
+      await writeAudit(tx, { eventType: "form.create", subjectId: form!.id, payload: { clubId, purpose: form!.purpose, createdBy: c.get("membership").id } });
       return { form: form!, draft: draft! };
     });
     return c.json({ data: { form: formDto(created.form), draft: versionDto(created.draft) } }, 201);
@@ -203,7 +203,7 @@ async function saveDraft(clubId: string, formId: string, savedBy: string, body: 
       [saved] = await tx.update(forms).set({ name: body.name, updatedAt: new Date() }).where(eq(forms.id, form.id)).returning();
     }
     // Ids and counts only -- the definition itself is not part of the audit trail.
-    await tx.insert(auditLog).values({ eventType: "form.draft_save", subjectId: form.id, payload: { clubId, version: draft!.version, fieldCount: fields.length, savedBy } });
+    await writeAudit(tx, { eventType: "form.draft_save", subjectId: form.id, payload: { clubId, version: draft!.version, fieldCount: fields.length, savedBy } });
     return { form: saved!, draft: draft! };
   });
 }
@@ -232,7 +232,7 @@ formRoutes.delete("/:id/draft", async (c) => {
     const form = await loadForm(tx, c.req.param("id"), clubId, true);
     const deleted = await tx.delete(formVersions).where(and(eq(formVersions.formId, form.id), eq(formVersions.status, "draft"))).returning({ version: formVersions.version });
     if (deleted.length === 0) throw new NotFoundError("The form has no draft");
-    await tx.insert(auditLog).values({ eventType: "form.draft_discard", subjectId: form.id, payload: { clubId, version: deleted[0]!.version, discardedBy: c.get("membership").id } });
+    await writeAudit(tx, { eventType: "form.draft_discard", subjectId: form.id, payload: { clubId, version: deleted[0]!.version, discardedBy: c.get("membership").id } });
   });
   return c.body(null, 204);
 });
@@ -261,7 +261,7 @@ formRoutes.post("/:id/publish", async (c) => {
       .returning();
     if (!published) throw new ConflictError("There is no draft to publish", { details: { code: "no_draft" } });
     await tx.update(forms).set({ updatedAt: new Date() }).where(eq(forms.id, form.id));
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "form.publish",
       subjectId: form.id,
       payload: { clubId, purpose: form.purpose, version: published.version, previousVersion: previous?.version ?? null, publishedBy: c.get("membership").id },
@@ -282,7 +282,7 @@ formRoutes.post("/:id/archive", async (c) => {
     await tx.update(formVersions).set({ status: "archived", updatedAt: new Date() }).where(and(eq(formVersions.formId, form.id), eq(formVersions.status, "published")));
     await tx.delete(formVersions).where(and(eq(formVersions.formId, form.id), eq(formVersions.status, "draft")));
     const [row] = await tx.update(forms).set({ archivedAt: sql`now()`, updatedAt: new Date() }).where(eq(forms.id, form.id)).returning();
-    await tx.insert(auditLog).values({ eventType: "form.archive", subjectId: form.id, payload: { clubId, purpose: form.purpose, archivedBy: c.get("membership").id } });
+    await writeAudit(tx, { eventType: "form.archive", subjectId: form.id, payload: { clubId, purpose: form.purpose, archivedBy: c.get("membership").id } });
     return row!;
   });
   return c.json({ data: { form: formDto(archived) } });

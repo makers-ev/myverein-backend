@@ -8,7 +8,6 @@ import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plu
 
 import { organization as organizationTable, user as userTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { ensureConsentPurposes } from "../lib/consent-purposes.js";
 import { assertRejoinAllowed, ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
 import { recordKeyReturnsForRemovedAccount } from "../lib/key-returns.js";
@@ -23,6 +22,7 @@ import { pickMailLanguage, type MailLanguage } from "../lib/notify/i18n.js";
 import { APP_NAME, buildResetPasswordEmail, buildVerifyEmailEmail, LOGO_CID, LOGO_PATH } from "../lib/emailTemplate.js";
 import { isHttpsDeployment, trustedOrigins } from "../lib/trusted-origins.js";
 import { accessControl, adminRole, userRole } from "./permissions.js";
+import { writeAudit } from "../lib/audit.js";
 
 if (!process.env.WEB_ORIGIN) {
   throw new Error("WEB_ORIGIN is not set. Copy .env.example to .env and configure it.");
@@ -272,9 +272,11 @@ export const auth = betterAuth({
           // events" finding: this write lands in the same Postgres as every
           // domain mutation, instead of a separate IdP database Keycloak
           // could never transactionally join.
-          await db.insert(auditLog).values({
+          await writeAudit(db, {
             eventType: "session.create",
             subjectId: session.userId,
+            clubId: null,
+            actorUserId: session.userId,
             payload: {
               sessionId: session.id,
               ipAddress: session.ipAddress ?? null,

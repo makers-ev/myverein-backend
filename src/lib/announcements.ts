@@ -3,7 +3,6 @@ import { z } from "zod";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubAnnouncements, COMMUNICATION_CHANNELS, type AnnouncementAudience, type ClubAnnouncementRow } from "../db/schema/communication.js";
@@ -17,6 +16,7 @@ import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
 import { notify } from "./notify/dispatcher.js";
 import { cleanText } from "./text-policy.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * Announcement domain logic (Wave 9 B7, ADR-006): who may address whom, the single send path (immediate and scheduled)
@@ -128,7 +128,7 @@ export async function sendAnnouncement(clubId: string, id: string, options: { ac
         assertMayAddress(options.authorScope, row.audience, row.urgent);
       } catch {
         await tx.update(clubAnnouncements).set({ status: "cancelled", updatedAt: new Date() }).where(eq(clubAnnouncements.id, id));
-        await tx.insert(auditLog).values({ eventType: "club_announcement.send_denied", subjectId: id, payload: { clubId, reason: "author_scope_lost" } });
+        await writeAudit(tx, { eventType: "club_announcement.send_denied", subjectId: id, payload: { clubId, reason: "author_scope_lost" } });
         return "forbidden" as const;
       }
     }
@@ -156,7 +156,7 @@ export async function sendAnnouncement(clubId: string, id: string, options: { ac
     const sent = await db.transaction(async (tx) => {
       const [done] = await tx.update(clubAnnouncements).set({ status: "sent", sentAt, updatedAt: sentAt }).where(eq(clubAnnouncements.id, row.id)).returning();
       // Ids and counts only: neither the text nor any address belongs into the audit trail.
-      await tx.insert(auditLog).values({ eventType: "club_announcement.send", subjectId: row.id, payload: { clubId, actor: options.actorUserId, scheduled: options.actorUserId === null, urgent: row.urgent, channels: row.channels, ...outcome } });
+      await writeAudit(tx, { eventType: "club_announcement.send", subjectId: row.id, payload: { clubId, actor: options.actorUserId, scheduled: options.actorUserId === null, urgent: row.urgent, channels: row.channels, ...outcome } });
       return done!;
     });
     return { sent: true, outcome, row: sent };

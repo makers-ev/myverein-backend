@@ -5,7 +5,6 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import { inventoryDamageReports, inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { locations } from "../db/schema/locations.js";
@@ -17,6 +16,7 @@ import { effectiveLoanStatus, isMaintenanceDue, maintenanceDueDate } from "../li
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 export const inventoryItemRoutes = new Hono<ClubEnv>();
 
@@ -120,7 +120,7 @@ inventoryItemRoutes.post(
       })
       .returning();
 
-    await db.insert(auditLog).values({ eventType: "inventory_item.create", subjectId: row.id, payload: { clubId, name: row.name } });
+    await writeAudit(db, { eventType: "inventory_item.create", subjectId: row.id, payload: { clubId, name: row.name } });
 
     return c.json({ data: withMaintenanceStatus(row) }, 201);
   },
@@ -159,7 +159,7 @@ inventoryItemRoutes.patch(
       .where(and(eq(inventoryItems.id, id), eq(inventoryItems.clubId, clubId)))
       .returning();
 
-    await db.insert(auditLog).values({ eventType: "inventory_item.update", subjectId: id, payload: { clubId, changes: body } });
+    await writeAudit(db, { eventType: "inventory_item.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body) } });
 
     return c.json({ data: withMaintenanceStatus(row) });
   },
@@ -174,7 +174,7 @@ inventoryItemRoutes.delete("/:id", async (c) => {
   await loadClubInventoryItem(id, clubId);
 
   await db.delete(inventoryItems).where(and(eq(inventoryItems.id, id), eq(inventoryItems.clubId, clubId)));
-  await db.insert(auditLog).values({ eventType: "inventory_item.delete", subjectId: id, payload: { clubId } });
+  await writeAudit(db, { eventType: "inventory_item.delete", subjectId: id, payload: { clubId } });
 
   return c.body(null, 204);
 });
@@ -227,7 +227,7 @@ inventoryItemRoutes.post(
       })
       .returning();
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "inventory_loan.create",
       subjectId: row.id,
       payload: { clubId, itemId: id, memberId: membership.id },
@@ -292,7 +292,7 @@ inventoryItemRoutes.patch("/:id/loans/:loanId", loanPatchBodyLimit, async (c) =>
     }
     const [extended] = await db.update(inventoryLoans).set({ dueAt: newDueAt }).where(and(eq(inventoryLoans.id, loanId), isNull(inventoryLoans.returnedAt))).returning();
     if (!extended) throw new ConflictError("Loan has already been returned");
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "inventory_loan.extend",
       subjectId: loanId,
       payload: { clubId, itemId: id, memberId: existing.memberId, from: existing.dueAt?.toISOString() ?? null, to: newDueAt.toISOString() },
@@ -307,7 +307,7 @@ inventoryItemRoutes.patch("/:id/loans/:loanId", loanPatchBodyLimit, async (c) =>
     .where(eq(inventoryLoans.id, loanId))
     .returning();
 
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "inventory_loan.return",
     subjectId: loanId,
     payload: { clubId, itemId: id, memberId: existing.memberId },
@@ -369,7 +369,7 @@ inventoryItemRoutes.post(
       if (body.photoKey) {
         await attachUploadedImage(tx, { clubId, storageKey: body.photoKey, uploadedBy: c.get("user").id, owner: { type: "damage_report", id: created!.id } });
       }
-      await tx.insert(auditLog).values({
+      await writeAudit(tx, {
         eventType: "inventory_damage_report.create",
         subjectId: created!.id,
         payload: { clubId, itemId: id, memberId: membership.id },
@@ -411,7 +411,7 @@ inventoryItemRoutes.patch(
       .where(eq(inventoryDamageReports.id, reportId))
       .returning();
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "inventory_damage_report.update",
       subjectId: reportId,
       payload: { clubId, itemId: id, status: body.status },

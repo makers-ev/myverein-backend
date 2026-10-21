@@ -1,11 +1,11 @@
 import { and, count, eq, gt, inArray, ne, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubAnnouncements, type ClubAnnouncementRow } from "../db/schema/communication.js";
 import { AudienceLimitError, resolveClubAudience } from "./audience.js";
 import { TooManyRequestsError, ValidationError } from "./errors.js";
 import { DAY_MS, envInt, HOUR_MS } from "./rate-limits.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * Anti-spam limits for announcements (Wave 9 B14). All counters are derived from `club_announcements` (DB, so every
@@ -43,7 +43,7 @@ export interface LimitContext {
 }
 
 async function violation(row: ClubAnnouncementRow, ctx: LimitContext, rule: string, message: string, extra: Record<string, unknown> = {}): Promise<never> {
-  await db.insert(auditLog).values({ eventType: "club_announcement.limit_exceeded", subjectId: row.id, payload: { clubId: row.clubId, actor: ctx.actorUserId, rule, mode: ctx.mode, ...extra } });
+  await writeAudit(db, { eventType: "club_announcement.limit_exceeded", subjectId: row.id, payload: { clubId: row.clubId, actor: ctx.actorUserId, rule, mode: ctx.mode, ...extra } });
   throw new TooManyRequestsError(message, { details: { rule, ...extra } });
 }
 

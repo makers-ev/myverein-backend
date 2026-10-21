@@ -6,6 +6,7 @@ import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { auditContext } from "../lib/audit.js";
 import { IMPLICIT_ROLE_TYPE } from "../lib/club-permissions.js";
 import { BadRequestError, NotFoundError } from "../lib/errors.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "../lib/member-lifecycle.js";
@@ -65,6 +66,8 @@ export const clubGuard = createMiddleware<ClubEnv>(async (c: Context, next: Next
   });
 
   c.set("clubId", clubId);
+  const auditStore = auditContext.getStore();
+  if (auditStore) auditStore.clubId = clubId;
   c.set("membership", membership);
   // The implicit base role `mitglied` is added for every account member except
   // external guests (guardians etc.); it is never stored in club_roles.

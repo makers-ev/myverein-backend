@@ -2,7 +2,6 @@ import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers, clubMemberStatusHistory, memberCategories } from "../db/schema/club-members.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import { roleTypesWithPermission } from "./club-permissions.js";
@@ -17,6 +16,7 @@ import { notify } from "./notify/dispatcher.js";
 import { REMINDER_JOB_TYPE, reminderDedupeKey, type ReminderPayload } from "./reminders.js";
 import type { DbExecutor } from "./club-members.js";
 import { tr } from "./notify/i18n.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * Age transition as a job (Wave 9 B13, formerly only suggested -- `GET /club-members/transition-suggestions`). The recurring
@@ -100,7 +100,7 @@ export async function applyAgeTransitionsForClub(clubId: string, today: string):
     }
     if (moves.length === 0) return 0;
 
-    await tx.insert(auditLog).values({ eventType: "club_member.age_transition", subjectId: clubId, payload: { clubId, count: moves.length, memberIds: moves.map((m) => m.id), changedBy: "system", automatic: true } });
+    await writeAudit(tx, { eventType: "club_member.age_transition", subjectId: clubId, payload: { clubId, count: moves.length, memberIds: moves.map((m) => m.id), changedBy: "system", automatic: true } });
 
     const counts = new Map<string, number>();
     for (const m of moves) counts.set(`${m.fromId}>${m.toId}`, (counts.get(`${m.fromId}>${m.toId}`) ?? 0) + 1);
