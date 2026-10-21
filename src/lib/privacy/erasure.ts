@@ -7,11 +7,13 @@ import { db } from "../../db/client.js";
 import { clubExitRequests } from "../../db/schema/club-exit-requests.js";
 import { clubMembers, type ClubMemberRow } from "../../db/schema/club-members.js";
 import { clubRoles } from "../../db/schema/club-roles.js";
+import { formSubmissions } from "../../db/schema/forms.js";
 import { inventoryLoans } from "../../db/schema/inventory.js";
 import { writeAudit } from "../audit.js";
 import { BOARD_ROLE_TYPES } from "../club-permissions.js";
 import type { DbExecutor } from "../club-members.js";
 import { ConflictError } from "../errors.js";
+import { sweepStaleFormDrafts } from "../form-sweeper.js";
 import { recordKeyReturnsForRemovedAccount } from "../key-returns.js";
 import { purgeMediaFile } from "../media.js";
 import { isOwnerRole } from "../member-protection.js";
@@ -27,7 +29,7 @@ import type { PrivacySubject } from "./registry.js";
  * the registered contributors (`lib/privacy/registry.ts`). Not reversible.
  */
 
-export type ErasureBlockerCode = "legal_hold" | "exit_pending" | "open_loans" | "board_role" | "sole_owner";
+export type ErasureBlockerCode = "legal_hold" | "exit_pending" | "open_loans" | "board_role" | "sole_owner" | "application_pending";
 
 export interface ErasureBlocker {
   code: ErasureBlockerCode;
@@ -172,5 +174,10 @@ export async function eraseAccountMemberships(userId: string): Promise<void> {
     if (plan.blockers.length > 0) blocked.push({ clubId: r.clubId, blockers: plan.blockers });
   }
   if (blocked.length > 0) throw new ConflictError(blocked[0]!.blockers[0]!.message, { details: { code: blocked[0]!.blockers[0]!.code, blocked } });
+  // An application that is still under review (a child's included) would lose its applicant with the account: withdraw it first.
+  const [open] = await db.select({ id: formSubmissions.id }).from(formSubmissions).where(and(eq(formSubmissions.submittedByUserId, userId), eq(formSubmissions.status, "submitted"))).limit(1);
+  if (open) throw new ConflictError("An application is still under review: withdraw it first", { details: { code: "application_pending" } });
   for (const r of rows) await executeErasure({ clubId: r.clubId, clubMemberId: r.id, actorUserId: userId, via: "account_deletion" });
+  // Decided submissions stay as the record of the decision (`submitted_by_user_id` becomes NULL); abandoned drafts and their files go now.
+  await sweepStaleFormDrafts(Date.now() + 366 * 24 * 60 * 60 * 1000, { userId });
 }

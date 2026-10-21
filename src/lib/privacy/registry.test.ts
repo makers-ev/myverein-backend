@@ -49,6 +49,33 @@ describe("privacy contributor registry", () => {
     expect(missing, `register an export/erase contributor (lib/privacy/contributors.ts) or exempt with a reason: ${missing.join(", ")}`).toEqual([]);
   });
 
+  it("lets only account-owned tables cascade away with the user (H1)", async () => {
+    // Deleting an account must never wipe club records (meetings, resolutions, attendance, decided applications): those use
+    // `set null`. A table may cascade only when every row is about the account itself, with the reason here.
+    const ACCOUNT_OWNED: Record<string, string> = {
+      account: "login credentials of the user",
+      session: "login sessions of the user",
+      two_factor: "second factor of the user",
+      member: "account membership; the erasure process runs before and anonymises the club_members row",
+      invitation: "invitations sent by the user; the invitation is meaningless without its sender",
+      notification: "inbox of the user",
+      notification_state: "read state of the user's inbox",
+      notification_preferences: "settings of the user",
+      push_tokens: "devices of the user",
+      club_applications: "applications of the applicant; an open one blocks the deletion (application_pending)",
+      club_registrations: "club registration requests of the applicant, no member data",
+    };
+    const unexpected: string[] = [];
+    for (const table of await allTables()) {
+      const cfg = getTableConfig(table);
+      for (const fk of cfg.foreignKeys) {
+        if (getTableConfig(fk.reference().foreignTable).name !== "user" || fk.onDelete !== "cascade") continue;
+        if (!(cfg.name in ACCOUNT_OWNED)) unexpected.push(cfg.name);
+      }
+    }
+    expect(unexpected, `these tables would be wiped with the account: use onDelete "set null" or list them with a reason: ${unexpected.join(", ")}`).toEqual([]);
+  });
+
   it("only lists real tables and gives every exemption a reason", async () => {
     contributors();
     const names = new Set((await allTables()).map((t) => getTableConfig(t).name));

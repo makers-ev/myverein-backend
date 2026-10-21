@@ -223,7 +223,7 @@ export interface ApplicationReview {
     path: string | null;
     createdAt: Date;
   }>;
-  consent: (ConsentEvidence & { givenBy: { userId: string; name: string }; role: "self" | "guardian"; fields: Array<{ key: string; label: string; given: boolean }>; privacyNoticeShown: boolean }) | null;
+  consent: (ConsentEvidence & { givenBy: { userId: string | null; name: string }; role: "self" | "guardian"; fields: Array<{ key: string; label: string; given: boolean }>; privacyNoticeShown: boolean }) | null;
   duplicates: DuplicateHint[];
   warnings: ChildWarning[];
   decision: { decidedAt: Date | null; decidedBy: string | null; decisionNote: string | null; internalNote: string | null } | null;
@@ -317,7 +317,7 @@ export async function buildApplicationReview(application: ClubApplicationRow, in
     photoFileFieldKeys: new Set(fileRows.filter((r) => r.kind === "image").map((r) => r.file.fieldKey)),
   });
 
-  const [submitter] = await executor.select({ name: user.name }).from(user).where(eq(user.id, sub.submittedByUserId)).limit(1);
+  const [submitter] = sub.submittedByUserId ? await executor.select({ name: user.name }).from(user).where(eq(user.id, sub.submittedByUserId)).limit(1) : [];
   const evidence = consentEvidence({ sub, version }, application.clubMemberId ?? sub.subjectClubMemberId ?? undefined);
   const consentFields = fields.filter((f) => f.type === "consent").map((f) => ({ key: f.key, label: f.label, given: evidence.consentFieldKeys.includes(f.key) }));
 

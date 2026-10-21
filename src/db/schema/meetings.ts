@@ -30,9 +30,8 @@ export const meetings = pgTable(
     // Freitext-Beispiele: "terminfindung" | "geplant" | "abgehalten" |
     // "protokolliert".
     status: text("status").notNull(),
-    createdBy: text("created_by")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
+    // The creating account; NULL once it is deleted (the meeting, its resolutions and attendance belong to the club).
+    createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

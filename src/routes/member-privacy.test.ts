@@ -14,6 +14,7 @@ import { clubRoles } from "../db/schema/club-roles.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { meetingAttendance, meetings } from "../db/schema/meetings.js";
+import { forms, formSubmissions, formVersions } from "../db/schema/forms.js";
 import { consentRecords, dataSubjectRequests } from "../db/schema/privacy.js";
 import { toAppError } from "../lib/errors.js";
 import { clubMemberRoutes } from "./club-members.js";
@@ -350,6 +351,27 @@ describe("member data export and erasure (B7/B8)", () => {
       expect(attendance).toHaveLength(2);
       expect(attendance.every((a) => a.memberId === null)).toBe(true);
       expect(attendance.map((a) => a.hasVotingRight).sort()).toEqual([false, true]);
+    });
+  });
+
+  describe("account deletion keeps club records (H1)", () => {
+    it("keeps meetings and decided applications, blocks while an application is under review", async () => {
+      const dave = await join("dave");
+      const [meeting] = await db.insert(meetings).values({ clubId, type: "sonstige", title: "Kreis", status: "geplant", createdBy: dave.userId }).returning();
+      const [form] = await db.insert(forms).values({ clubId, purpose: "sonstige", name: "Antrag" }).returning();
+      const [version] = await db.insert(formVersions).values({ formId: form!.id, version: 1, status: "published" }).returning();
+      const base = { formId: form!.id, formVersionId: version!.id, clubId, submittedByUserId: dave.userId };
+      const [open] = await db.insert(formSubmissions).values({ ...base, status: "submitted" }).returning();
+      await expect(auth.api.deleteUser({ headers: new Headers({ cookie: dave.cookie }), body: {} })).rejects.toMatchObject({ body: { code: "ERASURE_APPLICATION_PENDING" } });
+      expect(await db.query.user.findFirst({ where: eq(user.id, dave.userId) })).toBeTruthy();
+
+      await db.update(formSubmissions).set({ status: "accepted" }).where(eq(formSubmissions.id, open!.id));
+      const [draft] = await db.insert(formSubmissions).values({ ...base, status: "draft" }).returning();
+      await auth.api.deleteUser({ headers: new Headers({ cookie: dave.cookie }), body: {} });
+      expect(await db.query.user.findFirst({ where: eq(user.id, dave.userId) })).toBeUndefined();
+      expect((await db.query.meetings.findFirst({ where: eq(meetings.id, meeting!.id) }))?.createdBy).toBeNull();
+      expect((await db.query.formSubmissions.findFirst({ where: eq(formSubmissions.id, open!.id) }))?.submittedByUserId).toBeNull();
+      expect(await db.query.formSubmissions.findFirst({ where: eq(formSubmissions.id, draft!.id) })).toBeUndefined();
     });
   });
 });

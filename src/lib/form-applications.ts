@@ -44,6 +44,8 @@ export const applicationPendingError = (details: { clubId: string; applicationId
  * that moved the submission to `submitted`.
  */
 export async function createApplicationForSubmission(tx: DbExecutor, sub: FormSubmissionRow, fields: readonly FormField[], opts: { privacyNoticeAcknowledged?: boolean } = {}): Promise<ClubApplicationRow> {
+  // The submitter is only gone after the account was deleted, which also ends the open submission (see eraseAccountMemberships).
+  if (!sub.submittedByUserId) throw new ConflictError("The applicant account no longer exists");
   const plan = planAcceptance(fields, sub.answers);
   // Wave 10 B11: the applicant took note of the club's current privacy notice. Information only: without it the application is filed all the same.
   const notice = opts.privacyNoticeAcknowledged === true ? await latestPublishedNotice(sub.clubId, tx) : null;
@@ -256,7 +258,7 @@ export interface ConsentEvidence {
   /** Hash scheme of `textSha256` (see `consentTextSha256`); absent in older audit entries = scheme 1. */
   textHashScheme: number;
   /** User id of the person who gave the consent (the guardian for a child application). */
-  consentedBy: string;
+  consentedBy: string | null;
   onBehalfOf: string;
   /** ISO time the application was submitted (= when the consent was given); null for a record without it. */
   consentedAt: string | null;

@@ -323,6 +323,13 @@
       "when": 1792585376631,
       "tag": "0045_retention-notice",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1792588154703,
+      "tag": "0046_creator-references-survive-account",
+      "breakpoints": true
     }
   ]
 }
