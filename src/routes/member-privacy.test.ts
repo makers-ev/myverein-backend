@@ -185,6 +185,22 @@ describe("member data export and erasure (B7/B8)", () => {
       expect((await call(alice, `/guardian/wards/${childId}/data-export`)).status).toBe(404);
     });
 
+    it("needs custody for the ward's export and erasure request, and names the ward by first name in the guardian's own export", async () => {
+      await db.update(guardianLinks).set({ hasCustody: false }).where(eq(guardianLinks.wardClubMemberId, childId));
+      for (const [path, method] of [[`/guardian/wards/${childId}/data-export`, "GET"], [`/guardian/wards/${childId}/erasure-request`, "POST"]] as const) {
+        const res = await call(guardian, path, { method });
+        expect(res.status, path).toBe(403);
+        expect((await json(res)).error.details.code).toBe("guardian_requires_custody");
+      }
+      await db.update(guardianLinks).set({ hasCustody: true }).where(eq(guardianLinks.wardClubMemberId, childId));
+      expect((await call(guardian, `/guardian/wards/${childId}/data-export`)).status).toBe(200);
+      const own = await call(guardian, "/club-members/me/data-export");
+      expect(own.status).toBe(200);
+      const ownExport = JSON.stringify((await json(own)).data);
+      expect(ownExport).toContain("wardsOfThisMember");
+      expect(ownExport).not.toContain("Kind Ohne Konto");
+    });
+
     it("closes an open access request when the export is delivered", async () => {
       const created = await json(await call(board, "/data-subject-requests", { method: "POST", json: { clubMemberId: bob.clubMemberId, kind: "access" } }));
       expect(created.data.status).toBe("open");

@@ -72,6 +72,13 @@ guardianRoutes.use("*", clubGuard);
 
 const wardOf = (c: { get(k: "user"): { id: string }; get(k: "clubId"): string; req: { param(k: string): string | undefined } }): Promise<WardLink> => requireWard(c.get("user").id, c.get("clubId"), c.req.param("wardId")!);
 
+/** Rights of the data subject (export, erasure request) belong to the person with custody, not to every linked guardian. */
+async function wardWithCustody(c: Parameters<typeof wardOf>[0]) {
+  const found = await wardOf(c);
+  if (!found.link.hasCustody) throw new ForbiddenError("Only a guardian with custody may do this", { details: { code: "guardian_requires_custody" } });
+  return found.ward;
+}
+
 guardianRoutes.get("/wards/:wardId/overview", async (c) => {
   const { link, ward } = await wardOf(c);
   const [category] = ward.categoryId ? await db.select({ key: memberCategories.key, name: memberCategories.name }).from(memberCategories).where(eq(memberCategories.id, ward.categoryId)) : [];
@@ -237,14 +244,14 @@ guardianRoutes.get("/wards/:wardId/consents", async (c) => {
 
 /** Art. 15 for the child: the guardian receives the data export of the ward (same document as the board's). */
 guardianRoutes.get("/wards/:wardId/data-export", dbRateLimit({ bucket: "data-export.user", windowMs: HOUR_MS, max: () => envInt("DATA_EXPORT_PER_HOUR", 5), subject: (c) => c.get("user").id, message: "Too many exports, try again later" }), async (c) => {
-  const { ward } = await wardOf(c);
+  const ward = await wardWithCustody(c);
   const format = c.req.query("format") === "html" ? "html" : "json";
   return respondWithExport(c, { clubId: ward.clubId, clubMemberId: ward.id, format, via: "guardian", userId: c.get("user").id, closeAccessRequests: true });
 });
 
 /** The guardian asks for the child's data to be erased: a request with a deadline for the board. */
 guardianRoutes.post("/wards/:wardId/erasure-request", async (c) => {
-  const { ward } = await wardOf(c);
+  const ward = await wardWithCustody(c);
   const { row, created } = await db.transaction((tx) => openRequest(tx, { clubId: ward.clubId, clubMemberId: ward.id, kind: "erasure", requestedByUserId: c.get("user").id }));
   return c.json({ data: { id: row.id, kind: row.kind, status: row.status, receivedAt: row.receivedAt, dueAt: row.dueAt } }, created ? 201 : 200);
 });

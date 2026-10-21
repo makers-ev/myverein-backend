@@ -202,11 +202,12 @@ const guardianship: PrivacyContributor = {
       .where(eq(guardianLinks.wardClubMemberId, s.clubMemberId));
     const asGuardian = s.accountMemberId
       ? await ex
-          .select({ relationship: guardianLinks.relationship, validFrom: guardianLinks.validFrom, validUntil: guardianLinks.validUntil, ward: clubMembers.displayName })
+          .select({ relationship: guardianLinks.relationship, validFrom: guardianLinks.validFrom, validUntil: guardianLinks.validUntil, wardFirstName: clubMembers.firstName })
           .from(guardianLinks)
           .innerJoin(clubMembers, eq(clubMembers.id, guardianLinks.wardClubMemberId))
           .where(eq(guardianLinks.guardianMemberId, s.accountMemberId))
       : [];
+    // The wards are named by first name only: their data is exported with their own record, not with the guardian's.
     return { guardiansOfThisMember: asWard, wardsOfThisMember: asGuardian };
   },
   async eraseSubject(tx, s) {
