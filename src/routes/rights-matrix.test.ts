@@ -12,10 +12,14 @@ import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
+import { calendars } from "../db/schema/calendars.js";
+import { calendarVisibility } from "../db/schema/calendar-visibility.js";
+import { events } from "../db/schema/events.js";
 import { CLUB_ROLE_TYPES, clubPermissionsFor } from "../lib/club-permissions.js";
 import { toAppError } from "../lib/errors.js";
 import { adminClubRegistrationRoutes } from "./admin-club-registrations.js";
 import { adminClubRoutes } from "./admin-clubs.js";
+import { adminUserRoutes } from "./admin-users.js";
 import { clubStatsRoutes } from "./club-stats.js";
 import { clubExitRequestRoutes } from "./club-exit-requests.js";
 import { clubAnnouncementRoutes, clubInboxRoutes } from "./club-announcements.js";
@@ -97,6 +101,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/admin/dpa-versions", "adminDpaVersionRoutes", adminDpaVersionRoutes],
   ["/admin/dpa-acceptances", "adminDpaAcceptanceRoutes", adminDpaAcceptanceRoutes],
   ["/dpa", "dpaRoutes", dpaRoutes],
+  ["/admin", "adminUserRoutes", adminUserRoutes],
   ["/club-privacy-notices", "clubPrivacyNoticeRoutes", clubPrivacyNoticeRoutes],
   ["/clubs", "clubNoticeBySlugRoutes", clubNoticeBySlugRoutes],
   ["/retention-policies", "retentionPolicyRoutes", retentionPolicyRoutes],
@@ -200,6 +205,12 @@ const GUEST_DENIED_READS: Array<[string, string]> = [
   ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}`],
   ["GET", "/club-members"],
   ["GET", "/club-members?status=aktiv"],
+  ["GET", "/inventory-items"],
+  ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}`],
+  ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}/loans`],
+  ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}/damage-reports`],
+  ["GET", "/departments"],
+  ["GET", `/departments/${"00000000-0000-4000-8000-000000000001"}`],
 ];
 
 /** Routes whose body validation runs before the permission check need a valid sample body. Default `{}`. */
@@ -382,6 +393,28 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     expect((await req("/meetings", cookiePlain)).status).toBe(200);
     expect((await req("/club-members", cookiePlain)).status).toBe(200);
     expect((await req("/club-members/me", cookieGuest)).status).toBe(200);
+  });
+
+  it("hides calendars and events without a grant from an external guest (no club-wide rule 1), shows granted ones", async () => {
+    const [open] = await db.insert(calendars).values({ clubId, name: "Offen", createdBy: founderId }).returning();
+    const [granted] = await db.insert(calendars).values({ clubId, name: "Freigegeben", createdBy: founderId }).returning();
+    await db.insert(calendarVisibility).values({ calendarId: granted!.id, memberId: guestMemberId });
+    const [openEvent] = await db.insert(events).values({ calendarId: open!.id, title: "Offener Termin", startsAt: new Date("2030-06-01T10:00:00Z"), createdBy: founderId }).returning();
+    const [grantedEvent] = await db.insert(events).values({ calendarId: granted!.id, title: "Freigegebener Termin", startsAt: new Date("2030-06-02T10:00:00Z"), createdBy: founderId }).returning();
+    const ids = async (path: string, cookie: string) => ((await (await req(path, cookie)).json()) as { data: Array<{ id: string }> }).data.map((r) => r.id);
+
+    const guestCalendars = await ids("/calendars", cookieGuest);
+    expect(guestCalendars).toContain(granted!.id);
+    expect(guestCalendars).not.toContain(open!.id);
+    const guestEvents = await ids("/events", cookieGuest);
+    expect(guestEvents).toContain(grantedEvent!.id);
+    expect(guestEvents).not.toContain(openEvent!.id);
+    expect((await req(`/calendars/${open!.id}`, cookieGuest)).status).toBe(404);
+    expect((await req(`/events/${openEvent!.id}`, cookieGuest)).status).toBe(404);
+    expect((await req(`/events/${grantedEvent!.id}`, cookieGuest)).status).toBe(200);
+    // A plain member still sees the club-wide ones.
+    expect(await ids("/calendars", cookiePlain)).toContain(open!.id);
+    expect(await ids("/events", cookiePlain)).toContain(openEvent!.id);
   });
 
   it("denies the board-only exit-request variants and settings changes to a plain mitglied", async () => {

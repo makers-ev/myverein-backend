@@ -8,7 +8,7 @@ import { db } from "../db/client.js";
 import { departments } from "../db/schema/departments.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
-import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
+import { clubGuard, denyExternalGuests, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
 import { writeAudit } from "../lib/audit.js";
@@ -20,6 +20,7 @@ departmentRoutes.use("*", sessionGuard);
 departmentRoutes.use("*", clubGuard);
 
 departmentRoutes.get("/", async (c) => {
+  denyExternalGuests(c);
   const clubId = c.get("clubId");
   const rows = await db.query.departments.findMany({
     where: eq(departments.clubId, clubId),
@@ -29,6 +30,7 @@ departmentRoutes.get("/", async (c) => {
 });
 
 departmentRoutes.get("/:id", async (c) => {
+  denyExternalGuests(c);
   const clubId = c.get("clubId");
   const id = c.req.param("id");
 

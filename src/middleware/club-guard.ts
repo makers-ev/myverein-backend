@@ -8,7 +8,7 @@ import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { auditContext } from "../lib/audit.js";
 import { IMPLICIT_ROLE_TYPE } from "../lib/club-permissions.js";
-import { BadRequestError, NotFoundError } from "../lib/errors.js";
+import { BadRequestError, ForbiddenError, NotFoundError } from "../lib/errors.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "../lib/member-lifecycle.js";
 import { dpaGate } from "./dpa-gate.js";
 import type { SessionEnv } from "./session-guard.js";
@@ -83,3 +83,11 @@ export const clubGuard = createMiddleware<ClubEnv>(async (c: Context, next: Next
 
   await next();
 });
+
+/**
+ * Read routes that hold club-wide data (inventory, departments) are closed to external guests (`member.role = guest`,
+ * e.g. guardians): they reach their ward's data through `/guardian/*` only. Call at the top of the handler.
+ */
+export function denyExternalGuests(c: Context<ClubEnv>): void {
+  if (c.get("membership").role === "guest") throw new ForbiddenError("Not available for external guests");
+}

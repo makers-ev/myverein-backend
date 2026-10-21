@@ -13,7 +13,7 @@ import { notifyHandover } from "../lib/handover-notify.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { attachUploadedImage, signedMediaUrls } from "../lib/media.js";
 import { effectiveLoanStatus, isMaintenanceDue, maintenanceDueDate } from "../lib/inventory-status.js";
-import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
+import { clubGuard, denyExternalGuests, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
 import { writeAudit } from "../lib/audit.js";
@@ -58,6 +58,7 @@ function withEffectiveLoanStatus<T extends { dueAt: Date | null; returnedAt: Dat
 // --- Inventory item CRUD -----------------------------------------------------------
 
 inventoryItemRoutes.get("/", async (c) => {
+  denyExternalGuests(c);
   const clubId = c.get("clubId");
   const locationId = c.req.query("locationId");
   const category = c.req.query("category");
@@ -74,6 +75,7 @@ inventoryItemRoutes.get("/", async (c) => {
 });
 
 inventoryItemRoutes.get("/:id", async (c) => {
+  denyExternalGuests(c);
   const clubId = c.get("clubId");
   const id = c.req.param("id");
 
@@ -182,6 +184,7 @@ inventoryItemRoutes.delete("/:id", async (c) => {
 // --- Loans (self-service borrow/return) -----------------------------------------------------------
 
 inventoryItemRoutes.get("/:id/loans", async (c) => {
+  denyExternalGuests(c);
   const clubId = c.get("clubId");
   const id = c.req.param("id");
 
@@ -329,6 +332,7 @@ async function shapeDamageReports<T extends { photoKey: string | null }>(clubId:
 }
 
 inventoryItemRoutes.get("/:id/damage-reports", async (c) => {
+  denyExternalGuests(c);
   const clubId = c.get("clubId");
   const id = c.req.param("id");
 

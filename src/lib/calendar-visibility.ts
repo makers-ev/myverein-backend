@@ -11,7 +11,8 @@ import { hasClubPermission } from "./club-permissions.js";
  * Calendar visibility algorithm, shared by calendars.ts (visibility config)
  * and events.ts (event filtering) -- see Data Model - MyVerein Backend §7.
  * A caller can see calendar X if ANY of:
- *  1. X has zero calendar_visibility rows at all (club-wide default).
+ *  1. X has zero calendar_visibility rows at all (club-wide default). Not for external guests (no implicit `mitglied`
+ *     role, e.g. guardians): a calendar without any grant is hidden from them, they need an explicit grant (rules 2-4).
  *  2. A row grants `memberId` = the caller's own membership id.
  *  3. A row grants `roleType` matching any club_roles the caller holds.
  *  4. A row grants `departmentId` matching a department the caller holds a
@@ -42,11 +43,14 @@ function grantAllows(
   return false;
 }
 
+/** Rule 1 applies to account members only: the implicit base role `mitglied` is what external guests lack. */
+const clubWide = (clubRoleTypes: readonly string[]): boolean => clubRoleTypes.includes("mitglied");
+
 /** Whether `calendarId` is visible to the caller. Does not check club scoping -- callers verify that separately. */
 export async function isCalendarVisible(calendarId: string, memberId: string, clubRoleTypes: readonly string[]): Promise<boolean> {
   if (hasClubPermission(clubRoleTypes, "calendars:write")) return true;
   const grants = await db.query.calendarVisibility.findMany({ where: eq(calendarVisibility.calendarId, calendarId) });
-  if (grants.length === 0) return true; // rule 1
+  if (grants.length === 0) return clubWide(clubRoleTypes); // rule 1
 
   const callerDepartments = await callerDepartmentIds(memberId);
   return grants.some((g) => grantAllows(g, memberId, clubRoleTypes, callerDepartments));
@@ -78,7 +82,7 @@ export async function getVisibleCalendarIds(clubId: string, memberId: string, cl
   return clubCalendars
     .filter((cal) => {
       const rows = grantsByCalendar.get(cal.id);
-      if (!rows || rows.length === 0) return true; // rule 1
+      if (!rows || rows.length === 0) return clubWide(clubRoleTypes); // rule 1
       return rows.some((g) => grantAllows(g, memberId, clubRoleTypes, callerDepartments));
     })
     .map((cal) => cal.id);
