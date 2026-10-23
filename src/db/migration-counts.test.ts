@@ -34,8 +34,7 @@ const PRESERVED = [
 const FINGERPRINT: Record<string, string> = {
   location_key_holders: "location_id, member_id",
   inventory_loans: "id, item_id, member_id, borrowed_at, due_at, returned_at, status",
-  meeting_attendance: "meeting_id, member_id, present, has_voting_right, proxy_for_member_id",
-  meeting_invitees: "meeting_id, member_id, response",
+  // meeting_attendance / meeting_invitees moved to club_members in Wave 11 (0048/0049): checked in migration-assembly.test.ts.
   event_attendees: "event_id, member_id, status, responded_at",
   availability_slots: "member_id, weekday, start_time, end_time, note",
   availability_exceptions: "member_id, date, is_available, note",

@@ -1,7 +1,9 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, uuid, integer, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, uuid, integer, boolean, index, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
 
-import { member, user, organization } from "../../auth/auth-schema.js";
+import { user, organization } from "../../auth/auth-schema.js";
+import { ballots, meetingAgendaItems } from "./assembly.js";
+import { clubMembers } from "./club-members.js";
 import { locations } from "./locations.js";
 
 /** Controlled meeting types (validated via Zod, text in the DB). Only `vorstandssitzung` is read-scoped. */
@@ -30,6 +32,14 @@ export const meetings = pgTable(
     // Freitext-Beispiele: "terminfindung" | "geplant" | "abgehalten" |
     // "protokolliert".
     status: text("status").notNull(),
+    // Statute parameters as they were when the invitation went out (Wave 11): the meeting is judged by these, not by later changes.
+    rulesSnapshot: jsonb("rules_snapshot").$type<Record<string, unknown>>(),
+    // `praesenz` | `hybrid` | `virtual` (only usable when the club allows online participation).
+    participationMode: text("participation_mode").notNull().default("praesenz"),
+    // Join link of a hybrid / virtual meeting; only shown to invited people.
+    onlineUrl: text("online_url"),
+    // Set once the voting roll (Stimmberechtigtenverzeichnis) is frozen.
+    votingRollFrozenAt: timestamp("voting_roll_frozen_at", { withTimezone: true }),
     // The creating account; NULL once it is deleted (the meeting, its resolutions and attendance belong to the club).
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -38,7 +48,10 @@ export const meetings = pgTable(
   (table) => [index("meetings_club_id_idx").on(table.clubId)],
 );
 
-/** A member invited to a meeting and their RSVP. */
+/**
+ * A member invited to a meeting and their RSVP. References the club-side identity (`club_members`), so members without an
+ * account can be invited too (Wave 11).
+ */
 export const meetingInvitees = pgTable(
   "meeting_invitees",
   {
@@ -46,18 +59,19 @@ export const meetingInvitees = pgTable(
     meetingId: uuid("meeting_id")
       .notNull()
       .references(() => meetings.id, { onDelete: "cascade" }),
-    memberId: text("member_id")
+    clubMemberId: uuid("club_member_id")
       .notNull()
-      .references(() => member.id, { onDelete: "cascade" }),
+      .references(() => clubMembers.id, { onDelete: "cascade" }),
     // Freitext-Beispiele: "ausstehend" | "zugesagt" | "abgesagt".
     response: text("response").notNull(),
   },
-  (table) => [uniqueIndex("meeting_invitees_meeting_member_uidx").on(table.meetingId, table.memberId)],
+  (table) => [uniqueIndex("meeting_invitees_meeting_club_member_uidx").on(table.meetingId, table.clubMemberId)],
 );
 
 /**
  * Actual attendance and voting eligibility recorded for a meeting. Kept for the minutes when the person is erased
- * (Wave 10 B8): `member_id` becomes NULL (pseudonymised), present / voting right stay so quorum and votes remain verifiable.
+ * (Wave 10 B8): `club_member_id` becomes NULL (pseudonymised), present / voting right stay so quorum and votes remain verifiable.
+ * Proxies live in `meeting_proxies`.
  */
 export const meetingAttendance = pgTable(
   "meeting_attendance",
@@ -66,12 +80,15 @@ export const meetingAttendance = pgTable(
     meetingId: uuid("meeting_id")
       .notNull()
       .references(() => meetings.id, { onDelete: "cascade" }),
-    memberId: text("member_id").references(() => member.id, { onDelete: "set null" }),
+    clubMemberId: uuid("club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
     present: boolean("present").notNull().default(false),
     hasVotingRight: boolean("has_voting_right").notNull().default(true),
-    proxyForMemberId: text("proxy_for_member_id").references(() => member.id, { onDelete: "set null" }),
+    checkedInAt: timestamp("checked_in_at", { withTimezone: true }),
+    leftAt: timestamp("left_at", { withTimezone: true }),
+    // One of CHECK_IN_METHODS (assembly.ts).
+    checkInMethod: text("check_in_method"),
   },
-  (table) => [uniqueIndex("meeting_attendance_meeting_member_uidx").on(table.meetingId, table.memberId)],
+  (table) => [uniqueIndex("meeting_attendance_meeting_club_member_uidx").on(table.meetingId, table.clubMemberId)],
 );
 
 /** A vote result recorded for a meeting (Beschluss). */
@@ -88,6 +105,10 @@ export const meetingResolutions = pgTable(
     votesAbstain: integer("votes_abstain").notNull().default(0),
     // Freitext-Beispiele: "angenommen" | "abgelehnt".
     result: text("result").notNull(),
+    // Digital votes (Wave 11): the ballot the counts come from; `source` = `manual` (hand count) | `digital`.
+    ballotId: uuid("ballot_id").references(() => ballots.id, { onDelete: "set null" }),
+    agendaItemId: uuid("agenda_item_id").references(() => meetingAgendaItems.id, { onDelete: "set null" }),
+    source: text("source").notNull().default("manual"),
     // Berichtigungsvermerk: set when a resolution is corrected (PATCH) instead of silently overwritten.
     correctionNote: text("correction_note"),
     correctedAt: timestamp("corrected_at", { withTimezone: true }),
@@ -108,13 +129,12 @@ export const meetingsRelations = relations(meetings, ({ one, many }) => ({
 
 export const meetingInviteesRelations = relations(meetingInvitees, ({ one }) => ({
   meeting: one(meetings, { fields: [meetingInvitees.meetingId], references: [meetings.id] }),
-  member: one(member, { fields: [meetingInvitees.memberId], references: [member.id] }),
+  clubMember: one(clubMembers, { fields: [meetingInvitees.clubMemberId], references: [clubMembers.id] }),
 }));
 
 export const meetingAttendanceRelations = relations(meetingAttendance, ({ one }) => ({
   meeting: one(meetings, { fields: [meetingAttendance.meetingId], references: [meetings.id] }),
-  member: one(member, { fields: [meetingAttendance.memberId], references: [member.id] }),
-  proxyFor: one(member, { fields: [meetingAttendance.proxyForMemberId], references: [member.id] }),
+  clubMember: one(clubMembers, { fields: [meetingAttendance.clubMemberId], references: [clubMembers.id] }),
 }));
 
 export const meetingResolutionsRelations = relations(meetingResolutions, ({ one }) => ({

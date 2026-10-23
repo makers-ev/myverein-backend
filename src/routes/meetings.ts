@@ -1,17 +1,19 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq, inArray, ne, or } from "drizzle-orm";
+import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 
-import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
+import { clubMembers, type ClubMemberRow } from "../db/schema/club-members.js";
+import { meetingProxies } from "../db/schema/assembly.js";
 import { clubMailLanguage } from "../lib/club-settings.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
 import { MEETING_TYPES, meetingAttendance, meetingInvitees, meetingResolutions, meetings } from "../db/schema/meetings.js";
 import { computeAvailability, type AvailabilityInput } from "../lib/availability-match.js";
 import { announceMeetingInvitation, clubTimezone, composeEventMessage, isOpenMeeting, locationName, meetingAudience, scheduleEventChanged } from "../lib/event-notify.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
+import { callerClubMemberId, clubMembersByIds, resolveClubMember } from "../lib/meeting-members.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -48,9 +50,8 @@ async function loadClubMeeting(c: Context<ClubEnv>, id: string) {
   const row = await db.query.meetings.findFirst({ where: and(eq(meetings.id, id), eq(meetings.clubId, clubId)) });
   if (!row) throw new NotFoundError("Meeting not found");
   if (row.type === "vorstandssitzung" && !canReadAllMeetings(c.get("clubRoleTypes"))) {
-    const invited = await db.query.meetingInvitees.findFirst({
-      where: and(eq(meetingInvitees.meetingId, id), eq(meetingInvitees.memberId, c.get("membership").id)),
-    });
+    const me = await callerClubMemberId(db, clubId, c.get("membership").id);
+    const invited = me ? await db.query.meetingInvitees.findFirst({ where: and(eq(meetingInvitees.meetingId, id), eq(meetingInvitees.clubMemberId, me)) }) : undefined;
     if (!invited) throw new NotFoundError("Meeting not found");
   }
   return row;
@@ -63,13 +64,14 @@ meetingRoutes.get("/", async (c) => {
   denyGuests(c);
 
   // Vorstandssitzungen are filtered out unless the caller is board-level or invited.
+  const me = await callerClubMemberId(db, clubId, c.get("membership").id);
   const visible = canReadAllMeetings(c.get("clubRoleTypes"))
     ? undefined
     : or(
         ne(meetings.type, "vorstandssitzung"),
         inArray(
           meetings.id,
-          db.select({ id: meetingInvitees.meetingId }).from(meetingInvitees).where(eq(meetingInvitees.memberId, c.get("membership").id)),
+          me ? db.select({ id: meetingInvitees.meetingId }).from(meetingInvitees).where(eq(meetingInvitees.clubMemberId, me)) : sql`(select null::uuid where false)`,
         ),
       );
 
@@ -237,21 +239,44 @@ meetingRoutes.delete("/:id", async (c) => {
 
 // --- Invitees ---------------------------------------------------------------
 // Same meeting_invitees table serves both the Terminfindung candidate list
-// (before scheduledAt is set) and zu-/absage tracking afterwards.
+// (before scheduledAt is set) and zu-/absage tracking afterwards. Rows point at club_members, so members without an
+// account can be invited; `memberId` (the account membership id) stays as a read/write alias for the transition.
+
+/** Names only for the roles that manage meetings; everybody else who may read the meeting gets ids (as before). */
+function showNames(c: Context<ClubEnv>) {
+  return canReadAllMeetings(c.get("clubRoleTypes"));
+}
+
+async function shapeInvitees(c: Context<ClubEnv>, rows: Array<typeof meetingInvitees.$inferSelect>) {
+  const people = await clubMembersByIds(db, c.get("clubId"), rows.map((r) => r.clubMemberId));
+  const names = showNames(c);
+  return rows.map((r) => ({
+    id: r.id,
+    meetingId: r.meetingId,
+    clubMemberId: r.clubMemberId,
+    memberId: people.get(r.clubMemberId)?.memberId ?? null,
+    ...(names ? { displayName: people.get(r.clubMemberId)?.displayName ?? null } : {}),
+    response: r.response,
+  }));
+}
 
 meetingRoutes.get("/:id/invitees", async (c) => {
   const id = c.req.param("id");
   await loadClubMeeting(c, id);
 
   const rows = await db.query.meetingInvitees.findMany({ where: eq(meetingInvitees.meetingId, id) });
-  return c.json({ data: rows });
+  return c.json({ data: await shapeInvitees(c, rows) });
 });
 
-const addInviteeSchema = z.object({
-  memberId: z.string().min(1),
-  /** `false` adds the person without telling them (audited). Default: the invitation is announced (club switch `notify_meeting_invites`). */
-  notify: z.boolean().optional(),
-});
+const addInviteeSchema = z
+  .object({
+    clubMemberId: z.string().uuid().optional(),
+    /** Alias for the transition: the account membership id. */
+    memberId: z.string().min(1).optional(),
+    /** `false` adds the person without telling them (audited). Default: the invitation is announced (club switch `notify_meeting_invites`). */
+    notify: z.boolean().optional(),
+  })
+  .refine((v) => v.clubMemberId || v.memberId, { message: "clubMemberId is required" });
 
 meetingRoutes.post(
   "/:id/invitees",
@@ -266,22 +291,22 @@ meetingRoutes.post(
     }
     const id = c.req.param("id");
     const meeting = await loadClubMeeting(c, id);
-    const { memberId, notify: notifyFlag } = c.req.valid("json");
+    const { notify: notifyFlag, ...ref } = c.req.valid("json");
 
-    const memberRow = await db.query.member.findFirst({ where: and(eq(member.id, memberId), eq(member.organizationId, clubId)) });
-    if (!memberRow) throw new NotFoundError("Member not found in this club");
+    const person = await resolveClubMember(db, clubId, ref);
+    if (!person) throw new NotFoundError("Member not found in this club");
 
     const existing = await db.query.meetingInvitees.findFirst({
-      where: and(eq(meetingInvitees.meetingId, id), eq(meetingInvitees.memberId, memberId)),
+      where: and(eq(meetingInvitees.meetingId, id), eq(meetingInvitees.clubMemberId, person.id)),
     });
     if (existing) throw new ConflictError("Member is already invited to this meeting");
 
-    const [row] = await db.insert(meetingInvitees).values({ meetingId: id, memberId, response: "ausstehend" }).returning();
+    const [row] = await db.insert(meetingInvitees).values({ meetingId: id, clubMemberId: person.id, response: "ausstehend" }).returning();
 
-    await writeAudit(db, { eventType: "meeting_invitee.add", subjectId: id, payload: { clubId, memberId, ...(notifyFlag === false ? { notify: false } : {}) } });
+    await writeAudit(db, { eventType: "meeting_invitee.add", subjectId: id, payload: { clubId, memberId: person.id, ...(notifyFlag === false ? { notify: false } : {}) } });
     await announceMeetingInvitation({ clubId, actor: c.get("user").id, meeting, invitee: row, suppress: notifyFlag === false });
 
-    return c.json({ data: row }, 201);
+    return c.json({ data: (await shapeInvitees(c, [row!]))[0] }, 201);
   },
 );
 
@@ -292,16 +317,17 @@ meetingRoutes.delete("/:id/invitees/:memberId", async (c) => {
     throw new ForbiddenError("Missing meetings:write permission");
   }
   const id = c.req.param("id");
-  const memberId = c.req.param("memberId");
+  const ref = c.req.param("memberId");
   await loadClubMeeting(c, id);
 
-  const existing = await db.query.meetingInvitees.findFirst({
-    where: and(eq(meetingInvitees.meetingId, id), eq(meetingInvitees.memberId, memberId)),
-  });
+  // The path carries the club member id; an account membership id (legacy) is accepted as well.
+  const isUuid = z.string().uuid().safeParse(ref).success;
+  const person = await resolveClubMember(db, clubId, isUuid ? { clubMemberId: ref } : { memberId: ref });
+  const existing = person ? await db.query.meetingInvitees.findFirst({ where: and(eq(meetingInvitees.meetingId, id), eq(meetingInvitees.clubMemberId, person.id)) }) : undefined;
   if (!existing) throw new NotFoundError("Invitee not found");
 
   await db.delete(meetingInvitees).where(eq(meetingInvitees.id, existing.id));
-  await writeAudit(db, { eventType: "meeting_invitee.remove", subjectId: id, payload: { clubId, memberId } });
+  await writeAudit(db, { eventType: "meeting_invitee.remove", subjectId: id, payload: { clubId, memberId: existing.clubMemberId } });
 
   return c.body(null, 204);
 });
@@ -319,21 +345,19 @@ meetingRoutes.patch(
   }),
   async (c) => {
     const clubId = c.get("clubId");
-    const membership = c.get("membership");
     const id = c.req.param("id");
     await loadClubMeeting(c, id);
     const { response } = c.req.valid("json");
 
-    const existing = await db.query.meetingInvitees.findFirst({
-      where: and(eq(meetingInvitees.meetingId, id), eq(meetingInvitees.memberId, membership.id)),
-    });
+    const me = await callerClubMemberId(db, clubId, c.get("membership").id);
+    const existing = me ? await db.query.meetingInvitees.findFirst({ where: and(eq(meetingInvitees.meetingId, id), eq(meetingInvitees.clubMemberId, me)) }) : undefined;
     if (!existing) throw new NotFoundError("Not invited to this meeting");
 
     const [row] = await db.update(meetingInvitees).set({ response }).where(eq(meetingInvitees.id, existing.id)).returning();
 
-    await writeAudit(db, { eventType: "meeting_invitee.respond", subjectId: id, payload: { clubId, memberId: membership.id, response } });
+    await writeAudit(db, { eventType: "meeting_invitee.respond", subjectId: id, payload: { clubId, memberId: existing.clubMemberId, response } });
 
-    return c.json({ data: row });
+    return c.json({ data: (await shapeInvitees(c, [row!]))[0] });
   },
 );
 
@@ -362,8 +386,13 @@ meetingRoutes.get("/:id/overlap", async (c) => {
   // meeting-scoped instead of just telling clients to call
   // /availability/overlap directly with a members= list they'd have to
   // assemble themselves.
-  const inviteeRows = await db.query.meetingInvitees.findMany({ where: eq(meetingInvitees.meetingId, id) });
-  const memberIds = inviteeRows.map((r) => r.memberId);
+  // Availability belongs to the account; invitees without an account have none to compare.
+  const inviteeRows = await db
+    .select({ memberId: clubMembers.memberId })
+    .from(meetingInvitees)
+    .innerJoin(clubMembers, eq(clubMembers.id, meetingInvitees.clubMemberId))
+    .where(eq(meetingInvitees.meetingId, id));
+  const memberIds = inviteeRows.flatMap((r) => (r.memberId ? [r.memberId] : []));
 
   const [slotRows, exceptionRows] = memberIds.length
     ? await Promise.all([
@@ -388,23 +417,52 @@ meetingRoutes.get("/:id/overlap", async (c) => {
 
 // --- Attendance --------------------------------------------------------------
 
+/** Attendance rows with the proxies the person holds (`proxyFor` = grantors' club member ids). `memberId` / `proxyForMemberId` are the legacy account aliases. */
+async function shapeAttendance(c: Context<ClubEnv>, meetingId: string, rows: Array<typeof meetingAttendance.$inferSelect>) {
+  const proxies = await db.query.meetingProxies.findMany({ where: eq(meetingProxies.meetingId, meetingId) });
+  const ids = [...rows.map((r) => r.clubMemberId), ...proxies.map((p) => p.grantorClubMemberId)].filter((v): v is string => v !== null);
+  const people = await clubMembersByIds(db, c.get("clubId"), [...new Set(ids)]);
+  const names = showNames(c);
+  return rows.map((r) => {
+    const held = proxies.flatMap((p) => (p.holderClubMemberId !== null && p.holderClubMemberId === r.clubMemberId && p.grantorClubMemberId ? [p.grantorClubMemberId] : []));
+    return {
+      id: r.id,
+      meetingId: r.meetingId,
+      clubMemberId: r.clubMemberId,
+      memberId: r.clubMemberId ? (people.get(r.clubMemberId)?.memberId ?? null) : null,
+      ...(names ? { displayName: r.clubMemberId ? (people.get(r.clubMemberId)?.displayName ?? null) : null } : {}),
+      present: r.present,
+      hasVotingRight: r.hasVotingRight,
+      checkedInAt: r.checkedInAt,
+      leftAt: r.leftAt,
+      checkInMethod: r.checkInMethod,
+      proxyFor: held,
+      proxyForMemberId: held[0] ? (people.get(held[0])?.memberId ?? null) : null,
+    };
+  });
+}
+
 meetingRoutes.get("/:id/attendance", async (c) => {
   const id = c.req.param("id");
   await loadClubMeeting(c, id);
 
   const rows = await db.query.meetingAttendance.findMany({ where: eq(meetingAttendance.meetingId, id) });
-  return c.json({ data: rows });
+  return c.json({ data: await shapeAttendance(c, id, rows) });
 });
 
 // Partial-update semantics: only the fields an entry actually carries are written, and only the members
 // listed in the batch are touched -- re-saving never resets unlisted members or omitted fields (B17).
-// `proxyForMemberId: null` clears a proxy (Vollmacht).
-const attendanceEntrySchema = z.object({
-  memberId: z.string().min(1),
-  present: z.boolean().optional(),
-  hasVotingRight: z.boolean().optional(),
-  proxyForMemberId: z.string().min(1).nullable().optional(),
-});
+// `proxyForClubMemberId: null` clears the proxies the person holds. `memberId` / `proxyForMemberId` (account ids) are aliases.
+const attendanceEntrySchema = z
+  .object({
+    clubMemberId: z.string().uuid().optional(),
+    memberId: z.string().min(1).optional(),
+    present: z.boolean().optional(),
+    hasVotingRight: z.boolean().optional(),
+    proxyForClubMemberId: z.string().uuid().nullable().optional(),
+    proxyForMemberId: z.string().min(1).nullable().optional(),
+  })
+  .refine((v) => v.clubMemberId || v.memberId, { message: "clubMemberId is required" });
 const attendanceBatchSchema = z.array(attendanceEntrySchema).min(1);
 
 meetingRoutes.patch(
@@ -422,36 +480,42 @@ meetingRoutes.patch(
     await loadClubMeeting(c, id);
     const entries = c.req.valid("json");
 
+    // Resolve every referenced member (attendee AND proxy-giver) inside the caller's club BEFORE writing anything --
+    // a bad entry in the batch must reject the whole batch, not leave a partial write.
+    const resolved: Array<{ entry: (typeof entries)[number]; person: ClubMemberRow; grantor: ClubMemberRow | null; clearProxies: boolean }> = [];
     for (const entry of entries) {
-      if (entry.proxyForMemberId && entry.proxyForMemberId === entry.memberId) {
-        throw new ValidationError("A member cannot be their own proxy (proxyForMemberId must differ from memberId)");
+      const person = await resolveClubMember(db, clubId, { clubMemberId: entry.clubMemberId, memberId: entry.memberId });
+      if (!person) throw new NotFoundError("One or more members not found in this club");
+      const proxyRef = entry.proxyForClubMemberId ? { clubMemberId: entry.proxyForClubMemberId } : entry.proxyForMemberId ? { memberId: entry.proxyForMemberId } : null;
+      const grantor = proxyRef ? await resolveClubMember(db, clubId, proxyRef) : null;
+      if (proxyRef && !grantor) throw new NotFoundError("One or more members not found in this club");
+      if (grantor && grantor.id === person.id) {
+        throw new ValidationError("A member cannot be their own proxy (proxyForClubMemberId must differ from clubMemberId)");
       }
-    }
-
-    // Verify every referenced member (attendee AND proxy-giver) belongs to
-    // the caller's club BEFORE writing anything -- a bad entry in the batch
-    // must reject the whole batch, not leave a partial write.
-    const referencedIds = [...new Set(entries.flatMap((e) => (e.proxyForMemberId ? [e.memberId, e.proxyForMemberId] : [e.memberId])))];
-    const memberRows = await db.query.member.findMany({ where: and(inArray(member.id, referencedIds), eq(member.organizationId, clubId)) });
-    if (memberRows.length !== referencedIds.length) {
-      throw new NotFoundError("One or more members not found in this club");
+      resolved.push({ entry, person, grantor, clearProxies: entry.proxyForClubMemberId === null || entry.proxyForMemberId === null });
     }
 
     await db.transaction(async (tx) => {
-      for (const entry of entries) {
+      for (const { entry, person, grantor, clearProxies } of resolved) {
         const patch = {
           ...(entry.present !== undefined ? { present: entry.present } : {}),
           ...(entry.hasVotingRight !== undefined ? { hasVotingRight: entry.hasVotingRight } : {}),
-          ...(entry.proxyForMemberId !== undefined ? { proxyForMemberId: entry.proxyForMemberId } : {}),
         };
         await tx
           .insert(meetingAttendance)
-          .values({ meetingId: id, memberId: entry.memberId, ...patch })
+          .values({ meetingId: id, clubMemberId: person.id, ...patch })
           .onConflictDoUpdate({
-            target: [meetingAttendance.meetingId, meetingAttendance.memberId],
+            target: [meetingAttendance.meetingId, meetingAttendance.clubMemberId],
             // An entry without any field is a no-op on an existing row (set it to itself to keep the statement valid).
             set: Object.keys(patch).length > 0 ? patch : { meetingId: id },
           });
+        if (clearProxies) await tx.delete(meetingProxies).where(and(eq(meetingProxies.meetingId, id), eq(meetingProxies.holderClubMemberId, person.id)));
+        if (grantor) {
+          await tx
+            .insert(meetingProxies)
+            .values({ meetingId: id, grantorClubMemberId: grantor.id, holderClubMemberId: person.id, grantedBy: c.get("user").id })
+            .onConflictDoUpdate({ target: [meetingProxies.meetingId, meetingProxies.grantorClubMemberId], set: { holderClubMemberId: person.id, grantedBy: c.get("user").id } });
+        }
       }
 
       // One audit entry summarizing the batch, not one per row -- this data
@@ -465,7 +529,7 @@ meetingRoutes.patch(
     });
 
     const rows = await db.query.meetingAttendance.findMany({ where: eq(meetingAttendance.meetingId, id) });
-    return c.json({ data: rows });
+    return c.json({ data: await shapeAttendance(c, id, rows) });
   },
 );
 

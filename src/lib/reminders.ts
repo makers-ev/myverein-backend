@@ -302,13 +302,12 @@ export async function collectRsvpReminders(clubs: Map<string, ReminderClub>, now
   }
   if (due.length === 0) return [];
   const pending = await db
-    .select({ meetingId: meetingInvitees.meetingId, memberId: meetingInvitees.memberId })
+    .select({ meetingId: meetingInvitees.meetingId, clubMemberId: meetingInvitees.clubMemberId })
     .from(meetingInvitees)
     .where(and(inArray(meetingInvitees.meetingId, due.map((d) => d.row.id)), eq(meetingInvitees.response, "ausstehend")));
-  const index = await clubMemberIndex(pending.map((p) => p.memberId));
   const out: DueReminder[] = [];
   for (const { row, club, day } of due) {
-    const memberIds = [...new Set(pending.filter((p) => p.meetingId === row.id).flatMap((p) => index.get(`${row.clubId}:${p.memberId}`) ?? []))];
+    const memberIds = [...new Set(pending.filter((p) => p.meetingId === row.id).map((p) => p.clubMemberId))];
     if (memberIds.length === 0) continue;
     out.push({
       kind: "rsvp",

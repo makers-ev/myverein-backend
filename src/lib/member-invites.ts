@@ -25,7 +25,7 @@ import { APP_NAME, SITE_URL } from "./emailTemplate.js";
 import { clubMailLanguage } from "./club-settings.js";
 import { notifySafely } from "./notify/dispatcher.js";
 import { tr } from "./notify/i18n.js";
-import { meetingInvitees, meetings } from "../db/schema/meetings.js";
+import { meetingInvitees } from "../db/schema/meetings.js";
 import { clubMemberDepartments, clubMembers, clubMemberStatusHistory, type ClubMemberRow } from "../db/schema/club-members.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { recordKeyReturnsForRemovedAccount } from "./key-returns.js";
@@ -447,8 +447,8 @@ async function itemsBoundToAccount(tx: DbExecutor, clubId: string, accountMember
   const [invites] = await tx
     .select({ n: count })
     .from(meetingInvitees)
-    .innerJoin(meetings, eq(meetings.id, meetingInvitees.meetingId))
-    .where(and(eq(meetingInvitees.memberId, accountMemberId), eq(meetings.clubId, clubId)));
+    .innerJoin(clubMembers, eq(clubMembers.id, meetingInvitees.clubMemberId))
+    .where(and(eq(clubMembers.memberId, accountMemberId), eq(clubMembers.clubId, clubId)));
   const roles = await tx.select({ roleType: clubRoles.roleType }).from(clubRoles).where(eq(clubRoles.memberId, accountMemberId));
   return {
     openLoans: loans?.n ?? 0,

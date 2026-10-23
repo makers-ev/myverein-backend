@@ -239,9 +239,9 @@ describe("reminder-sweep", () => {
     // Meeting Mon 2026-03-30 18:00 Berlin (CEST) = 16:00Z; lead 3 days -> from Fri 2026-03-27.
     const [meeting] = await db.insert(meetings).values({ clubId, type: "sonstige", title: "Planung", scheduledAt: new Date("2026-03-30T16:00:00Z"), status: "geplant", createdBy: ownerUserId }).returning();
     await db.insert(meetingInvitees).values([
-      { meetingId: meeting!.id, memberId: account.a!, response: "ausstehend" },
-      { meetingId: meeting!.id, memberId: account.b!, response: "zugesagt" },
-      { meetingId: meeting!.id, memberId: account.c!, response: "abgesagt" },
+      { meetingId: meeting!.id, clubMemberId: clubMemberOf.a!, response: "ausstehend" },
+      { meetingId: meeting!.id, clubMemberId: clubMemberOf.b!, response: "zugesagt" },
+      { meetingId: meeting!.id, clubMemberId: clubMemberOf.c!, response: "abgesagt" },
     ]);
     expect((await sweep("2026-03-26T07:00:00Z")).scheduled).toBe(0); // Thursday 08:00 CET
     expect((await sweep("2026-03-27T06:59:00Z")).scheduled).toBe(0); // Friday 07:59 CET
@@ -259,7 +259,7 @@ describe("reminder-sweep", () => {
     const [meeting] = await db.insert(meetings).values({ clubId, type: "sonstige", title: "Herbst", scheduledAt: new Date("2026-10-26T17:00:00Z"), status: "geplant", createdBy: ownerUserId }).returning();
     const [cancelled] = await db.insert(meetings).values({ clubId, type: "sonstige", title: "Abgesagt", scheduledAt: new Date("2026-10-26T17:00:00Z"), status: "abgesagt", createdBy: ownerUserId }).returning();
     const [undated] = await db.insert(meetings).values({ clubId, type: "sonstige", title: "Offen", scheduledAt: null, status: "terminfindung", createdBy: ownerUserId }).returning();
-    for (const m of [meeting!, cancelled!, undated!]) await db.insert(meetingInvitees).values({ meetingId: m.id, memberId: account.c!, response: "ausstehend" });
+    for (const m of [meeting!, cancelled!, undated!]) await db.insert(meetingInvitees).values({ meetingId: m.id, clubMemberId: clubMemberOf.c!, response: "ausstehend" });
     expect((await sweep("2026-10-23T05:59:00Z")).scheduled).toBe(0);
     await sweep("2026-10-23T06:00:00Z");
     expect(await reminderJobs("rsvp", meeting!.id)).toHaveLength(1);

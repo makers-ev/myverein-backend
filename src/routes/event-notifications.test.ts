@@ -194,9 +194,7 @@ describe("event and meeting change notifications (B10)", () => {
 
   it("a rescheduled or cancelled meeting is announced to its invitees", async () => {
     const created = await data(await call(board, "/meetings", { method: "POST", body: { type: "vorstandssitzung", title: "Sitzung", scheduledAt: "2030-06-10T17:00:00.000Z" } }));
-    const accounts = await db.query.member.findMany({ where: (m, { eq: same }) => same(m.organizationId, clubId) });
-    const m1Account = accounts.find((a) => a.userId === m1.userId)!;
-    await db.execute(sql`INSERT INTO meeting_invitees (meeting_id, member_id, response) VALUES (${created.id}, ${m1Account.id}, 'ausstehend')`);
+    await db.execute(sql`INSERT INTO meeting_invitees (meeting_id, club_member_id, response) VALUES (${created.id}, ${clubMemberOf.m1}, 'ausstehend')`);
 
     expect((await call(board, `/meetings/${created.id}`, { method: "PATCH", body: { title: "Sitzung (Vorstand)" } })).status).toBe(200);
     expect(await jobsFor(created.id)).toHaveLength(0);
@@ -214,7 +212,7 @@ describe("event and meeting change notifications (B10)", () => {
     expect(await deliveredTo(created.id, "meeting.cancelled")).toEqual([clubMemberOf.m1]);
 
     const quiet = await data(await call(board, "/meetings", { method: "POST", body: { type: "vorstandssitzung", title: "Leise", scheduledAt: "2030-06-12T17:00:00.000Z" } }));
-    await db.execute(sql`INSERT INTO meeting_invitees (meeting_id, member_id, response) VALUES (${quiet.id}, ${m1Account.id}, 'ausstehend')`);
+    await db.execute(sql`INSERT INTO meeting_invitees (meeting_id, club_member_id, response) VALUES (${quiet.id}, ${clubMemberOf.m1}, 'ausstehend')`);
     expect((await call(board, `/meetings/${quiet.id}`, { method: "PATCH", body: { scheduledAt: "2030-06-13T17:00:00.000Z", notify: false } })).status).toBe(200);
     expect(await jobsFor(quiet.id)).toHaveLength(0);
   });

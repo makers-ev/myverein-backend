@@ -8,6 +8,7 @@ import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
+import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { toAppError } from "../lib/errors.js";
 import { meetingRoutes } from "./meetings.js";
@@ -712,6 +713,55 @@ describe("meetings routes", () => {
 
       const getRes = await app.request(`/meetings/${deleteMeetingId}?clubId=${clubAId}`, { headers: { cookie: cookieA } });
       expect(getRes.status).toBe(404);
+    });
+  });
+  describe("members without an account (Wave 11 B2)", () => {
+    let meetingIdLocal: string;
+    let guestlessId: string;
+    const req = (cookie: string, path: string, init: { method?: string; body?: object } = {}) =>
+      app.request(`${path}?clubId=${clubAId}`, { method: init.method ?? "GET", headers: { cookie, "content-type": "application/json" }, body: init.body ? JSON.stringify(init.body) : undefined });
+
+    beforeAll(async () => {
+      const [row] = await db.insert(clubMembers).values({ clubId: clubAId, displayName: "Kind Ohne Konto", joinedAt: "2020-01-01" }).returning();
+      guestlessId = row!.id;
+      const res = await req(cookieA, "/meetings", { method: "POST", body: { type: "vorstandssitzung", title: "Ohne Konto" } });
+      meetingIdLocal = ((await res.json()) as { data: { id: string } }).data.id;
+    });
+
+    it("invites a member without account by club member id, shows the name only to meeting managers", async () => {
+      const res = await req(cookieA, `/meetings/${meetingIdLocal}/invitees`, { method: "POST", body: { clubMemberId: guestlessId, notify: false } });
+      expect(res.status).toBe(201);
+      expect(((await res.json()) as { data: Record<string, unknown> }).data).toMatchObject({ clubMemberId: guestlessId, memberId: null, displayName: "Kind Ohne Konto", response: "ausstehend" });
+      const duplicate = await req(cookieA, `/meetings/${meetingIdLocal}/invitees`, { method: "POST", body: { clubMemberId: guestlessId } });
+      expect(duplicate.status).toBe(409);
+      // The second account is a plain member and not invited to this board meeting: 404, not 403.
+      expect((await req(cookieSecond, `/meetings/${meetingIdLocal}/invitees`)).status).toBe(404);
+    });
+
+    it("still accepts the account membership id as an alias and rejects other clubs", async () => {
+      const alias = await req(cookieA, `/meetings/${meetingIdLocal}/invitees`, { method: "POST", body: { memberId: memberSecondId, notify: false } });
+      expect(alias.status).toBe(201);
+      const aliasBody = ((await alias.json()) as { data: Record<string, unknown> }).data;
+      expect(aliasBody).toMatchObject({ memberId: memberSecondId });
+      // Now invited: the member reads the invitee list but without names.
+      const list = ((await (await req(cookieSecond, `/meetings/${meetingIdLocal}/invitees`)).json()) as { data: Array<Record<string, unknown>> }).data;
+      expect(list).toHaveLength(2);
+      expect(list.every((i) => !("displayName" in i))).toBe(true);
+      const foreign = await req(cookieA, `/meetings/${meetingIdLocal}/invitees`, { method: "POST", body: { memberId: memberBId } });
+      expect(foreign.status).toBe(404);
+    });
+
+    it("removes an invitee by club member id", async () => {
+      expect((await req(cookieA, `/meetings/${meetingIdLocal}/invitees/${guestlessId}`, { method: "DELETE" })).status).toBe(204);
+      expect((await req(cookieA, `/meetings/${meetingIdLocal}/invitees/${guestlessId}`, { method: "DELETE" })).status).toBe(404);
+    });
+
+    it("records attendance for a member without account and exposes proxies as a list", async () => {
+      const res = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ clubMemberId: guestlessId, present: true }, { memberId: memberSecondId, present: true, proxyForClubMemberId: guestlessId }] });
+      expect(res.status).toBe(200);
+      const rows = ((await res.json()) as { data: Array<Record<string, unknown>> }).data;
+      expect(rows.find((r) => r.clubMemberId === guestlessId)).toMatchObject({ present: true, memberId: null, proxyFor: [] });
+      expect(rows.find((r) => r.memberId === memberSecondId)).toMatchObject({ proxyFor: [guestlessId] });
     });
   });
 });

@@ -215,7 +215,7 @@ describe("reminders", () => {
     const [item] = await db.insert(inventoryItems).values({ clubId: en, name: "Pavillon", condition: "gut" }).returning();
     await db.insert(inventoryLoans).values({ itemId: item!.id, memberId: accountOf.memberEn!, dueAt: new Date("2026-10-19T10:00:00Z") });
     const [meeting] = await db.insert(meetings).values({ clubId: en, title: "Vorstandssitzung", type: "sonstige", status: "geplant", scheduledAt: new Date("2026-10-21T17:00:00Z"), createdBy: ownerEn }).returning();
-    await db.insert(meetingInvitees).values({ meetingId: meeting!.id, memberId: accountOf.memberEn!, response: "ausstehend" });
+    await db.insert(meetingInvitees).values({ meetingId: meeting!.id, clubMemberId: clubMemberOf.memberEn!, response: "ausstehend" });
     await run("2026-10-18T08:15:00Z");
 
     const event = (await reminderJob(en, "event"))[0]!.payload as ReminderPayload;

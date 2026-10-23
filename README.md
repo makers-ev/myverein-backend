@@ -202,6 +202,12 @@ erDiagram
     meetings ||--o{ meeting_invitees : "has"
     meetings ||--o{ meeting_attendance : "has"
     meetings ||--o{ meeting_resolutions : "has"
+    meetings ||--o{ meeting_proxies : "has"
+    meetings ||--o{ meeting_agenda_items : "has"
+    meetings ||--o{ meeting_invitations : "sends"
+    meetings ||--o{ meeting_minutes : "versions"
+    club_members ||--o{ meeting_invitees : "invited"
+    club_members ||--o{ meeting_attendance : "attends"
     organization ||--o{ locations : "has"
     locations ||--o{ location_key_holders : "has"
     locations ||--o{ location_key_history : "logs key handovers"
@@ -465,20 +471,31 @@ erDiagram
         text type "vorstandssitzung | mitgliederversammlung | sonstige"
         timestamp scheduled_at "null while Terminfindung"
         text status
+        jsonb rules_snapshot "assembly rules at invitation time (Wave 11)"
+        text participation_mode "praesenz | hybrid | virtual"
+        timestamp voting_roll_frozen_at
     }
     meeting_invitees {
         uuid id PK
         uuid meeting_id FK
-        text member_id FK
+        uuid club_member_id FK "club_members, also members without account"
         text response "ausstehend | zugesagt | abgesagt"
     }
     meeting_attendance {
         uuid id PK
         uuid meeting_id FK
-        text member_id FK
+        uuid club_member_id FK "nullable after erasure"
         boolean present
         boolean has_voting_right
-        text proxy_for_member_id FK "nullable, Vollmacht"
+        timestamp checked_in_at
+        timestamp left_at
+        text check_in_method "schriftfuehrer | self_online | vollmacht"
+    }
+    meeting_proxies {
+        uuid id PK
+        uuid meeting_id FK
+        uuid grantor_club_member_id FK
+        uuid holder_club_member_id FK
     }
     meeting_resolutions {
         uuid id PK
@@ -1106,7 +1123,7 @@ Tests: `src/routes/dpa.test.ts` (draft/publish/immutability, owner-only acceptan
 
 ### Data export and erasure (Wave 10 B7, B8)
 
-**Privacy contributor registry** (`src/lib/privacy/registry.ts`, contributors in `contributors.ts`): every table with a personal reference to a club member is owned by exactly one contributor that knows how to export it (`exportSubject`, Art. 15) and how to erase it (`eraseSubject`, Art. 17: delete, anonymise, or keep with a reason). Built in: `member_core` (master data, departments, status history, custom fields, visibility, invitation), `consents` (kept as proof), `absences` (reports and ward RSVPs), `guardianship`, `forms_and_applications` (answers and copies erased via `eraseFormDataOfMember`), `exit_requests` (reasons removed, dates kept), `communication` (delivery addresses and texts scrubbed, preferences deleted), `account_data` (roles, availability, RSVPs, loans, damage reports, key holders, meeting invitations/attendance). `src/lib/privacy/registry.test.ts` **fails the build** when a table with a foreign key to `club_members`, or a cascading foreign key to the account membership `member`, is neither covered by a contributor nor listed in `EXEMPT_TABLES` with a reason (`set null` references to `member` are actor references such as `decided_by` and are not data about the person). Waves 11/12 (assemblies, attendance) must add their contributor in the same change.
+**Privacy contributor registry** (`src/lib/privacy/registry.ts`, contributors in `contributors.ts`): every table with a personal reference to a club member is owned by exactly one contributor that knows how to export it (`exportSubject`, Art. 15) and how to erase it (`eraseSubject`, Art. 17: delete, anonymise, or keep with a reason). Built in: `member_core` (master data, departments, status history, custom fields, visibility, invitation), `consents` (kept as proof), `absences` (reports and ward RSVPs), `guardianship`, `forms_and_applications` (answers and copies erased via `eraseFormDataOfMember`), `exit_requests` (reasons removed, dates kept), `communication` (delivery addresses and texts scrubbed, preferences deleted), `account_data` (roles, availability, RSVPs, loans, damage reports, key holders), `assembly_data` (Wave 11: meeting invitations, attendance, proxies, voting roll, invitation deliveries, ballot rolls and open votes, candidacies, terms; the reference to the person is removed, counts and results stay). `src/lib/privacy/registry.test.ts` **fails the build** when a table with a foreign key to `club_members`, or a cascading foreign key to the account membership `member`, is neither covered by a contributor nor listed in `EXEMPT_TABLES` with a reason (`set null` references to `member` are actor references such as `decided_by` and are not data about the person). Later waves must add their contributor in the same change.
 
 **Export** (`GET /club-members/me/data-export`, board `POST /club-members/:id/data-export`, guardian `GET /guardian/wards/:wardId/data-export`): `{ data: { generatedAt, club, clubMemberId, sections: { <contributor key>: {...} }, files: [{ kind, filename, mimeType, sizeBytes, uploadedAt }], note } }` or, with `format=html`, a readable HTML download (all values escaped). Never cached (`Cache-Control: private, no-store`), at most 5 MiB (`413` above), rate limited per account (`DATA_EXPORT_PER_HOUR`, `DATA_EXPORT_BOARD_PER_HOUR`), one `member_data.export` audit entry (id, format, size, no content). Files are listed from the media registry but never inlined or linked. Delivering an export closes the member's open `access` request. Audit entries about the person and legally required records of the club are not part of it.
 
@@ -1118,7 +1135,11 @@ Tests: `src/routes/dpa.test.ts` (draft/publish/immutability, owner-only acceptan
 
 Tests: `src/lib/privacy/registry.test.ts`, `src/routes/member-privacy.test.ts` (export per role and club, escaped HTML, plan without side effects, digest, blockers, anonymisation, pseudonymised attendance, guardian role cleanup, deadlines, `deleteUser` hook), the new routes in `rights-matrix.test.ts`.
 
-### Migrations 0014-0047 (Wave 7, Wave 8, Wave 9, Wave 10, Wave 11)
+### General assembly data model (Wave 11)
+
+Statute parameters live in `club_settings.assembly_rules` (see `/club-settings/assembly`); `lib/assembly-rules.ts` is the only reader. **Invitees, attendance, proxies, the voting roll, voter rolls and candidacies reference `club_members`** (members without an account take part), never a hard cascade on person deletion: the erasure contributor `assembly_data` removes the reference and keeps counts and results. `meetings.rules_snapshot` freezes the rules at invitation time so a resolution is judged by the rules that applied. Tables: `meeting_agenda_items` (structured agenda, `vote_kind` none/resolution/election, `topic` = key of `majorityByTopic`, `announced_in_invitation_id`), `meeting_invitations` (version, kind `einladung`/`nachtrag`, content snapshot + SHA-256, rules snapshot, period check, exception reason) with `meeting_invitation_deliveries` (per member and channel `email`/`inapp`/`post`, status `queued`/`sent`/`failed`/`bounced`/`manual_posted`, no address stored), `meeting_voting_roll` (frozen list of voting members with the basis), `meeting_proxies` (unique per grantor and meeting), `ballots` / `ballot_options` / `ballot_voters` (unique per ballot and member = no double vote, `cast_by` = proxy holder) / `ballot_votes_open`, `elections` / `election_candidates` / `club_role_terms`, `meeting_minutes` (versions, status `entwurf` → `zur_genehmigung` → `genehmigt` → `archiviert`) with `meeting_minutes_amendments`. **`ballot_votes_secret` (ADR option A)** has no member reference, no voter-roll reference, no timestamp and a random UUID primary key; its only columns are `ballot_id` and `option_id`. Limit: against an operator with database access a secret ballot cannot be proven anonymous. Tables for the ballots, elections and minutes exist from B2 on; their routes follow with the later packages.
+
+### Migrations 0014-0049 (Wave 7, Wave 8, Wave 9, Wave 10, Wave 11)
 
 Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runtime` (Docker boot) or `npm run db:migrate`.
 
@@ -1158,6 +1179,8 @@ Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runti
 | `0045_retention-notice` | Wave 10 B9. `retention_runs.notice` (the announcement run before the first real deletion of a club category, see [Retention rules](#retention-rules-wave-10-b9)). |
 | `0046_creator-references-survive-account` | Wave 10 review H1. `meetings.created_by` and `form_submissions.submitted_by_user_id` are nullable with `ON DELETE SET NULL` (were `CASCADE`): deleting an account no longer wipes the club's meetings, resolutions and attendance, nor the decided applications (consent evidence). The registry test (`src/lib/privacy/registry.test.ts`) fails for any table that cascades from `user` without being on its account-owned allowlist. |
 | `0047_assembly-rules` | Wave 11 B1, additive: `club_settings.assembly_rules` (jsonb, nullable = nothing stated); no backfill. |
+| `0048_assembly-schema` | Wave 11 B2, stage 1 (additive + data). New tables `meeting_agenda_items`, `meeting_invitations`, `meeting_invitation_deliveries`, `meeting_voting_roll`, `meeting_proxies`, `ballots`, `ballot_options`, `ballot_voters`, `ballot_votes_open`, `ballot_votes_secret`, `elections`, `election_candidates`, `club_role_terms`, `meeting_minutes`, `meeting_minutes_amendments`; new columns on `meetings` (`rules_snapshot`, `participation_mode`, `online_url`, `voting_roll_frozen_at`), `meeting_invitees.club_member_id`, `meeting_attendance` (`club_member_id`, `checked_in_at`, `left_at`, `check_in_method`) and `meeting_resolutions` (`ballot_id`, `agenda_item_id`, `source` default `manual`). Data steps (idempotent): `club_member_id` filled from `club_members.member_id`; **count check** — the migration raises (and changes nothing) if an invitee or an attendance row with an account has no `club_members` row; legacy `proxy_for_member_id` becomes a `meeting_proxies` row (grantor = proxied member, holder = attendee); `meetings.minutes` becomes `meeting_minutes` version 1 (`protokolliert` → `genehmigt`, other non-blank text → `entwurf`; the legacy column stays); present attendees get `check_in_method = schriftfuehrer`. |
+| `0049_meetings-club-member-cutover` | Wave 11 B2, stage 2: `meeting_invitees.club_member_id` becomes `NOT NULL`, the account columns `member_id` / `proxy_for_member_id` and their unique indexes are dropped. **Rollback plan:** both stages run in one release because the code reads only the new columns; to roll back, restore the database backup taken before the deploy (the account ids can be rebuilt from `club_members.member_id`, the proxies from `meeting_proxies`). Test: `src/db/migration-assembly.test.ts`. |
 
 #### Verifying the Wave 7 migrations (B12)
 
@@ -1493,12 +1516,12 @@ Event created; event edit that changes only title, description, category or capa
 | `/meetings` | GET, POST | session + `clubGuard` (write needs `meetings:write`) | Body `{ type: 'vorstandssitzung' \| 'mitgliederversammlung' \| 'sonstige', title, scheduledAt?, agenda? }` (other `type` values → 422). Omitting `scheduledAt` creates it in `"terminfindung"` status. **GET is read-scoped:** `vorstandssitzung` rows only for invitees and callers with `meetings:write`/`meetings:read_board`; **external `guest` accounts read no meetings at all (`404`)** (see [Rights and read scoping](#rights-and-read-scoping-wave-7-b7b8)) |
 | `/meetings/:id` | GET | session + `clubGuard` | `404` (never 403) for a `vorstandssitzung` the caller may not read — same for every `/meetings/:id/*` read below |
 | `/meetings/:id` | PATCH, DELETE | session + `clubGuard` (`meetings:write`) | DELETE of an open meeting (`terminfindung`/`geplant`, not past) with invitees tells them like a cancellation; `?notify=false` suppresses it (audit `meeting.notify_suppressed`). PATCH also accepts `type`, `title`, `scheduledAt` (nullable), `agenda`, `status`, `minutes`, `notify?: boolean`. A changed `scheduledAt` (or a date set for the first time) and `status: "abgesagt"` (cancellation) are announced to the invitees; `notify: false` suppresses it (audit `meeting.notify_suppressed`) |
-| `/meetings/:id/invitees` | GET | session + `clubGuard` | |
-| `/meetings/:id/invitees` | POST, DELETE `/:memberId` | session + `clubGuard` (`meetings:write`) | POST body `{ memberId, notify?: boolean }`: the invited person gets `meeting.invited` (optional, events) unless `notify:false` or `club_settings.notify_meeting_invites = false`. Same table serves the Terminfindung candidate list and post-scheduling zu-/absage tracking |
+| `/meetings/:id/invitees` | GET | session + `clubGuard` | `200 { data: [{ id, meetingId, clubMemberId, memberId (account id or null), displayName?, response }] }`. `displayName` only for `meetings:write` / `meetings:read_board`, everybody else who may read the meeting gets ids only |
+| `/meetings/:id/invitees` | POST, DELETE `/:clubMemberId` | session + `clubGuard` (`meetings:write`) | POST body `{ clubMemberId, notify?: boolean }` (Wave 11: invitees are `club_members`, so members **without an account** can be invited; the account membership id `memberId` is still accepted as an alias, also in the DELETE path): the invited person gets `meeting.invited` (optional, events) unless `notify:false` or `club_settings.notify_meeting_invites = false`. `404` for an unknown, foreign-club or left member, `409` when already invited. Same table serves the Terminfindung candidate list and post-scheduling zu-/absage tracking |
 | `/meetings/:id/invitees/me` | PATCH | session + `clubGuard` | Self-service RSVP for the caller's own invitee row. Body `{ response: "zugesagt" \| "abgesagt" }` |
 | `/meetings/:id/overlap` | GET | session + `clubGuard` | Query `candidates` only — auto-loads the meeting's own invitees instead of a caller-supplied `members` list |
-| `/meetings/:id/attendance` | GET | session + `clubGuard` | |
-| `/meetings/:id/attendance` | PATCH | session + `clubGuard` (`meetings:write`) | Body: array of `{ memberId, present?, hasVotingRight?, proxyForMemberId? (nullable) }`. **Partial update:** only the listed members and only the fields sent are written — omitted members/fields keep their stored value (re-saving never resets to "not present"); `proxyForMemberId: null` clears a Vollmacht. `proxyForMemberId` must be a member of the same club and differ from `memberId` (`422` self-reference, `404` foreign club); the whole batch is validated before anything is written. `GET` returns the stored rows (pre-fill). One audit entry for the whole batch, not per row |
+| `/meetings/:id/attendance` | GET | session + `clubGuard` | `200 { data: [{ id, meetingId, clubMemberId (null after erasure), memberId (account id or null), displayName? (managers only), present, hasVotingRight, checkedInAt, leftAt, checkInMethod, proxyFor: clubMemberId[], proxyForMemberId }] }` |
+| `/meetings/:id/attendance` | PATCH | session + `clubGuard` (`meetings:write`) | Body: array of `{ clubMemberId, present?, hasVotingRight?, proxyForClubMemberId? (nullable) }` (`memberId` / `proxyForMemberId` account ids are accepted as aliases). **Partial update:** only the listed members and only the fields sent are written — omitted members/fields keep their stored value (re-saving never resets to "not present"); `proxyForClubMemberId: null` clears the proxies the person holds. The proxy-giver must be a member of the same club and differ from the attendee (`422` self-reference, `404` foreign club); the whole batch is validated before anything is written. Proxies are stored in `meeting_proxies`. One audit entry for the whole batch, not per row |
 | `/meetings/:id/resolutions` | GET, POST | session + `clubGuard` (write needs `meetings:write`) | Body `{ description, votesFor, votesAgainst, votesAbstain, result }` (Beschluss); vote counts are integers `0..100000` (`422` beyond) |
 | `/meetings/:id/resolutions/:rid` | PATCH | session + `clubGuard` (`meetings:write`) | **Correction instead of silent overwrite:** body = any of the resolution fields **plus a mandatory `correctionNote`** (Berichtigungsvermerk, `422` without it or without a changed field; vote counts `0..100000`). Sets `correction_note`, `corrected_at`, `corrected_by`; audit `meeting_resolution.correct` stores the changed field names only (no previous values and no note: club-scoped audit viewers must not read resolution content; the note stays on the resolution row). Resolutions cannot be deleted |
 | `/internal/stats` | GET | `INTERNAL_STATS_TOKEN` bearer token | Aggregate counts only (total users, new users last 7 days, active sessions, `audit_log` event-type breakdown) — never raw rows. Not gated by a Better Auth session; see [Security](#security) for why. Returns 503 if `INTERNAL_STATS_TOKEN` is unset (fails closed) |
