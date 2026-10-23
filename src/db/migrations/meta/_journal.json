@@ -330,6 +330,13 @@
       "when": 1792588154703,
       "tag": "0046_creator-references-survive-account",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1792785932784,
+      "tag": "0047_assembly-rules",
+      "breakpoints": true
     }
   ]
 }

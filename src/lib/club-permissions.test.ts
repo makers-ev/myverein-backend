@@ -102,3 +102,12 @@ describe("privacy permissions (Wave 10 B2)", () => {
     expect(clubPermissionsFor(["erziehungsberechtigt"])).toEqual([]);
   });
 });
+
+describe("assembly permission (Wave 11 B1)", () => {
+  it("assembly:manage is held by vorsitz, stellv_vorsitz and schriftfuehrer only", () => {
+    for (const role of ["vorsitz", "stellv_vorsitz", "schriftfuehrer"]) expect(hasClubPermission([role], "assembly:manage")).toBe(true);
+    for (const role of CLUB_ROLE_TYPES.filter((r) => !["vorsitz", "stellv_vorsitz", "schriftfuehrer"].includes(r))) expect(hasClubPermission([role], "assembly:manage")).toBe(false);
+    expect(hasClubPermission([], "assembly:manage")).toBe(false);
+    expect(clubPermissionsFor(["schriftfuehrer"])).toContain("assembly:manage");
+  });
+});
