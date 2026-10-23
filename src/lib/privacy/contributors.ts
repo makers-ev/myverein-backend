@@ -405,6 +405,11 @@ const assemblyData: PrivacyContributor = {
     "ballot_voters",
     "ballot_votes_open",
     "ballot_options",
+    // Minutes and secret votes carry no reference to a club member (accounts only as creator/confirmer, set null on erasure).
+    "ballot_votes_secret",
+    "meeting_minutes",
+    "meeting_minutes_amendments",
+    "meeting_minutes_confirmations",
     "elections",
     "election_candidates",
     "club_role_terms",
