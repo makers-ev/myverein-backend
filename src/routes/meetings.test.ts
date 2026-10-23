@@ -10,6 +10,8 @@ import { closeDatabase, db } from "../db/client.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { clubSettings } from "../db/schema/club-settings.js";
+import { emptyAssemblyRules } from "../lib/assembly-rules.js";
 import { toAppError } from "../lib/errors.js";
 import { meetingRoutes } from "./meetings.js";
 
@@ -98,6 +100,9 @@ describe("meetings routes", () => {
     // Grants memberA meetings:write, so cookieA acts as the "board" caller
     // throughout; cookieSecond stays a plain member for 403 checks.
     await db.insert(clubRoles).values({ memberId: memberAId, roleType: "schriftfuehrer" });
+    // Statute parameters (Wave 11): the voting right and proxies are derived from them.
+    const rules = { ...emptyAssemblyRules(), votingStatuses: ["aktiv" as const], votingMinAge: 0, proxyAllowed: true, maxProxiesPerPerson: 2 };
+    await db.insert(clubSettings).values({ clubId: clubAId, assemblyRules: rules }).onConflictDoUpdate({ target: clubSettings.clubId, set: { assemblyRules: rules } });
   }, 30_000);
 
   afterAll(async () => {
@@ -722,7 +727,8 @@ describe("meetings routes", () => {
       app.request(`${path}?clubId=${clubAId}`, { method: init.method ?? "GET", headers: { cookie, "content-type": "application/json" }, body: init.body ? JSON.stringify(init.body) : undefined });
 
     beforeAll(async () => {
-      const [row] = await db.insert(clubMembers).values({ clubId: clubAId, displayName: "Kind Ohne Konto", joinedAt: "2020-01-01" }).returning();
+      const category = await db.query.memberCategories.findFirst({ where: (cat, { and: a, eq: e }) => a(e(cat.clubId, clubAId), e(cat.key, "aktiv")) });
+      const [row] = await db.insert(clubMembers).values({ clubId: clubAId, displayName: "Kind Ohne Konto", categoryId: category!.id, joinedAt: "2020-01-01" }).returning();
       guestlessId = row!.id;
       const res = await req(cookieA, "/meetings", { method: "POST", body: { type: "vorstandssitzung", title: "Ohne Konto" } });
       meetingIdLocal = ((await res.json()) as { data: { id: string } }).data.id;
@@ -757,11 +763,25 @@ describe("meetings routes", () => {
     });
 
     it("records attendance for a member without account and exposes proxies as a list", async () => {
-      const res = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ clubMemberId: guestlessId, present: true }, { memberId: memberSecondId, present: true, proxyForClubMemberId: guestlessId }] });
+      const res = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ clubMemberId: guestlessId, present: true }, { memberId: memberSecondId, present: true }] });
       expect(res.status).toBe(200);
       const rows = ((await res.json()) as { data: Array<Record<string, unknown>> }).data;
-      expect(rows.find((r) => r.clubMemberId === guestlessId)).toMatchObject({ present: true, memberId: null, proxyFor: [] });
-      expect(rows.find((r) => r.memberId === memberSecondId)).toMatchObject({ proxyFor: [guestlessId] });
+      expect(rows.find((r) => r.clubMemberId === guestlessId)).toMatchObject({ present: true, memberId: null, proxyFor: [], checkInMethod: "schriftfuehrer", hasVotingRight: true });
+      expect(rows.find((r) => r.clubMemberId === guestlessId)!.checkedInAt).toBeTruthy();
+      // Somebody who is present cannot give a proxy; once they left, the clerk can record it for them.
+      const blocked = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ memberId: memberSecondId, proxyForClubMemberId: guestlessId }] });
+      expect(blocked.status).toBe(409);
+      expect(((await blocked.json()) as { error: { details: { code: string } } }).error.details.code).toBe("grantor_present");
+      const left = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ clubMemberId: guestlessId, present: false }, { memberId: memberSecondId, proxyForClubMemberId: guestlessId }] });
+      expect(left.status).toBe(200);
+      const after = ((await left.json()) as { data: Array<Record<string, unknown>> }).data;
+      expect(after.find((r) => r.clubMemberId === guestlessId)).toMatchObject({ present: false, proxyFor: [] });
+      expect(after.find((r) => r.clubMemberId === guestlessId)!.leftAt).toBeTruthy();
+      expect(after.find((r) => r.memberId === memberSecondId)).toMatchObject({ proxyFor: [guestlessId] });
+      // Whoever gave a proxy cannot be checked in without withdrawing it.
+      const again = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ clubMemberId: guestlessId, present: true }] });
+      expect(again.status).toBe(409);
+      expect(((await again.json()) as { error: { details: { code: string } } }).error.details.code).toBe("proxy_granted");
     });
   });
 });

@@ -10,6 +10,7 @@ import { messageDeliveries } from "../db/schema/communication.js";
 import { locations } from "../db/schema/locations.js";
 import { meetingInvitees, meetings, type MeetingRow } from "../db/schema/meetings.js";
 import { writeAudit } from "./audit.js";
+import { isEligible, loadEligibility } from "./assembly-attendance.js";
 import { loadAssemblyRules, missingAssemblyRules, type AssemblyRules } from "./assembly-rules.js";
 import { normalizeEmail } from "./audience.js";
 import { loadClubSettings } from "./club-settings.js";
@@ -151,6 +152,16 @@ export function composeInvitationMessage(content: InvitationContent, lang: MailL
   return { title: `${heading}: ${content.title}`, body: lines.join("\n") };
 }
 
+export type InvitationAudience = "all_members" | "voting_members";
+
+/** `voting_members` keeps only the members with a voting right on the meeting day (frozen roll, else live derivation). */
+async function audienceOf(clubId: string, meeting: MeetingRow, audience: InvitationAudience): Promise<InvitationRecipient[]> {
+  const recipients = await loadInvitationRecipients(clubId);
+  if (audience === "all_members") return recipients;
+  const eligibility = await loadEligibility(db, clubId, meeting);
+  return recipients.filter((r) => isEligible(eligibility, r.clubMemberId));
+}
+
 export interface InvitationPreview {
   kind: "einladung" | "nachtrag";
   period: PeriodCheck;
@@ -176,14 +187,14 @@ function summarize(planned: PlannedDelivery[], total: number) {
 }
 
 /** What sending now would do (period, rules, recipients); changes nothing. */
-export async function previewInvitation(clubId: string, meeting: MeetingRow, now: Date = new Date()): Promise<InvitationPreview> {
+export async function previewInvitation(clubId: string, meeting: MeetingRow, now: Date = new Date(), audience: InvitationAudience = "all_members"): Promise<InvitationPreview> {
   const [rules, settings, agenda, [prior]] = await Promise.all([
     loadAssemblyRules(db, clubId),
     loadClubSettings(db, clubId),
     loadAgenda(meeting.id),
     db.select({ n: max(meetingInvitations.version) }).from(meetingInvitations).where(eq(meetingInvitations.meetingId, meeting.id)),
   ]);
-  const recipients = await loadInvitationRecipients(clubId);
+  const recipients = await audienceOf(clubId, meeting, audience);
   const planned = planDeliveries(recipients, rules.invitationForm ?? "textform");
   return {
     kind: prior?.n ? "nachtrag" : "einladung",
@@ -203,6 +214,8 @@ export interface SendInvitationInput {
   message?: string | null | undefined;
   /** Reason for sending although the period is violated; recorded with the invitation and shown in the minutes. */
   exceptionReason?: string | undefined;
+  /** Default `all_members`: the statute usually invites everybody, `voting_members` only those who may vote. */
+  audience?: InvitationAudience | undefined;
   now?: Date;
 }
 
@@ -225,7 +238,7 @@ export async function sendInvitation(input: SendInvitationInput): Promise<{ invi
     throw new ValidationError("The invitation period is not met", { details: { code: "invitation_period_violated", ...period } });
   }
 
-  const recipients = await loadInvitationRecipients(clubId);
+  const recipients = await audienceOf(clubId, meeting, input.audience ?? "all_members");
   const planned = planDeliveries(recipients, rules.invitationForm ?? "textform");
   const placeRow = meeting.locationId ? (await db.select({ name: locations.name }).from(locations).where(and(eq(locations.id, meeting.locationId), eq(locations.clubId, clubId))))[0] : undefined;
 

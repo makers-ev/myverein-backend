@@ -5,15 +5,18 @@ import { Hono } from "hono";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
-import { VOTE_KINDS, meetingAgendaItems, meetingInvitationDeliveries, meetingInvitations } from "../db/schema/assembly.js";
+import { VOTE_KINDS, meetingAgendaItems, meetingInvitationDeliveries, meetingInvitations, meetingProxies, meetingVotingRoll } from "../db/schema/assembly.js";
+import { meetings } from "../db/schema/meetings.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { writeAudit } from "../lib/audit.js";
 import { MAJORITY_TOPICS } from "../lib/assembly-rules.js";
+import { computeQuorum, freezeVotingRoll, grantProxy, loadEligibility, overrideVotingRight } from "../lib/assembly-attendance.js";
 import { deliverySummary, previewInvitation, sendInvitation, syncInvitationDeliveries } from "../lib/assembly-invitation.js";
 import { loadClubSettings } from "../lib/club-settings.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { buildCsv } from "../lib/member-csv.js";
+import { callerClubMemberId, clubMembersByIds, resolveClubMember } from "../lib/meeting-members.js";
 import { tr } from "../lib/notify/i18n.js";
 import { cleanText } from "../lib/text-policy.js";
 import type { ClubEnv } from "../middleware/club-guard.js";
@@ -195,7 +198,9 @@ const shapeManaged = (i: InvitationRow) => ({
 meetingAssemblyRoutes.get("/:id/invitations/preview", async (c) => {
   requireAssemblyManage(c);
   const meeting = await loadClubMeeting(c, paramId(c, "id"));
-  return c.json({ data: await previewInvitation(c.get("clubId"), meeting) });
+  const audience = z.enum(["all_members", "voting_members"]).default("all_members").safeParse(c.req.query("audience"));
+  if (!audience.success) throw new ValidationError("Invalid query", { details: audience.error.issues });
+  return c.json({ data: await previewInvitation(c.get("clubId"), meeting, new Date(), audience.data) });
 });
 
 const sendSchema = z.object({
@@ -203,6 +208,8 @@ const sendSchema = z.object({
   message: z.union([cleanText(z.string().trim().max(4000), true), z.null()]).optional(),
   /** Needed to send although the invitation period is not met; recorded and shown in the minutes. */
   exceptionReason: cleanText(z.string().trim().min(5).max(1000), true).optional(),
+  /** Who is invited: every member (default) or only the members with a voting right on the meeting day. */
+  audience: z.enum(["all_members", "voting_members"]).optional(),
 });
 
 meetingAssemblyRoutes.post(
@@ -213,7 +220,7 @@ meetingAssemblyRoutes.post(
     requireAssemblyManage(c);
     const meeting = await loadClubMeeting(c, paramId(c, "id"));
     const body = c.req.valid("json");
-    const { invitation, summary } = await sendInvitation({ clubId: c.get("clubId"), meeting, actorUserId: c.get("user").id, message: body.message, exceptionReason: body.exceptionReason });
+    const { invitation, summary } = await sendInvitation({ clubId: c.get("clubId"), meeting, actorUserId: c.get("user").id, message: body.message, exceptionReason: body.exceptionReason, audience: body.audience });
     return c.json({ data: { ...shapeManaged(invitation), deliveries: summary, summary: await deliverySummary(invitation.id) } }, 201);
   },
 );
@@ -332,4 +339,132 @@ meetingAssemblyRoutes.post("/:id/invitations/:invId/deliveries/mark-posted", val
     .returning({ id: meetingInvitationDeliveries.id });
   await writeAudit(db, { eventType: "meeting_invitation.mark_posted", subjectId: invitation.id, payload: { clubId: c.get("clubId"), meetingId: meeting.id, invitationId: invitation.id, count: updated.length } });
   return c.json({ data: { marked: updated.length, summary: await deliverySummary(invitation.id) } });
+});
+
+// --- Voting roll, proxies, quorum (B4) -------------------------------------------------------------------------------
+
+const manageRoll = (c: Context<ClubEnv>) => {
+  if (!canManage(c)) throw new ForbiddenError("Missing assembly:manage or meetings:write permission");
+};
+
+const rollQuerySchema = z.object({ eligible: z.enum(["true", "false"]).optional() });
+
+/** The voting roll: frozen entries with the basis, or the live derivation while it is not frozen. */
+meetingAssemblyRoutes.get("/:id/voting-roll", async (c) => {
+  manageRoll(c);
+  const clubId = c.get("clubId");
+  const meeting = await loadClubMeeting(c, paramId(c, "id"));
+  const query = rollQuerySchema.safeParse(c.req.query());
+  if (!query.success) throw new ValidationError("Invalid query", { details: query.error.issues });
+  const eligibility = await loadEligibility(db, clubId, meeting);
+  const people = await db.select({ id: clubMembers.id, displayName: clubMembers.displayName }).from(clubMembers).where(eq(clubMembers.clubId, clubId)).orderBy(asc(clubMembers.displayName), asc(clubMembers.id));
+  const overrides = eligibility.frozen
+    ? new Map((await db.select({ id: meetingVotingRoll.clubMemberId, reason: meetingVotingRoll.overrideReason }).from(meetingVotingRoll).where(eq(meetingVotingRoll.meetingId, meeting.id))).map((r) => [r.id, r.reason]))
+    : new Map<string | null, string | null>();
+  const wanted = query.data.eligible === undefined ? undefined : query.data.eligible === "true";
+  const entries = people
+    .flatMap((p) => {
+      const e = eligibility.byMember.get(p.id);
+      // Frozen: only who is on the roll. Live: members who have not left before the reference day (their basis says why not).
+      if (!e || (!eligibility.frozen && e.basis === "left")) return [];
+      return wanted === undefined || wanted === e.eligible ? [{ clubMemberId: p.id, displayName: p.displayName, eligible: e.eligible, basis: e.basis, overrideReason: overrides.get(p.id) ?? null }] : [];
+    });
+  const eligibleTotal = [...eligibility.byMember.values()].filter((e) => e.eligible).length;
+  return c.json({ data: { frozen: eligibility.frozen, frozenAt: meeting.votingRollFrozenAt, asOf: eligibility.asOf, eligibleTotal, entries } });
+});
+
+/** The caller's own entry (every member who may read the meeting): "am I on the voting roll, and why / why not". */
+meetingAssemblyRoutes.get("/:id/voting-roll/me", async (c) => {
+  const clubId = c.get("clubId");
+  const meeting = await loadClubMeeting(c, paramId(c, "id"));
+  const me = await callerClubMemberId(db, clubId, c.get("membership").id);
+  const eligibility = await loadEligibility(db, clubId, meeting);
+  const own = me ? eligibility.byMember.get(me) : undefined;
+  return c.json({ data: { frozen: eligibility.frozen, asOf: eligibility.asOf, eligible: own?.eligible ?? false, basis: own?.basis ?? "none" } });
+});
+
+meetingAssemblyRoutes.post("/:id/voting-roll/freeze", async (c) => {
+  requireAssemblyManage(c);
+  const meeting = await loadClubMeeting(c, paramId(c, "id"));
+  const result = await freezeVotingRoll(c.get("clubId"), meeting.id, c.get("user").id);
+  return c.json({ data: { frozen: true, ...result } }, 201);
+});
+
+const overrideSchema = z.object({ eligible: z.boolean(), reason: cleanText(z.string().trim().min(5).max(500), true) });
+
+meetingAssemblyRoutes.patch("/:id/voting-roll/:clubMemberId", validate(overrideSchema), async (c) => {
+  requireAssemblyManage(c);
+  const clubId = c.get("clubId");
+  const meeting = await loadClubMeeting(c, paramId(c, "id"));
+  const person = await resolveClubMember(db, clubId, { clubMemberId: paramId(c, "clubMemberId") });
+  if (!person) throw new NotFoundError("Member not found in this club");
+  const body = c.req.valid("json");
+  await overrideVotingRight({ clubId, meetingId: meeting.id, clubMemberId: person.id, eligible: body.eligible, reason: body.reason, actorUserId: c.get("user").id });
+  return c.json({ data: { clubMemberId: person.id, eligible: body.eligible, basis: "override", overrideReason: body.reason } });
+});
+
+const proxySchema = z.object({ holderClubMemberId: uuid, grantorClubMemberId: uuid.optional() });
+
+/** Proxies of the meeting: managers see all with names, a member only the proxies they gave or hold. */
+meetingAssemblyRoutes.get("/:id/proxies", async (c) => {
+  const clubId = c.get("clubId");
+  const meeting = await loadClubMeeting(c, paramId(c, "id"));
+  const me = await callerClubMemberId(db, clubId, c.get("membership").id);
+  const all = await db.select().from(meetingProxies).where(eq(meetingProxies.meetingId, meeting.id));
+  const rows = canManage(c) ? all : all.filter((p) => me !== null && (p.grantorClubMemberId === me || p.holderClubMemberId === me));
+  const people = await clubMembersByIds(db, clubId, rows.flatMap((p) => [p.grantorClubMemberId, p.holderClubMemberId]).filter((v): v is string => v !== null));
+  return c.json({
+    data: rows.map((p) => ({
+      id: p.id,
+      grantorClubMemberId: p.grantorClubMemberId,
+      grantorName: p.grantorClubMemberId ? (people.get(p.grantorClubMemberId)?.displayName ?? null) : null,
+      holderClubMemberId: p.holderClubMemberId,
+      holderName: p.holderClubMemberId ? (people.get(p.holderClubMemberId)?.displayName ?? null) : null,
+      createdAt: p.createdAt,
+    })),
+  });
+});
+
+/**
+ * Gives a proxy. Without `grantorClubMemberId` the caller gives their own (self-service, any member who may read the
+ * meeting); for somebody else the board (`assembly:manage`) records it. The statute rules apply either way.
+ */
+meetingAssemblyRoutes.post("/:id/proxies", validate(proxySchema), async (c) => {
+  const clubId = c.get("clubId");
+  const meeting = await loadClubMeeting(c, paramId(c, "id"));
+  if (meeting.type !== "mitgliederversammlung") throw new ValidationError("Proxies exist for the general assembly only", { details: { code: "proxy_not_supported" } });
+  const body = c.req.valid("json");
+  const me = await callerClubMemberId(db, clubId, c.get("membership").id);
+  const grantorId = body.grantorClubMemberId ?? me;
+  if (!grantorId) throw new NotFoundError("Member not found in this club");
+  const byBoard = grantorId !== me;
+  if (byBoard) requireAssemblyManage(c);
+  const [grantor, holder] = await Promise.all([resolveClubMember(db, clubId, { clubMemberId: grantorId }), resolveClubMember(db, clubId, { clubMemberId: body.holderClubMemberId })]);
+  if (!grantor || !holder) throw new NotFoundError("Member not found in this club");
+  await db.transaction(async (tx) => {
+    const [locked] = await tx.select().from(meetings).where(eq(meetings.id, meeting.id)).for("update");
+    await grantProxy(tx, { clubId, meeting: locked!, grantorClubMemberId: grantor.id, holderClubMemberId: holder.id, grantedBy: c.get("user").id, byBoard });
+  });
+  return c.json({ data: { grantorClubMemberId: grantor.id, holderClubMemberId: holder.id } }, 201);
+});
+
+/** Withdraws a proxy: the giver themselves, or the board. */
+meetingAssemblyRoutes.delete("/:id/proxies/:grantorClubMemberId", async (c) => {
+  const clubId = c.get("clubId");
+  const meeting = await loadClubMeeting(c, paramId(c, "id"));
+  const grantorId = paramId(c, "grantorClubMemberId");
+  const me = await callerClubMemberId(db, clubId, c.get("membership").id);
+  const byBoard = grantorId !== me;
+  if (byBoard) requireAssemblyManage(c);
+  if (!byBoard && ["abgehalten", "protokolliert", "abgesagt"].includes(meeting.status)) throw new ConflictError("The meeting is over", { details: { code: "meeting_closed" } });
+  const removed = await db.delete(meetingProxies).where(and(eq(meetingProxies.meetingId, meeting.id), eq(meetingProxies.grantorClubMemberId, grantorId))).returning({ id: meetingProxies.id });
+  if (removed.length === 0) throw new NotFoundError("Proxy not found");
+  await writeAudit(db, { eventType: "meeting_proxy.revoke", subjectId: meeting.id, payload: { clubId, meetingId: meeting.id, grantorClubMemberId: grantorId, byBoard } });
+  return c.body(null, 204);
+});
+
+/** Live quorum (aggregated numbers, no names). B5 checks it again whenever a vote is opened. */
+meetingAssemblyRoutes.get("/:id/quorum", async (c) => {
+  const meeting = await loadClubMeeting(c, paramId(c, "id"));
+  return c.json({ data: await computeQuorum(db, c.get("clubId"), meeting) });
 });

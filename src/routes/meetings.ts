@@ -13,6 +13,7 @@ import { MEETING_TYPES, meetingAttendance, meetingInvitees, meetingResolutions, 
 import { computeAvailability, type AvailabilityInput } from "../lib/availability-match.js";
 import { announceMeetingInvitation, clubTimezone, composeEventMessage, isOpenMeeting, locationName, meetingAudience, scheduleEventChanged } from "../lib/event-notify.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
+import { grantProxy, isEligible, loadEligibility } from "../lib/assembly-attendance.js";
 import { callerClubMemberId, clubMembersByIds, resolveClubMember } from "../lib/meeting-members.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { loadClubMeeting, canReadAllMeetings, denyGuests } from "../lib/meeting-access.js";
@@ -426,18 +427,23 @@ meetingRoutes.get("/:id/attendance", async (c) => {
 
 // Partial-update semantics: only the fields an entry actually carries are written, and only the members
 // listed in the batch are touched -- re-saving never resets unlisted members or omitted fields (B17).
-// `proxyForClubMemberId: null` clears the proxies the person holds. `memberId` / `proxyForMemberId` (account ids) are aliases.
+// `present: true` is the check-in (time + method recorded, a member without account is checked in by the clerk), `present: false`
+// after a check-in is leaving (time recorded). `proxyForClubMemberId: null` clears the proxies the person holds; setting one
+// applies the statute rules (`grantProxy`). `memberId` / `proxyForMemberId` (account ids) are aliases.
 const attendanceEntrySchema = z
   .object({
     clubMemberId: z.string().uuid().optional(),
     memberId: z.string().min(1).optional(),
     present: z.boolean().optional(),
+    /** Only while the voting roll is not frozen; afterwards the roll decides (`PATCH /voting-roll/:clubMemberId`). */
     hasVotingRight: z.boolean().optional(),
+    /** How the check-in happened (default `schriftfuehrer`). */
+    method: z.enum(["schriftfuehrer", "vollmacht"]).optional(),
     proxyForClubMemberId: z.string().uuid().nullable().optional(),
     proxyForMemberId: z.string().min(1).nullable().optional(),
   })
   .refine((v) => v.clubMemberId || v.memberId, { message: "clubMemberId is required" });
-const attendanceBatchSchema = z.array(attendanceEntrySchema).min(1);
+const attendanceBatchSchema = z.array(attendanceEntrySchema).min(1).max(500);
 
 meetingRoutes.patch(
   "/:id/attendance",
@@ -447,7 +453,7 @@ meetingRoutes.patch(
   async (c) => {
     const clubId = c.get("clubId");
     const roleTypes = c.get("clubRoleTypes");
-    if (!hasClubPermission(roleTypes, "meetings:write")) {
+    if (!hasClubPermission(roleTypes, "meetings:write") && !hasClubPermission(roleTypes, "assembly:manage")) {
       throw new ForbiddenError("Missing meetings:write permission");
     }
     const id = c.req.param("id");
@@ -470,26 +476,37 @@ meetingRoutes.patch(
     }
 
     await db.transaction(async (tx) => {
+      // Serialise with the roll freeze and other batches of this meeting.
+      const [locked] = await tx.select().from(meetings).where(eq(meetings.id, id)).for("update");
+      const eligibility = await loadEligibility(tx, clubId, locked!);
+      const now = new Date();
       for (const { entry, person, grantor, clearProxies } of resolved) {
-        const patch = {
-          ...(entry.present !== undefined ? { present: entry.present } : {}),
-          ...(entry.hasVotingRight !== undefined ? { hasVotingRight: entry.hasVotingRight } : {}),
-        };
+        if (entry.hasVotingRight !== undefined && eligibility.frozen) {
+          throw new ValidationError("The voting roll is frozen: change the voting right with PATCH /voting-roll/:clubMemberId", { details: { code: "use_voting_roll_override" } });
+        }
+        const [existing] = await tx.select().from(meetingAttendance).where(and(eq(meetingAttendance.meetingId, id), eq(meetingAttendance.clubMemberId, person.id)));
+        const patch: Partial<typeof meetingAttendance.$inferInsert> = {};
+        if (entry.hasVotingRight !== undefined) patch.hasVotingRight = entry.hasVotingRight;
+        if (entry.present === true && !existing?.present) {
+          // Whoever gave a proxy cannot also take part: the proxy has to be withdrawn first.
+          const [given] = await tx.select({ id: meetingProxies.id }).from(meetingProxies).where(and(eq(meetingProxies.meetingId, id), eq(meetingProxies.grantorClubMemberId, person.id)));
+          if (given) throw new ConflictError("This member gave a proxy: withdraw it before checking the member in", { details: { code: "proxy_granted", clubMemberId: person.id } });
+          Object.assign(patch, { present: true, checkedInAt: now, leftAt: null, checkInMethod: entry.method ?? "schriftfuehrer" });
+        } else if (entry.present === false) {
+          Object.assign(patch, { present: false, ...(existing?.present ? { leftAt: now } : {}) });
+        }
+        // A new row carries the decision of the roll (frozen) or of the live derivation, not a blanket default.
+        const insertVoting = entry.hasVotingRight ?? isEligible(eligibility, person.id);
         await tx
           .insert(meetingAttendance)
-          .values({ meetingId: id, clubMemberId: person.id, ...patch })
+          .values({ meetingId: id, clubMemberId: person.id, hasVotingRight: insertVoting, ...patch })
           .onConflictDoUpdate({
             target: [meetingAttendance.meetingId, meetingAttendance.clubMemberId],
             // An entry without any field is a no-op on an existing row (set it to itself to keep the statement valid).
             set: Object.keys(patch).length > 0 ? patch : { meetingId: id },
           });
         if (clearProxies) await tx.delete(meetingProxies).where(and(eq(meetingProxies.meetingId, id), eq(meetingProxies.holderClubMemberId, person.id)));
-        if (grantor) {
-          await tx
-            .insert(meetingProxies)
-            .values({ meetingId: id, grantorClubMemberId: grantor.id, holderClubMemberId: person.id, grantedBy: c.get("user").id })
-            .onConflictDoUpdate({ target: [meetingProxies.meetingId, meetingProxies.grantorClubMemberId], set: { holderClubMemberId: person.id, grantedBy: c.get("user").id } });
-        }
+        if (grantor) await grantProxy(tx, { clubId, meeting: locked!, grantorClubMemberId: grantor.id, holderClubMemberId: person.id, grantedBy: c.get("user").id, byBoard: true });
       }
 
       // One audit entry summarizing the batch, not one per row -- this data
