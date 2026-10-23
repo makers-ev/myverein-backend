@@ -20,6 +20,8 @@ import { loadClubMeeting, canReadAllMeetings, denyGuests } from "../lib/meeting-
 import { meetingAssemblyRoutes } from "./meeting-assembly.js";
 import { meetingMinutesRoutes } from "./meeting-minutes.js";
 import { attachMinutes, saveMinutesDraft } from "../lib/minutes.js";
+import { assertParticipation, PARTICIPATION_MODES, withVisibleOnlineUrl } from "../lib/meeting-online.js";
+import { meetingOnlineRoutes } from "./meeting-online.js";
 import { cleanText } from "../lib/text-policy.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -35,6 +37,7 @@ meetingRoutes.use("*", clubGuard);
 // Agenda items and invitations of the general assembly (Wave 11) live in their own file, behind the same guards.
 meetingRoutes.route("/", meetingAssemblyRoutes);
 meetingRoutes.route("/", meetingMinutesRoutes);
+meetingRoutes.route("/", meetingOnlineRoutes);
 
 // --- Meetings CRUD ---------------------------------------------------------
 
@@ -61,20 +64,25 @@ meetingRoutes.get("/", async (c) => {
     orderBy: (m, { asc }) => [asc(m.scheduledAt), asc(m.createdAt)],
   });
 
-  return c.json({ data: await attachMinutes(rows, hasClubPermission(c.get("clubRoleTypes"), "meetings:write") || hasClubPermission(c.get("clubRoleTypes"), "assembly:manage")) });
+  return c.json({ data: await withVisibleOnlineUrl(c, await attachMinutes(rows, hasClubPermission(c.get("clubRoleTypes"), "meetings:write") || hasClubPermission(c.get("clubRoleTypes"), "assembly:manage"))) });
 });
 
 meetingRoutes.get("/:id", async (c) => {
   const id = c.req.param("id");
   const row = await loadClubMeeting(c, id);
-  return c.json({ data: (await attachMinutes([row], hasClubPermission(c.get("clubRoleTypes"), "meetings:write") || hasClubPermission(c.get("clubRoleTypes"), "assembly:manage")))[0] });
+  return c.json({ data: (await withVisibleOnlineUrl(c, await attachMinutes([row], hasClubPermission(c.get("clubRoleTypes"), "meetings:write") || hasClubPermission(c.get("clubRoleTypes"), "assembly:manage"))))[0] });
 });
+
+const joinUrlSchema = cleanText(z.string().trim().max(500), false).refine((v) => /^https:\/\/[^\s]+$/.test(v), { message: "must be an https URL" });
 
 const createMeetingSchema = z.object({
   type: z.enum(MEETING_TYPES),
   title: z.string().min(1).max(300),
   scheduledAt: z.string().datetime({ offset: true }).optional(),
   agenda: z.string().optional(),
+  /** Hybrid / virtual only when the statute parameters allow it (`onlineAllowed`); the link is shown to the invited only. */
+  participationMode: z.enum(PARTICIPATION_MODES).optional(),
+  onlineUrl: joinUrlSchema.nullable().optional(),
 });
 
 meetingRoutes.post(
@@ -90,6 +98,7 @@ meetingRoutes.post(
       throw new ForbiddenError("Missing meetings:write permission");
     }
     const body = c.req.valid("json");
+    await assertParticipation(clubId, body.participationMode ?? "praesenz", body.onlineUrl ?? null);
 
     const [row] = await db
       .insert(meetings)
@@ -99,6 +108,8 @@ meetingRoutes.post(
         title: body.title,
         scheduledAt: body.scheduledAt ? new Date(body.scheduledAt) : undefined,
         agenda: body.agenda,
+        participationMode: body.participationMode,
+        onlineUrl: body.onlineUrl,
         status: body.scheduledAt ? "geplant" : "terminfindung",
         createdBy: currentUser.id,
       })
@@ -118,6 +129,8 @@ const updateMeetingSchema = z.object({
   status: z.string().min(1).optional(),
   /** Redirected to the working draft of the minutes (409 once the version is locked); `null` clears the draft. */
   minutes: cleanText(z.string().max(200_000), true).nullable().optional(),
+  participationMode: z.enum(PARTICIPATION_MODES).optional(),
+  onlineUrl: joinUrlSchema.nullable().optional(),
   /** `false` saves a reschedule / cancellation without telling the invitees (audited). */
   notify: z.boolean().optional(),
 });
@@ -141,6 +154,14 @@ meetingRoutes.patch(
     const existing = await loadClubMeeting(c, id);
 
     // The free-text field is the working draft of the minutes now (versions, approval and lock: lib/minutes.ts).
+    if (body.participationMode !== undefined || body.onlineUrl !== undefined) {
+      const mode = (body.participationMode ?? existing.participationMode) as (typeof PARTICIPATION_MODES)[number];
+      // Switching back to the room clears the link; a link on a room meeting is refused.
+      if (mode === "praesenz" && body.onlineUrl === undefined) body.onlineUrl = null;
+      // An unchanged mode stays valid even if the statute parameters changed since; only a change is checked.
+      if (body.participationMode !== undefined && body.participationMode !== existing.participationMode) await assertParticipation(clubId, mode, body.onlineUrl ?? null);
+      else if (mode === "praesenz" && body.onlineUrl) throw new ValidationError("A join link needs the mode hybrid or virtual", { details: { code: "online_url_requires_mode" } });
+    }
     if (minutes !== undefined) await saveMinutesDraft({ clubId, meetingId: id, content: minutes ?? "", userId: c.get("user").id });
 
     const [row] = await db

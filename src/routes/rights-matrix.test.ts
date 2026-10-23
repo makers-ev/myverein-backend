@@ -166,6 +166,8 @@ const SELF_SERVICE: Record<string, string> = {
   "PATCH /meetings/:id/invitees/me": "own accept/decline of an invitation",
   "POST /meetings/:id/proxies": "a member gives their own proxy (a proxy for somebody else needs assembly:manage; the statute rules decide, unknown meetings and members are 404)",
   "DELETE /meetings/:id/proxies/:grantorClubMemberId": "a member withdraws their own proxy (somebody else's needs assembly:manage)",
+  "POST /meetings/:id/online/join": "an invited account joins the online part by itself: decided in the route by the invitation, the mode and the check-in window; strangers get 404",
+  "POST /meetings/:id/online/leave": "an invited account leaves the online part by itself (only its own self_online check-in)",
   "POST /ballots/:id/vote": "a member votes (own ballot or, as a proxy holder, for the grantor): decided in the route by the voter roll, check-in and the window; unknown ballots are 404, a non-voter 403 not_eligible",
   "PATCH /elections/:id/candidates/:candidateId": "the candidate declares willingness or withdraws (own candidacy only: another member is 403, unknown ids 404)",
   "POST /elections/:id/candidates/:candidateId/accept": "the elected person accepts or declines the office (own candidacy only; the board records it for others with assembly:manage)",
