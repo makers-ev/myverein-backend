@@ -1,3 +1,5 @@
+import { BALLOT_SWEEP_INTERVAL_MS, BALLOT_SWEEP_JOB_TYPE, handleBallotNotify, handleBallotSweep } from "../ballot-jobs.js";
+import { BALLOT_NOTIFY_JOB } from "../ballots.js";
 import { handlePublishAnnouncement, PUBLISH_JOB_TYPE } from "../announcements.js";
 import { EVENT_CHANGED_JOB_TYPE, handleEventChanged } from "../event-notify.js";
 import { AGE_TRANSITION_INTERVAL_MS, AGE_TRANSITION_JOB_TYPE, AGE_TRANSITION_MEMBER_JOB_TYPE, handleAgeTransitionMemberNotify, handleAgeTransitionSweep } from "../age-transition.js";
@@ -39,6 +41,8 @@ export function registerAllJobs(): void {
     await runFormCleanup();
   });
   registerJob(DPA_NOTIFY_JOB_TYPE, handleDpaVersionNotify);
+  registerRecurringJob({ type: BALLOT_SWEEP_JOB_TYPE, intervalMs: BALLOT_SWEEP_INTERVAL_MS }, handleBallotSweep);
+  registerJob(BALLOT_NOTIFY_JOB, handleBallotNotify);
   registerRetentionTasks();
   registerRecurringJob({ type: RETENTION_SWEEP_JOB_TYPE, intervalMs: RETENTION_SWEEP_INTERVAL_MS }, handleRetentionSweep);
 }

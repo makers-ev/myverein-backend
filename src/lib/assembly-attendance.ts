@@ -37,7 +37,7 @@ export interface Eligibility {
 }
 
 /** Live derivation for every member of the club as of `asOf`. */
-async function deriveAll(executor: DbExecutor, clubId: string, rules: AssemblyRules, asOf: string) {
+export async function deriveAll(executor: DbExecutor, clubId: string, rules: AssemblyRules, asOf: string) {
   const rows = await executor
     .select({
       id: clubMembers.id,

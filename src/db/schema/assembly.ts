@@ -19,6 +19,11 @@ export const DELIVERY_STATUSES = ["queued", "sent", "failed", "bounced", "manual
 export const CHECK_IN_METHODS = ["schriftfuehrer", "self_online", "vollmacht"] as const;
 export const BALLOT_STATUSES = ["draft", "open", "closed", "counted", "finalized", "cancelled"] as const;
 export const BALLOT_MODES = ["in_session", "circular"] as const;
+export const BALLOT_KINDS = ["resolution", "election"] as const;
+/** `yes`/`no`/`abstain` form a yes-no ballot; `choice` is a free option; `candidate` is a person of an election round. */
+export const BALLOT_OPTION_KINDS = ["yes", "no", "abstain", "choice", "candidate"] as const;
+/** Who votes in a circular resolution: every member with a voting right, or the board accounts. */
+export const BALLOT_AUDIENCES = ["all_voting_members", "board"] as const;
 export const MINUTES_STATUSES = ["entwurf", "zur_genehmigung", "genehmigt", "archiviert"] as const;
 export const ELECTION_STATUSES = ["planned", "running", "decided", "closed"] as const;
 export const CANDIDATE_STATUSES = ["proposed", "willing", "declined", "withdrawn", "elected", "accepted", "pending_account"] as const;
@@ -144,6 +149,13 @@ export const ballots = pgTable(
     description: text("description"),
     // One of BALLOT_MODES.
     mode: text("mode").notNull().default("in_session"),
+    // One of BALLOT_KINDS.
+    kind: text("kind").notNull().default("resolution"),
+    // Circular resolutions only: one of BALLOT_AUDIENCES.
+    audience: text("audience"),
+    // Election rounds: the election and the number of the round (Wahlgang).
+    electionId: uuid("election_id").references(() => elections.id, { onDelete: "set null" }),
+    round: integer("round"),
     secret: boolean("secret").notNull().default(false),
     topic: text("topic").notNull().default("allgemein"),
     // Majority kind (`assemblyRules` MAJORITY_KINDS) frozen at opening time.
@@ -154,6 +166,11 @@ export const ballots = pgTable(
     // One of BALLOT_STATUSES.
     status: text("status").notNull().default("draft"),
     rulesSnapshot: jsonb("rules_snapshot").$type<Record<string, unknown>>(),
+    // What counted when the ballot was opened (quorum, number of eligible voters, reference day).
+    opening: jsonb("opening").$type<Record<string, unknown>>(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    countedAt: timestamp("counted_at", { withTimezone: true }),
+    finalizedAt: timestamp("finalized_at", { withTimezone: true }),
     // Frozen result at `finalized` plus its SHA-256.
     result: jsonb("result").$type<Record<string, unknown>>(),
     resultHash: text("result_hash"),
@@ -161,7 +178,7 @@ export const ballots = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("ballots_club_status_idx").on(table.clubId, table.status), index("ballots_meeting_idx").on(table.meetingId)],
+  (table) => [index("ballots_club_status_idx").on(table.clubId, table.status), index("ballots_meeting_idx").on(table.meetingId), index("ballots_election_idx").on(table.electionId)],
 );
 
 export const ballotOptions = pgTable(
@@ -173,6 +190,8 @@ export const ballotOptions = pgTable(
       .references(() => ballots.id, { onDelete: "cascade" }),
     position: integer("position").notNull(),
     label: text("label").notNull(),
+    // One of BALLOT_OPTION_KINDS.
+    kind: text("kind").notNull().default("choice"),
     // Set for an election option that is a candidate.
     candidateClubMemberId: uuid("candidate_club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
   },
@@ -252,6 +271,9 @@ export const elections = pgTable(
     electionLeadClubMemberId: uuid("election_lead_club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
     // One of ELECTION_STATUSES.
     status: text("status").notNull().default("planned"),
+    // Who won the seats (candidate ids, a documented lot where votes tied); the roles follow from the acceptance.
+    decision: jsonb("decision").$type<Record<string, unknown>>(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -355,3 +377,6 @@ export type MeetingInvitationDeliveryRow = typeof meetingInvitationDeliveries.$i
 export type MeetingVotingRollRow = typeof meetingVotingRoll.$inferSelect;
 export type MeetingProxyRow = typeof meetingProxies.$inferSelect;
 export type BallotRow = typeof ballots.$inferSelect;
+export type BallotOptionRow = typeof ballotOptions.$inferSelect;
+export type ElectionRow = typeof elections.$inferSelect;
+export type ElectionCandidateRow = typeof electionCandidates.$inferSelect;

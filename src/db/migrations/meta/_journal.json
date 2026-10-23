@@ -351,6 +351,13 @@
       "when": 1792786149710,
       "tag": "0049_meetings-club-member-cutover",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1792788177094,
+      "tag": "0050_ballots-lifecycle",
+      "breakpoints": true
     }
   ]
 }

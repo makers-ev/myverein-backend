@@ -57,6 +57,7 @@ import { inventoryItemRoutes } from "./inventory-items.js";
 import { locationRoutes } from "./locations.js";
 import { mediaRoutes } from "./media.js";
 import { memberFieldRoutes } from "./member-fields.js";
+import { ballotRoutes } from "./ballots.js";
 import { meetingRoutes } from "./meetings.js";
 import { myClubRoutes } from "./my-clubs.js";
 import { notificationRoutes } from "./notifications.js";
@@ -123,6 +124,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/events.ics", "icsRoutes", icsRoutes],
   ["/availability", "availabilityRoutes", availabilityRoutes],
   ["/meetings", "meetingRoutes", meetingRoutes],
+  ["/ballots", "ballotRoutes", ballotRoutes],
   ["/locations", "locationRoutes", locationRoutes],
   ["/inventory-items", "inventoryItemRoutes", inventoryItemRoutes],
   ["/media", "mediaRoutes", mediaRoutes],
@@ -160,6 +162,7 @@ const SELF_SERVICE: Record<string, string> = {
   "PATCH /meetings/:id/invitees/me": "own accept/decline of an invitation",
   "POST /meetings/:id/proxies": "a member gives their own proxy (a proxy for somebody else needs assembly:manage; the statute rules decide, unknown meetings and members are 404)",
   "DELETE /meetings/:id/proxies/:grantorClubMemberId": "a member withdraws their own proxy (somebody else's needs assembly:manage)",
+  "POST /ballots/:id/vote": "a member votes (own ballot or, as a proxy holder, for the grantor): decided in the route by the voter roll, check-in and the window; unknown ballots are 404, a non-voter 403 not_eligible",
   "POST /inventory-items/:id/loans": "self-service borrowing (switchable via club_settings.allow_self_loans)",
   "PATCH /inventory-items/:id/loans/:loanId": "return of the own loan (borrower or inventory:write); WITHOUT a body only -- an extension ({ dueAt }) needs inventory:write even for the borrower, asserted in the allow_self_loans block",
   "POST /inventory-items/:id/damage-reports": "self-service damage report",
@@ -210,6 +213,8 @@ const GUEST_DENIED_READS: Array<[string, string]> = [
   ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}/invitations/latest`],
   ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}/agenda-items`],
   ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}/proxies`],
+  ["GET", "/ballots"],
+  ["GET", `/ballots/${"00000000-0000-4000-8000-000000000001"}`],
   ["GET", "/club-members"],
   ["GET", "/club-members?status=aktiv"],
   ["GET", "/inventory-items"],
@@ -228,6 +233,8 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /meetings/:id/agenda-items": { title: "Begrüßung" },
   "PATCH /meetings/:id/voting-roll/:clubMemberId": { eligible: true, reason: "Beschluss des Vorstands" },
   "POST /meetings/:id/proxies": { holderClubMemberId: SOME_ID },
+  "POST /ballots": { title: "Abstimmung" },
+  "PATCH /ballots/:id": { title: "Neuer Titel" },
   "POST /club-members/categories": { name: "Neue Kategorie" },
   "POST /club-members/transition-suggestions/apply": { memberIds: [SOME_ID] },
   "POST /club-members/:id/transition": { toStatus: "aktiv" },
