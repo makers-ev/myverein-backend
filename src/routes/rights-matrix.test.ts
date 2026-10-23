@@ -218,6 +218,7 @@ const SOME_ID = "00000000-0000-4000-8000-000000000001";
 const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /club-members": { displayName: "Nobody", categoryKey: "aktiv" },
   "POST /club-members/:id/departments": { departmentId: SOME_ID },
+  "POST /meetings/:id/agenda-items": { title: "Begrüßung" },
   "POST /club-members/categories": { name: "Neue Kategorie" },
   "POST /club-members/transition-suggestions/apply": { memberIds: [SOME_ID] },
   "POST /club-members/:id/transition": { toStatus: "aktiv" },
