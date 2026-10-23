@@ -94,7 +94,7 @@ describe("media gate (static scan)", () => {
   it("nothing redirects to a file, builds a raw Response from bytes or serves with a hand-made Content-Disposition", () => {
     expect(offenders(/\b(?:c|ctx|res)\.redirect\s*\(|\bResponse\.redirect\s*\(/)).toEqual([]);
     expect(offenders(/\bnew Response\s*\(/)).toEqual([]);
-    expect(offenders(/Content-Disposition/i, ["lib/media.ts", "lib/privacy/respond.ts", "routes/audit-log.ts", "routes/club-members.ts", "routes/dpa.ts", "routes/media.ts"])).toEqual([]);
+    expect(offenders(/Content-Disposition/i, ["lib/media.ts", "lib/privacy/respond.ts", "routes/audit-log.ts", "routes/club-members.ts", "routes/dpa.ts", "routes/media.ts", "routes/meeting-assembly.ts"])).toEqual([]);
   });
 
   it("only the media layer streams bytes: `c.body(new Uint8Array(...))` of a file exists only in lib/media.ts", () => {
@@ -129,8 +129,9 @@ describe("media gate (static scan)", () => {
   });
 
   it("feature tables hold keys, never URLs: no column named url/*_url/*Url for files in the forms/media/member schemas", () => {
+    // meetings.online_url is the join link of a video conference the board typed in (not a file), like the location links.
     const schema = sources.filter((s) => s.file.startsWith("db/schema/"));
-    const bad = schema.filter((s) => !["db/schema/location-links.ts", "db/schema/club-info-pages.ts", "db/schema/club-registrations.ts", "db/schema/calendars.ts"].includes(s.file) && /text\(\s*["'`][a-z_]*url["'`]/i.test(s.source)).map((s) => s.file);
+    const bad = schema.filter((s) => !["db/schema/location-links.ts", "db/schema/club-info-pages.ts", "db/schema/club-registrations.ts", "db/schema/calendars.ts", "db/schema/meetings.ts"].includes(s.file) && /text\(\s*["'`][a-z_]*url["'`]/i.test(s.source)).map((s) => s.file);
     expect(bad).toEqual([]);
     for (const file of ["db/schema/forms.ts", "db/schema/media-files.ts", "db/schema/club-members.ts", "db/schema/club-applications.ts"]) {
       expect(sources.find((s) => s.file === file)!.source, file).not.toMatch(/["'`][a-z_]*(?:photo|image|file|document|media)[a-z_]*_url["'`]/i);
