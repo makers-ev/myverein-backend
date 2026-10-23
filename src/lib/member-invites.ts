@@ -35,6 +35,7 @@ import { hasClubPermission, IMPLICIT_ROLE_TYPE } from "./club-permissions.js";
 import { isAutomaticMemberNumber } from "./member-number.js";
 import { isOwnerRole } from "./member-protection.js";
 import { BOARD_ROLE_TYPES } from "./club-permissions.js";
+import { grantPendingElectionRoles } from "./elections.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError } from "./errors.js";
 import { inviteLinkContext } from "./invite-context.js";
 import { logger } from "./logger.js";
@@ -240,6 +241,8 @@ async function acceptClaimed(invite: ClubMemberInviteRow, row: ClubMemberRow, ac
         subjectId: locked.id,
         payload: { clubId, inviteId: invite.id, memberId: created.id, userId: account.id },
       });
+      // Elected into an office before the account existed: the role follows now (Wave 11 B7).
+      await grantPendingElectionRoles(tx, clubId, locked.id);
     });
   } catch (err) {
     // Compensate: no half-linked state (account membership without link, invite burnt).
@@ -366,6 +369,7 @@ async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberR
       subjectId: invited.id,
       payload: { clubId, inviteId: invite.id, memberId: existing.id, userId: account.id, merged: Boolean(own) },
     });
+    await grantPendingElectionRoles(tx, clubId, invited.id);
     return { merged: Boolean(own) };
   });
 

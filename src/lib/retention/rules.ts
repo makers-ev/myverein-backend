@@ -6,7 +6,7 @@ import { categoryRunners, type CategoryContext, type CategoryResult } from "./ca
  * A club may change the club-scoped periods inside `[minDays, maxDays]` (table `retention_policies`); platform categories are
  * fixed (only a platform-level row in `retention_policies` with `club_id IS NULL` changes them, within the same limits).
  *
- * Not deleted by design: meeting minutes and resolutions, attendance of assemblies (Wave 11), anything the later billing module
+ * Not deleted by design: meeting minutes and resolutions, attendance of assemblies, ballots with voter rolls and votes, elections and term history (Wave 11), anything the later billing module
  * must keep by law (it registers its own rule). Export documents are generated on the fly and never stored, so there is no
  * file to expire for them.
  */

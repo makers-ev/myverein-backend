@@ -221,10 +221,11 @@ export async function deleteDraft(clubId: string, ballotId: string): Promise<voi
 // --- Opening -------------------------------------------------------------------------------------------------------------
 
 /** The statute parameters a ballot needs; throws 422 with the missing keys. */
-function requireRules(rules: AssemblyRules, b: Pick<BallotRow, "topic" | "kind" | "mode" | "secret">): { majority: NonNullable<ReturnType<typeof majorityFor>> } {
+function requireRules(rules: AssemblyRules, b: Pick<BallotRow, "topic" | "kind" | "mode" | "secret" | "majority">): { majority: NonNullable<ReturnType<typeof majorityFor>> } {
   const missing: string[] = [];
   const topic: MajorityTopic = b.kind === "election" ? "wahl" : (b.topic as MajorityTopic);
-  const majority = majorityFor(rules, topic);
+  // An election round may carry its own majority kind (fixed when the round was set up).
+  const majority = (b.majority as ReturnType<typeof majorityFor>) ?? majorityFor(rules, topic);
   if (majority === null) missing.push("majorityByTopic.allgemein");
   if (rules.abstainCountsAs === null) missing.push("abstainCountsAs");
   if (b.mode === "circular") {
