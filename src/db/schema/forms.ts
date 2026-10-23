@@ -102,9 +102,8 @@ export const formSubmissions = pgTable(
     clubId: text("club_id")
       .notNull()
       .references(() => organization.id, { onDelete: "cascade" }),
-    submittedByUserId: text("submitted_by_user_id")
-      .notNull()
-      .references(() => user.id, { onDelete: "cascade" }),
+    // NULL once the submitting account is deleted: decided submissions are the record of the decision (consent evidence).
+    submittedByUserId: text("submitted_by_user_id").references(() => user.id, { onDelete: "set null" }),
     // The person the answers describe, once known (a child's club_members row after acceptance).
     subjectClubMemberId: uuid("subject_club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
     // One of SUBMISSION_ON_BEHALF_OF.

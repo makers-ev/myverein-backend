@@ -5,14 +5,16 @@ import type { JobContext } from "./jobs/registry.js";
 import { deleteFinishedJobs } from "./jobs/queue.js";
 import { logger } from "./logger.js";
 import { purgeRateLimitEvents } from "./rate-limits.js";
+import { runRetentionRules } from "./retention/sweep.js";
 
 /**
  * Retention jobs (Wave 9 B13). One recurring job `retention_sweep` (daily) runs every registered retention task, each in
  * isolation (a failing task does not stop the others; the job fails afterwards so the queue retries, tasks are idempotent).
  *
- * HOOK POINT: future retention / deletion jobs (Wave 6 evidence deletion periods, Wave 10 data deletion concept) register
- * a `RetentionTask` via `registerRetentionTask` from `registerRetentionTasks()` -- no new job type or scheduler plumbing
- * needed. This wave ships exactly one task (`delivery-retention`); there is deliberately NO deletion run for club data yet.
+ * HOOK POINT: retention / deletion jobs register a `RetentionTask` via `registerRetentionTask` from `registerRetentionTasks()` --
+ * no new job type or scheduler plumbing needed. The data protection rules of Wave 10 (proof documents, applications, former
+ * members, absences, consent proofs, audit log; `lib/retention/`) run as ONE task, `data-retention`, which isolates and logs
+ * its categories itself (`retention_runs`) and only counts unless `RETENTION_DRY_RUN=false`.
  */
 
 export const RETENTION_SWEEP_JOB_TYPE = "retention_sweep";
@@ -153,6 +155,16 @@ export function registerRetentionTasks(): void {
     key: "delivery-retention",
     description: "Wipe e-mail delivery addresses and content snapshots after DELIVERY_RETENTION_DAYS",
     run: async ({ now }) => ({ affected: await scrubOldEmailDeliveries(now) }),
+  });
+  registerRetentionTask({
+    key: "data-retention",
+    description: "Wave 10 retention rules (RETENTION_DRY_RUN=true counts only)",
+    run: async ({ now }) => {
+      const summary = await runRetentionRules(now);
+      // Category names only (no data) so the queue retries; every category already logged its own error.
+      if (summary.failed.length > 0) throw new Error(`retention categories failed: ${[...new Set(summary.failed)].join(", ")}`);
+      return { affected: summary.affected };
+    },
   });
   registerRetentionTask({
     key: "rate-limit-events",

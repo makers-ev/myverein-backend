@@ -8,7 +8,7 @@ import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plu
 
 import { organization as organizationTable, user as userTable } from "./auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
+import { ensureConsentPurposes } from "../lib/consent-purposes.js";
 import { assertRejoinAllowed, ensureClubMember, markDetachedMembersLeft } from "../lib/club-members.js";
 import { recordKeyReturnsForRemovedAccount } from "../lib/key-returns.js";
 import { ConflictError } from "../lib/errors.js";
@@ -22,6 +22,7 @@ import { pickMailLanguage, type MailLanguage } from "../lib/notify/i18n.js";
 import { APP_NAME, buildResetPasswordEmail, buildVerifyEmailEmail, LOGO_CID, LOGO_PATH } from "../lib/emailTemplate.js";
 import { isHttpsDeployment, trustedOrigins } from "../lib/trusted-origins.js";
 import { accessControl, adminRole, userRole } from "./permissions.js";
+import { writeAudit } from "../lib/audit.js";
 
 if (!process.env.WEB_ORIGIN) {
   throw new Error("WEB_ORIGIN is not set. Copy .env.example to .env and configure it.");
@@ -135,10 +136,28 @@ export const auth = betterAuth({
     window: 60,
     max: 20,
   },
+  // The admin plugin's remove-user would delete the account without the erasure process (blockers, anonymisation):
+  // platform admins use DELETE /admin/users/:id, which runs it first (routes/admin-users.ts).
+  disabledPaths: ["/admin/remove-user"],
   // Off by default in Better Auth -- without this, /delete-user 404s.
   user: {
     deleteUser: {
       enabled: true,
+      // Wave 10 B8: deleting the account runs the same erasure process as the board's (anonymise the club records instead of
+      // letting the FK cascades wipe attendance and role history). Blockers (sole owner, board role, open loans, legal hold,
+      // pending exit) stop the deletion before anything changes. Dynamic import: the erasure code imports modules that import this file.
+      beforeDelete: async (deleting) => {
+        const { eraseAccountMemberships } = await import("../lib/privacy/erasure.js");
+        try {
+          await eraseAccountMemberships(deleting.id);
+        } catch (err) {
+          const details = (err as { details?: { code?: string } }).details;
+          if (err instanceof ConflictError && details?.code) {
+            throw new APIError("BAD_REQUEST", { message: err.message, code: `ERASURE_${details.code.toUpperCase()}` });
+          }
+          throw err;
+        }
+      },
     },
   },
   plugins: [
@@ -166,6 +185,15 @@ export const auth = betterAuth({
       // registration would be left with club_id NULL. (Deleting is a platform/DB operation.)
       disableOrganizationDeletion: true,
       organizationHooks: {
+        // Wave 10: every new club gets its (inactive) system consent purposes. A failure is logged, not thrown; the
+        // consent routes call ensureConsentPurposes again and repair it.
+        afterCreateOrganization: async ({ organization: created }) => {
+          try {
+            await ensureConsentPurposes(created.id);
+          } catch (err) {
+            logger.error({ err, clubId: created.id }, "[auth] could not seed consent purposes for new club");
+          }
+        },
         // ADR-003: every account member (founder via createOrganization, addMember, accepted invitation) gets its
         // club_members row, so no join path can slip past. A failure is logged, not thrown: the account membership
         // already exists at this point and the explicit join flows (application approval, club approval, seed) as well
@@ -262,9 +290,11 @@ export const auth = betterAuth({
           // events" finding: this write lands in the same Postgres as every
           // domain mutation, instead of a separate IdP database Keycloak
           // could never transactionally join.
-          await db.insert(auditLog).values({
+          await writeAudit(db, {
             eventType: "session.create",
             subjectId: session.userId,
+            clubId: null,
+            actorUserId: session.userId,
             payload: {
               sessionId: session.id,
               ipAddress: session.ipAddress ?? null,

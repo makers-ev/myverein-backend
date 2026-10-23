@@ -302,6 +302,34 @@
       "when": 1792484617007,
       "tag": "0042_preferences-per-club",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1792581170067,
+      "tag": "0043_privacy-consent-foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1792584430242,
+      "tag": "0044_privacy-erasure",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1792585376631,
+      "tag": "0045_retention-notice",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1792588154703,
+      "tag": "0046_creator-references-survive-account",
+      "breakpoints": true
     }
   ]
 }

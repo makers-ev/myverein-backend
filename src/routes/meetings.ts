@@ -7,7 +7,6 @@ import { z } from "zod";
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMailLanguage } from "../lib/club-settings.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
 import { MEETING_TYPES, meetingAttendance, meetingInvitees, meetingResolutions, meetings } from "../db/schema/meetings.js";
 import { computeAvailability, type AvailabilityInput } from "../lib/availability-match.js";
@@ -17,6 +16,7 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from ".
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 export const meetingRoutes = new Hono<ClubEnv>();
 
@@ -123,7 +123,7 @@ meetingRoutes.post(
       })
       .returning();
 
-    await db.insert(auditLog).values({ eventType: "meeting.create", subjectId: row.id, payload: { clubId, type: row.type } });
+    await writeAudit(db, { eventType: "meeting.create", subjectId: row.id, payload: { clubId, type: row.type } });
 
     return c.json({ data: row }, 201);
   },
@@ -168,7 +168,7 @@ meetingRoutes.patch(
       .where(eq(meetings.id, id))
       .returning();
 
-    await db.insert(auditLog).values({ eventType: "meeting.update", subjectId: id, payload: { clubId, changes: body, ...(notifyFlag === false ? { notify: false } : {}) } });
+    await writeAudit(db, { eventType: "meeting.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body), ...(notifyFlag === false ? { notify: false } : {}) } });
 
     // A moved or cancelled meeting is announced to the invitees (B10).
     const cancelled = row!.status === CANCELLED_MEETING_STATUS && existing.status !== CANCELLED_MEETING_STATUS;
@@ -212,7 +212,7 @@ meetingRoutes.delete("/:id", async (c) => {
   const audience = isOpenMeeting(existing) ? await meetingAudience(clubId, id) : null;
 
   await db.delete(meetings).where(eq(meetings.id, id));
-  await db.insert(auditLog).values({ eventType: "meeting.delete", subjectId: id, payload: { clubId, ...(notifyFlag === "false" ? { notify: false } : {}) } });
+  await writeAudit(db, { eventType: "meeting.delete", subjectId: id, payload: { clubId, ...(notifyFlag === "false" ? { notify: false } : {}) } });
 
   if (audience !== null) {
     try {
@@ -278,7 +278,7 @@ meetingRoutes.post(
 
     const [row] = await db.insert(meetingInvitees).values({ meetingId: id, memberId, response: "ausstehend" }).returning();
 
-    await db.insert(auditLog).values({ eventType: "meeting_invitee.add", subjectId: id, payload: { clubId, memberId, ...(notifyFlag === false ? { notify: false } : {}) } });
+    await writeAudit(db, { eventType: "meeting_invitee.add", subjectId: id, payload: { clubId, memberId, ...(notifyFlag === false ? { notify: false } : {}) } });
     await announceMeetingInvitation({ clubId, actor: c.get("user").id, meeting, invitee: row, suppress: notifyFlag === false });
 
     return c.json({ data: row }, 201);
@@ -301,7 +301,7 @@ meetingRoutes.delete("/:id/invitees/:memberId", async (c) => {
   if (!existing) throw new NotFoundError("Invitee not found");
 
   await db.delete(meetingInvitees).where(eq(meetingInvitees.id, existing.id));
-  await db.insert(auditLog).values({ eventType: "meeting_invitee.remove", subjectId: id, payload: { clubId, memberId } });
+  await writeAudit(db, { eventType: "meeting_invitee.remove", subjectId: id, payload: { clubId, memberId } });
 
   return c.body(null, 204);
 });
@@ -331,7 +331,7 @@ meetingRoutes.patch(
 
     const [row] = await db.update(meetingInvitees).set({ response }).where(eq(meetingInvitees.id, existing.id)).returning();
 
-    await db.insert(auditLog).values({ eventType: "meeting_invitee.respond", subjectId: id, payload: { clubId, memberId: membership.id, response } });
+    await writeAudit(db, { eventType: "meeting_invitee.respond", subjectId: id, payload: { clubId, memberId: membership.id, response } });
 
     return c.json({ data: row });
   },
@@ -457,7 +457,7 @@ meetingRoutes.patch(
       // One audit entry summarizing the batch, not one per row -- this data
       // carries real legal weight (Mitgliederversammlung-Protokolle), but
       // per-row audit entries here would just be noise.
-      await tx.insert(auditLog).values({
+      await writeAudit(tx, {
         eventType: "meeting_attendance.record",
         subjectId: id,
         payload: { clubId, meetingId: id, count: entries.length },
@@ -512,7 +512,7 @@ meetingRoutes.post(
 
     // Same legal-weight reasoning as attendance -- Beschluesse are the
     // record a Mitgliederversammlung is legally judged by.
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "meeting_resolution.create",
       subjectId: row.id,
       payload: { clubId, meetingId: id },
@@ -562,22 +562,14 @@ meetingRoutes.patch(
       .where(eq(meetingResolutions.id, rid))
       .returning();
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "meeting_resolution.correct",
       subjectId: rid,
       payload: {
         clubId,
         meetingId: id,
-        correctionNote,
-        before: {
-          description: existing.description,
-          votesFor: existing.votesFor,
-          votesAgainst: existing.votesAgainst,
-          votesAbstain: existing.votesAbstain,
-          result: existing.result,
-          correctionNote: existing.correctionNote,
-        },
-        after: changes,
+        // Field names only: the values and the note are club content (resolution text, counts), not audit data.
+        changedFields: Object.keys(changes),
       },
     });
 

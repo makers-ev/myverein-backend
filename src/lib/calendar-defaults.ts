@@ -2,11 +2,11 @@ import { and, asc, count, eq, ilike, isNull, ne, sql } from "drizzle-orm";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { calendarVisibility } from "../db/schema/calendar-visibility.js";
 import { calendars, type CalendarRow } from "../db/schema/calendars.js";
 import type { DbExecutor } from "./club-members.js";
 import { IMPLICIT_ROLE_TYPE } from "./club-permissions.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * Standard club calendar (Wave 8 follow-up): every club owns a club-wide default calendar, so events can be created
@@ -64,7 +64,7 @@ export async function ensureDefaultCalendar(
     .limit(1);
   if (promotable) {
     const [promoted] = await executor.update(calendars).set({ isDefault: true }).where(eq(calendars.id, promotable.id)).returning();
-    await executor.insert(auditLog).values({ eventType: "calendar.default_create", subjectId: promotable.id, payload: { clubId, calendarId: promotable.id, source: opts.source ?? "lazy", promoted: true } });
+    await writeAudit(executor, { eventType: "calendar.default_create", subjectId: promotable.id, payload: { clubId, calendarId: promotable.id, source: opts.source ?? "lazy", promoted: true } });
     return promoted!;
   }
 
@@ -72,7 +72,7 @@ export async function ensureDefaultCalendar(
   if (!createdBy) return null;
   const [created] = await executor.insert(calendars).values({ clubId, name: DEFAULT_CALENDAR_NAME, isDefault: true, createdBy }).returning();
   await executor.insert(calendarVisibility).values({ calendarId: created!.id, roleType: IMPLICIT_ROLE_TYPE });
-  await executor.insert(auditLog).values({ eventType: "calendar.default_create", subjectId: created!.id, payload: { clubId, calendarId: created!.id, source: opts.source ?? "lazy" } });
+  await writeAudit(executor, { eventType: "calendar.default_create", subjectId: created!.id, payload: { clubId, calendarId: created!.id, source: opts.source ?? "lazy" } });
   return created!;
 }
 

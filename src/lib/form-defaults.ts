@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
@@ -5,10 +7,13 @@ import { forms, formVersions } from "../db/schema/forms.js";
 import { type DbExecutor, ensureDefaultCategories } from "./club-members.js";
 
 /**
- * Standard forms every club starts with (Wave 8 B2, ADR-005). They reproduce the behaviour before the form builder:
- * the application asks for the category and an optional birth date, plus an optional photo and the privacy notice with
- * a mandatory consent. The migration `0022` seeds exactly these definitions for existing clubs
- * (`form-defaults.test.ts` keeps both in sync); new clubs get them lazily via `ensureDefaultForms`.
+ * Standard forms every club starts with (Wave 8 B2, ADR-005): the application asks for the category and an optional birth date,
+ * plus an optional photo and shows the privacy notice. Since Wave 10 B11 there is NO consent in it: the privacy notice is
+ * information (Art. 13/14 GDPR), the applicant takes note of it (`privacyNoticeAcknowledged` on submit, stored on the application as
+ * `privacy_notice_acknowledged_at` / `privacy_notice_version_id`) and nothing about the application depends on it. A consent
+ * must be voluntary (Art. 7(4)), so it can never be a condition of an application; optional, purpose-bound consent blocks
+ * stay available in the form builder. The migration `0022` seeded the older definition (`LEGACY_DEFAULT_APPLICATION_FIELDS`, with a
+ * mandatory consent); `ensureDefaultForms` replaces an untouched legacy standard form by the current one (a new version).
  */
 
 export const DEFAULT_PRIVACY_NOTICE =
@@ -21,6 +26,11 @@ export const DEFAULT_APPLICATION_FIELDS = [
   { key: "birth_date", type: "date", label: "Geburtsdatum", required: false, mapsTo: "birthDate" },
   { key: "photo", type: "image", label: "Profilfoto (optional)", required: false, mapsTo: "photo" },
   { key: "privacy_notice", type: "info", infoKind: "privacy_notice", label: "Datenschutzhinweis", required: false },
+] as const;
+
+/** The standard application form as seeded by migration `0022` (with a mandatory consent); only used to recognise an untouched one. */
+export const LEGACY_DEFAULT_APPLICATION_FIELDS = [
+  ...DEFAULT_APPLICATION_FIELDS,
   {
     key: "privacy_consent",
     type: "consent",
@@ -56,8 +66,20 @@ export async function ensureDefaultForms(clubId: string, executor: DbExecutor = 
       .where(and(eq(forms.clubId, clubId), eq(forms.purpose, def.purpose), isNull(forms.archivedAt)))
       .limit(1);
     if (existing) {
-      const versions = await executor.select({ id: formVersions.id, version: formVersions.version, status: formVersions.status }).from(formVersions).where(eq(formVersions.formId, existing.id));
-      if (versions.some((v) => v.status === "published")) continue;
+      const versions = await executor.select({ id: formVersions.id, version: formVersions.version, status: formVersions.status, fields: formVersions.fields, privacyNotice: formVersions.privacyNotice }).from(formVersions).where(eq(formVersions.formId, existing.id));
+      const published = versions.find((v) => v.status === "published");
+      if (published) {
+        // Wave 10 B11: an untouched legacy standard application form (mandatory consent) is replaced by the current standard.
+        if (def.purpose === "aufnahme" && isDeepStrictEqual(published.fields, JSON.parse(JSON.stringify(LEGACY_DEFAULT_APPLICATION_FIELDS))) && published.privacyNotice === DEFAULT_PRIVACY_NOTICE) {
+          const openDraft = versions.find((v) => v.status === "draft");
+          // The new standard takes the number an open draft has (the draft moves up by one), else the next free one.
+          const upgrade = openDraft ? openDraft.version : Math.max(...versions.map((v) => v.version)) + 1;
+          if (openDraft) await executor.update(formVersions).set({ version: upgrade + 1 }).where(eq(formVersions.id, openDraft.id));
+          await executor.update(formVersions).set({ status: "archived", updatedAt: new Date() }).where(eq(formVersions.id, published.id));
+          await executor.insert(formVersions).values({ formId: existing.id, version: upgrade, status: "published", fields: def.fields, privacyNotice: def.privacyNotice, publishedAt: new Date() });
+        }
+        continue;
+      }
       const next = Math.max(0, ...versions.map((v) => v.version)) + 1;
       const draft = versions.find((v) => v.status === "draft");
       if (draft) await executor.update(formVersions).set({ version: next + 1 }).where(eq(formVersions.id, draft.id));

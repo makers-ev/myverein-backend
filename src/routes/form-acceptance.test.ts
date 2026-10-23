@@ -10,7 +10,8 @@ import { compensateAbortedApproval } from "../lib/form-applications.js";
 import { createInvite } from "../lib/member-invites.js";
 import { auth } from "../auth/auth.js";
 import { clubMembers, clubMemberStatusHistory } from "../db/schema/club-members.js";
-import { formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, memberFieldValues } from "../db/schema/forms.js";
+import { forms, formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, memberFieldValues } from "../db/schema/forms.js";
+import { LEGACY_DEFAULT_APPLICATION_FIELDS } from "../lib/form-defaults.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { sweepRejectedFormFiles } from "../lib/form-sweeper.js";
 import { logger } from "../lib/logger.js";
@@ -60,7 +61,7 @@ const FIELDS = [
   { key: "instrument", type: "text", label: "Instrument", customField: "instrument" },
   { key: "notes", type: "textarea", label: "Anmerkung" },
   { key: "privacy_notice", type: "info", infoKind: "privacy_notice", label: "Datenschutz" },
-  { key: "privacy_consent", type: "consent", label: "Ich willige ein.", required: true },
+  { key: "privacy_consent", type: "consent", label: "Ich willige ein.", required: false },
 ];
 const full = (over: Record<string, unknown> = {}) => ({ first_name: "Anna", last_name: "Muster", category: "passiv", birth_date: "1990-04-02", street: "Hauptstr. 1", phone: "0123 456789", shirt: "m", instrument: "Tuba", notes: SECRET, privacy_consent: true, ...over });
 
@@ -130,26 +131,40 @@ describe("application <-> form integration (B6)", () => {
 
   // --- old clients ------------------------------------------------------------------------------------------
 
-  it("tells old clients to use the form while the club's form asks for a consent (409 form_required); legacy rows still decide with the old logic", async () => {
+  it("tells old clients to use the form while the club's (legacy) form still asks for a consent (409 form_required); legacy rows still decide with the old logic", async () => {
     const who = await newApplicant("legacy");
-    const res = await apply(who, { clubSlug: plainClub.slug, category: "jugend", birthDate: "2010-04-05" });
-    expect(res.status).toBe(409);
-    expect((await body(res)).error.details).toMatchObject({ code: "form_required" });
-    expect(await db.query.clubApplications.findFirst({ where: eq(clubApplications.userId, who.userId) })).toBeUndefined();
-    // Same for every club with the standard form and for the raw club id.
-    expect((await body(await apply(who, { clubId: plainClub.clubId }))).error.details.code).toBe("form_required");
+    // The standard form no longer asks for a consent, so old clients may apply the old way ...
+    const first = await newApplicant("legacyok");
+    const allowed = await apply(first, { clubSlug: plainClub.slug, category: "jugend", birthDate: "2010-04-05" });
+    expect(allowed.status).toBe(201);
+    await db.delete(clubApplications).where(eq(clubApplications.userId, first.userId));
 
-    // A legacy row that exists (filed before the form builder) is still decided with the old logic.
-    const [legacy] = await db.insert(clubApplications).values({ userId: who.userId, clubId: plainClub.clubId, category: "jugend", birthDate: "2010-04-05" }).returning();
-    const list = (await body(await call(plainClub.founder, "/club-applications", { clubId: plainClub.clubId }))).data;
-    expect(list.find((a: { id: string }) => a.id === legacy!.id)).toMatchObject({ legacy: true, formSubmissionId: null });
-    const approved = await decide(plainClub.founder, legacy!.id, "approve", undefined, plainClub);
-    expect(approved.status).toBe(200);
-    const data = (await body(approved)).data;
-    expect(data.mapping).toBeNull();
-    expect(data.clubMember).toMatchObject({ birthDate: "2010-04-05", status: "aktiv" });
-    expect(data.application).toMatchObject({ status: "approved", clubMemberId: data.clubMember.id });
-    expect(data.membership.category).toBe("jugend");
+    // ... except for a club whose published form is an OLD version with a mandatory consent (data from before Wave 10 B11).
+    const aufnahme = (await db.query.forms.findFirst({ where: and(eq(forms.clubId, plainClub.clubId), eq(forms.purpose, "aufnahme")) }))!;
+    const [published] = await db.select().from(formVersions).where(and(eq(formVersions.formId, aufnahme.id), eq(formVersions.status, "published")));
+    // Touched (extra field), so the lazy upgrade of untouched legacy standard forms leaves it alone.
+    await db.update(formVersions).set({ fields: [...LEGACY_DEFAULT_APPLICATION_FIELDS, { key: "extra", type: "text", label: "Extra", required: false }] }).where(eq(formVersions.id, published!.id));
+    try {
+      const res = await apply(who, { clubSlug: plainClub.slug, category: "jugend", birthDate: "2010-04-05" });
+      expect(res.status).toBe(409);
+      expect((await body(res)).error.details).toMatchObject({ code: "form_required" });
+      expect(await db.query.clubApplications.findFirst({ where: eq(clubApplications.userId, who.userId) })).toBeUndefined();
+      expect((await body(await apply(who, { clubId: plainClub.clubId }))).error.details.code).toBe("form_required");
+
+      // A legacy row that exists (filed before the form builder) is still decided with the old logic.
+      const [legacy] = await db.insert(clubApplications).values({ userId: who.userId, clubId: plainClub.clubId, category: "jugend", birthDate: "2010-04-05" }).returning();
+      const list = (await body(await call(plainClub.founder, "/club-applications", { clubId: plainClub.clubId }))).data;
+      expect(list.find((a: { id: string }) => a.id === legacy!.id)).toMatchObject({ legacy: true, formSubmissionId: null });
+      const approved = await decide(plainClub.founder, legacy!.id, "approve", undefined, plainClub);
+      expect(approved.status).toBe(200);
+      const data = (await body(approved)).data;
+      expect(data.mapping).toBeNull();
+      expect(data.clubMember).toMatchObject({ birthDate: "2010-04-05", status: "aktiv" });
+      expect(data.application).toMatchObject({ status: "approved", clubMemberId: data.clubMember.id });
+      expect(data.membership.category).toBe("jugend");
+    } finally {
+      await db.update(formVersions).set({ fields: published!.fields }).where(eq(formVersions.id, published!.id));
+    }
   });
 
   it("answers unknown clubs with 404 and counts every apply shape against the hourly limit", async () => {
@@ -173,7 +188,7 @@ describe("application <-> form integration (B6)", () => {
     expect((await body(second)).error).toMatchObject({ code: "APPLICATION_PENDING" });
     const legacy = await apply(who, { clubSlug: club.slug });
     expect(legacy.status).toBe(409);
-    expect((await body(legacy)).error.details.code).toBe("form_required");
+    expect((await body(legacy)).error.code).toBe("APPLICATION_PENDING");
   });
 
   it("validates the answers against the published form (422 with codes, no values echoed) and rejects a stale version", async () => {
@@ -334,7 +349,7 @@ describe("application <-> form integration (B6)", () => {
       await db.update(formVersions).set({ fields: tampered }).where(eq(formVersions.id, published!.id));
 
       const who = await newApplicant("hostile");
-      const filedRes = await apply(who, { clubSlug: hostileClub.slug, answers: { category: "aktiv", privacy_consent: true, evil_a: "verstorben", evil_b: "fremd", evil_c: "anderer-verein" } });
+      const filedRes = await apply(who, { clubSlug: hostileClub.slug, answers: { category: "aktiv", evil_a: "verstorben", evil_b: "fremd", evil_c: "anderer-verein" } });
       expect(filedRes.status).toBe(201);
       const id = (await body(filedRes)).data.application.id;
       const approved = await decide(hostileClub.founder, id, "approve", undefined, hostileClub);

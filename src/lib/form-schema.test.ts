@@ -134,12 +134,13 @@ describe("validateAnswers", () => {
     expect(validateAnswers(fields, { first: "x".repeat(300) }, { mode: "draft" })).toMatchObject({ ok: false, errors: { first: "too_long" } });
   });
 
-  it("requires consent and required checkboxes to be true", () => {
-    const fields = defs([f({ key: "agree", type: "consent", label: "Ja", required: true }), f({ key: "opt", type: "checkbox" })]);
-    expect(validateAnswers(fields, { agree: false }, submit)).toEqual({ ok: false, errors: { agree: "required" } });
-    expect(validateAnswers(fields, {}, submit)).toEqual({ ok: false, errors: { agree: "required" } });
-    expect(validateAnswers(fields, { agree: true, opt: false }, submit)).toEqual({ ok: true, answers: { agree: true } });
-    expect(validateAnswers(fields, { agree: "true" }, submit)).toMatchObject({ ok: false, errors: { agree: "invalid_type" } });
+  it("never enforces a consent, even in a legacy version published with required (Koppelungsverbot)", () => {
+    const fields = defs([f({ key: "agree", type: "consent", label: "Ja", required: true }), f({ key: "opt", type: "checkbox", required: true })]);
+    expect(validateAnswers(fields, { agree: false, opt: true }, submit)).toEqual({ ok: true, answers: { opt: true } });
+    expect(validateAnswers(fields, { opt: true }, submit)).toEqual({ ok: true, answers: { opt: true } });
+    expect(validateAnswers(fields, { agree: true, opt: true }, submit)).toEqual({ ok: true, answers: { agree: true, opt: true } });
+    expect(validateAnswers(fields, { agree: false }, submit)).toEqual({ ok: false, errors: { opt: "required" } });
+    expect(validateAnswers(fields, { agree: "true", opt: true }, submit)).toMatchObject({ ok: false, errors: { agree: "invalid_type" } });
   });
 
   it("drops hidden fields and does not require them", () => {
@@ -204,9 +205,11 @@ describe("validateAnswers", () => {
   it("resolves member_categories against the club's active categories", () => {
     const fields = defs(DEFAULT_APPLICATION_FIELDS);
     const ctx = { ...submit, categoryKeys: ["aktiv", "jugend"], uploadedFieldKeys: new Set<string>() };
-    expect(validateAnswers(fields, { category: "jugend", privacy_consent: true }, ctx)).toEqual({ ok: true, answers: { category: "jugend", privacy_consent: true } });
-    expect(validateAnswers(fields, { category: "passiv", privacy_consent: true }, ctx)).toEqual({ ok: false, errors: { category: "not_an_option" } });
-    expect(validateAnswers(fields, { category: "aktiv" }, ctx)).toEqual({ ok: false, errors: { privacy_consent: "required" } });
+    expect(validateAnswers(fields, { category: "jugend" }, ctx)).toEqual({ ok: true, answers: { category: "jugend" } });
+    expect(validateAnswers(fields, { category: "passiv" }, ctx)).toEqual({ ok: false, errors: { category: "not_an_option" } });
+    expect(validateAnswers(fields, {}, ctx)).toEqual({ ok: false, errors: { category: "required" } });
+    // The standard form carries no consent: an answer for the old consent key is an unknown field.
+    expect(validateAnswers(fields, { category: "aktiv", privacy_consent: true }, ctx)).toEqual({ ok: false, errors: { privacy_consent: "unknown_field" } });
     expect(resolveFieldOptions(fields[0]!, [{ key: "aktiv", name: "Aktiv" }])).toEqual([{ value: "aktiv", label: "Aktiv" }]);
   });
 });

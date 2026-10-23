@@ -5,9 +5,9 @@ import type { Context } from "hono";
 import { createMiddleware } from "hono/factory";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { rateLimitEvents } from "../db/schema/rate-limits.js";
 import { TooManyRequestsError } from "./errors.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * DB-backed rate limits (Wave 9 B14, O4). The counter lives in `rate_limit_events`, so it is shared by all instances and
@@ -71,7 +71,7 @@ const windowLabel = (ms: number): string => (ms >= 3_600_000 ? `${Math.round(ms 
 export async function auditViolation(spec: LimitSpec, payload: Record<string, unknown> = {}): Promise<void> {
   const first = await tryConsume({ bucket: `${spec.bucket}:violation`, subject: spec.subject, windowMs: spec.windowMs, max: 1 });
   if (!first.allowed) return;
-  await db.insert(auditLog).values({ eventType: "rate_limit.exceeded", subjectId: spec.subject.length <= 64 ? spec.subject : null, payload: { rule: spec.bucket, limit: spec.max, windowSeconds: Math.round(spec.windowMs / 1000), ...payload } });
+  await writeAudit(db, { eventType: "rate_limit.exceeded", subjectId: spec.subject.length <= 64 ? spec.subject : null, payload: { rule: spec.bucket, limit: spec.max, windowSeconds: Math.round(spec.windowMs / 1000), ...payload } });
 }
 
 /** Consumes one hit or throws `429` with `message` (default derived from the rule) and an audit entry. */

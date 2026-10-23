@@ -77,6 +77,9 @@ const fieldSchema = z
     mapsTo: z.enum(MAPPING_TARGET_KEYS).optional(),
     customField: keySchema.optional(),
     infoKind: z.enum(["privacy_notice"]).optional(),
+    // Consent block only (Wave 10 B3): the key of a club consent purpose. A ticked box is recorded as a consent event of
+    // that purpose when the application is accepted. Always voluntary: such a field can never be `required`.
+    purposeKey: z.string().regex(/^[a-z][a-z0-9_]{1,39}$/).optional(),
     text: cleanText(z.string().trim().max(2000), true).optional(),
     // Marks answers that need special protection (health, ...): review visibility (members:read_sensitive) in B6/B10.
     sensitive: z.boolean().optional(),
@@ -103,6 +106,11 @@ export const formFieldsSchema = z
       const levelOptions = field.type === "credential" && field.options !== undefined && field.optionsSource === undefined;
       if (!isSelect && !levelOptions && (field.options !== undefined || field.optionsSource !== undefined)) issue("options only for select/multiselect (and the levels of a credential)", ["options"]);
       if (field.options && new Set(field.options.map((o) => o.value)).size !== field.options.length) issue("duplicate option value", ["options"]);
+
+      if (field.purposeKey !== undefined) {
+        if (field.type !== "consent") issue("purposeKey only for consent fields", ["purposeKey"]);
+        else if (field.required) issue("a consent for a purpose is voluntary and cannot be required", ["required"]);
+      }
 
       if (field.type === "info") {
         if (field.required || field.mapsTo || field.customField || field.validation || field.sensitive) issue("info fields carry no answer", ["type"]);
@@ -352,11 +360,13 @@ export function validateAnswers(fields: readonly FormField[], answers: unknown, 
       continue;
     }
 
+    // Koppelungsverbot (Art. 7(4) GDPR): a consent is never enforced, not even in a form version published with `required`.
+    const required = field.type === "consent" ? false : field.required;
     const raw = Object.hasOwn(answers, field.key) ? answers[field.key] : undefined;
     const optionValues = field.options ? field.options.map((o) => o.value) : field.optionsSource === "member_categories" ? [...(ctx.categoryKeys ?? [])] : [];
 
-    if (isEmpty(raw) || (raw === false && (field.type === "checkbox" || field.type === "consent") && !field.required)) {
-      if (ctx.mode === "submit" && field.required) errors[field.key] = "required";
+    if (isEmpty(raw) || (raw === false && (field.type === "checkbox" || field.type === "consent") && !required)) {
+      if (ctx.mode === "submit" && required) errors[field.key] = "required";
       continue;
     }
     const result = cleanValue(field, raw, optionValues);
@@ -364,7 +374,7 @@ export function validateAnswers(fields: readonly FormField[], answers: unknown, 
       errors[field.key] = result.error;
       continue;
     }
-    if ((field.type === "checkbox" || field.type === "consent") && field.required && result.value !== true) {
+    if ((field.type === "checkbox" || field.type === "consent") && required && result.value !== true) {
       if (ctx.mode === "submit") errors[field.key] = "required";
       continue;
     }

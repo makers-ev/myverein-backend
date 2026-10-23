@@ -3,7 +3,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { DEFAULT_FORMS, ensureDefaultForms } from "../lib/form-defaults.js";
+import { DEFAULT_FORMS, ensureDefaultForms, LEGACY_DEFAULT_APPLICATION_FIELDS } from "../lib/form-defaults.js";
 import { MIGRATIONS, ScratchDatabases } from "./scratch-db.js";
 
 /**
@@ -48,7 +48,8 @@ describe("migration 0022 configurable-forms", () => {
       for (const row of rows) {
         expect(row.version).toBe(1);
         expect(row.status).toBe("published");
-        expect(row.fields).toEqual(JSON.parse(JSON.stringify(def.fields)));
+        // The migration seeded the definition of its time (with a mandatory consent); Wave 10 B11 replaces it lazily (see form-defaults).
+        expect(row.fields).toEqual(JSON.parse(JSON.stringify(purpose === "aufnahme" ? LEGACY_DEFAULT_APPLICATION_FIELDS : def.fields)));
         expect(row.privacy_notice).toBe(def.privacyNotice);
       }
     }

@@ -6,7 +6,6 @@ import { z } from "zod";
 import { auth } from "../auth/auth.js";
 import { member, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { assertRejoinAllowed, DEFAULT_CATEGORY_KEY, type DbExecutor, ensureClubMember, findCategoryByKey, isUuid, lockCategoryShared } from "../lib/club-members.js";
@@ -29,6 +28,7 @@ import { effectiveStatus, isLeftStatus, todayBerlin, transitionMember } from "..
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Board-side decision queue for Aufnahmeantraege created by
@@ -191,7 +191,7 @@ clubApplicationRoutes.get("/:id", async (c) => {
   const review = await buildApplicationReview(application, { clubId, canReadSensitive: hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive") });
   const { sensitiveKeysRead, ...data } = review;
   if (sensitiveKeysRead.length > 0) {
-    await db.insert(auditLog).values({ eventType: "club_application.sensitive_read", subjectId: application.id, payload: { clubId, readBy: c.get("membership").id, formSubmissionId: application.formSubmissionId, fieldKeys: sensitiveKeysRead } });
+    await writeAudit(db, { eventType: "club_application.sensitive_read", subjectId: application.id, payload: { clubId, readBy: c.get("membership").id, formSubmissionId: application.formSubmissionId, fieldKeys: sensitiveKeysRead } });
   }
   c.header("Cache-Control", "private, no-store");
   return c.json({ data });
@@ -277,7 +277,7 @@ clubApplicationRoutes.post("/:id/approve", decisionBodyLimit, async (c) => {
       }
       const [finalApplication] = await tx.update(clubApplications).set({ clubMemberId: clubMember.id }).where(eq(clubApplications.id, application.id)).returning();
 
-      await tx.insert(auditLog).values({
+      await writeAudit(tx, {
         eventType: "club_application.approve",
         subjectId: application.id,
         // Ids, field keys and counts only -- never answer values.
@@ -378,7 +378,7 @@ async function approveChild(clubId: string, application: typeof clubApplications
       const link = await linkGuardian(tx, { clubId, guardian, childClubMemberId: child!.id, decidedBy: decider.id });
       const [finalApplication] = await tx.update(clubApplications).set({ clubMemberId: child!.id }).where(eq(clubApplications.id, application.id)).returning();
 
-      await tx.insert(auditLog).values({
+      await writeAudit(tx, {
         eventType: "club_application.approve",
         subjectId: application.id,
         // Ids, field keys and counts only -- never the child's name or any answer.
@@ -495,7 +495,7 @@ async function readmit(
         purge = applied.purge;
       }
       const [finalApplication] = await tx.update(clubApplications).set({ clubMemberId: former.id }).where(eq(clubApplications.id, application.id)).returning();
-      await tx.insert(auditLog).values({
+      await writeAudit(tx, {
         eventType: "club_application.approve",
         subjectId: application.id,
         payload: { clubId, userId: application.userId, memberId: account.id, clubMemberId: former.id, decidedBy: deciderId, ...(promoteGuest ? { promotedGuest: true } : { readmission: true }), ...(context ? auditOfMapping(context, mapping!) : {}) },
@@ -571,7 +571,7 @@ clubApplicationRoutes.post("/:id/reject", decisionBodyLimit, async (c) => {
       if (!row) throw new ConflictError("Application has already been decided");
       if (context) await rejectSubmission(tx, context, decider.id, { applicantMessage: applicantMessage?.trim() || null, internalNote: note?.trim() || null });
 
-      await tx.insert(auditLog).values({
+      await writeAudit(tx, {
         eventType: "club_application.reject",
         subjectId: application.id,
         payload: { clubId, userId: application.userId, decidedBy: decider.id, ...(context ? { formSubmissionId: context.sub.id, hasNote: Boolean(note?.trim()), hasApplicantMessage: Boolean(applicantMessage?.trim()) } : {}) },

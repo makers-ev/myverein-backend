@@ -12,19 +12,33 @@ import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
+import { calendars } from "../db/schema/calendars.js";
+import { calendarVisibility } from "../db/schema/calendar-visibility.js";
+import { events } from "../db/schema/events.js";
 import { CLUB_ROLE_TYPES, clubPermissionsFor } from "../lib/club-permissions.js";
 import { toAppError } from "../lib/errors.js";
 import { adminClubRegistrationRoutes } from "./admin-club-registrations.js";
 import { adminClubRoutes } from "./admin-clubs.js";
+import { adminUserRoutes } from "./admin-users.js";
 import { clubStatsRoutes } from "./club-stats.js";
 import { clubExitRequestRoutes } from "./club-exit-requests.js";
 import { clubAnnouncementRoutes, clubInboxRoutes } from "./club-announcements.js";
 import { notificationPreferenceRoutes, unsubscribeRoutes } from "./notification-preferences.js";
+import { absenceRoutes } from "./absences.js";
+import { dataSubjectRequestRoutes } from "./data-subject-requests.js";
+import { guardianRoutes, myWardsRoutes } from "./guardian.js";
+import { consentOverviewRoutes, consentPurposeRoutes } from "./consent-purposes.js";
 import { clubSettingsRoutes } from "./club-settings.js";
+import { auditLogRoutes } from "./audit-log.js";
 import { adminEmailRoutes } from "./admin-emails.js";
 import { adminNotificationRoutes } from "./admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./admin-notification-templates.js";
 import { adminJobRoutes } from "./admin-jobs.js";
+import { adminRetentionRoutes } from "./admin-retention.js";
+import { adminDpaAcceptanceRoutes, adminDpaVersionRoutes } from "./admin-dpa.js";
+import { dpaRoutes } from "./dpa.js";
+import { clubNoticeBySlugRoutes, clubPrivacyNoticeRoutes } from "./club-privacy-notices.js";
+import { retentionPolicyRoutes } from "./retention-policies.js";
 import { adminStatsRoutes } from "./admin-stats.js";
 import { availabilityRoutes } from "./availability.js";
 import { calendarRoutes } from "./calendars.js";
@@ -67,7 +81,14 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/admin", "adminEmailRoutes", adminEmailRoutes],
   ["/admin", "adminClubRoutes", adminClubRoutes],
   ["/club-stats", "clubStatsRoutes", clubStatsRoutes],
+  ["/consent-purposes", "consentPurposeRoutes", consentPurposeRoutes],
+  ["/consents", "consentOverviewRoutes", consentOverviewRoutes],
+  ["/absences", "absenceRoutes", absenceRoutes],
+  ["/data-subject-requests", "dataSubjectRequestRoutes", dataSubjectRequestRoutes],
+  ["/my-wards", "myWardsRoutes", myWardsRoutes],
+  ["/guardian", "guardianRoutes", guardianRoutes],
   ["/club-settings", "clubSettingsRoutes", clubSettingsRoutes],
+  ["/audit-log", "auditLogRoutes", auditLogRoutes],
   ["/club-exit-requests", "clubExitRequestRoutes", clubExitRequestRoutes],
   ["/club-announcements", "clubAnnouncementRoutes", clubAnnouncementRoutes],
   ["/club-inbox", "clubInboxRoutes", clubInboxRoutes],
@@ -76,6 +97,14 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/push-tokens", "pushTokenRoutes", pushTokenRoutes],
   ["/notifications", "notificationRoutes", notificationRoutes],
   ["/admin/jobs", "adminJobRoutes", adminJobRoutes],
+  ["/admin/retention-runs", "adminRetentionRoutes", adminRetentionRoutes],
+  ["/admin/dpa-versions", "adminDpaVersionRoutes", adminDpaVersionRoutes],
+  ["/admin/dpa-acceptances", "adminDpaAcceptanceRoutes", adminDpaAcceptanceRoutes],
+  ["/dpa", "dpaRoutes", dpaRoutes],
+  ["/admin", "adminUserRoutes", adminUserRoutes],
+  ["/club-privacy-notices", "clubPrivacyNoticeRoutes", clubPrivacyNoticeRoutes],
+  ["/clubs", "clubNoticeBySlugRoutes", clubNoticeBySlugRoutes],
+  ["/retention-policies", "retentionPolicyRoutes", retentionPolicyRoutes],
   ["/admin/notifications", "adminNotificationRoutes", adminNotificationRoutes],
   ["/admin/notification-templates", "adminNotificationTemplateRoutes", adminNotificationTemplateRoutes],
   ["/admin/club-registrations", "adminClubRegistrationRoutes", adminClubRegistrationRoutes],
@@ -151,6 +180,19 @@ const SELF_SERVICE: Record<string, string> = {
   "POST /push-tokens": "own device token (bound to the caller's account; a token of another account is re-assigned, never read)",
   "DELETE /push-tokens/:token": "logout of an own device (only the caller's own token is removed)",
   "POST /club-inbox/:id/read": "own in-app message (bound to user and club; foreign ids are 404)",
+  "POST /club-members/:id/consents/:purposeId": "consent of the person itself or of a linked guardian (decided in the route: foreign members are 403, unknown ones 404; the board needs privacy:manage and a paper proof)",
+  "DELETE /club-members/:id/consents/:purposeId": "revocation by the person itself or a linked guardian (same rules as the grant)",
+  "POST /absences": "own absence report (external guests get 403; the member row is the caller's own)",
+  "PATCH /absences/:id": "own absence report (ownership checked, foreign ids are 404)",
+  "DELETE /absences/:id": "withdrawing the own absence report (ownership checked)",
+  "PUT /club-members/:id/visibility": "the person itself, a guardian with a live link and custody, or members:write; others 403, unknown ids 404",
+  "PUT /guardian/wards/:wardId/events/:eventId/response": "guardian answers for a ward (guardianScope: a ward that is not the caller's, foreign club or expired link is 404)",
+  "DELETE /guardian/wards/:wardId/events/:eventId/response": "guardian withdraws the answer for a ward (guardianScope, 404 otherwise)",
+  "POST /guardian/wards/:wardId/absences": "guardian reports an absence for a ward (guardianScope + can_report_absence)",
+  "PATCH /guardian/wards/:wardId/absences/:id": "guardian changes an absence of a ward (guardianScope + can_report_absence)",
+  "DELETE /guardian/wards/:wardId/absences/:id": "guardian withdraws an absence of a ward (guardianScope + can_report_absence)",
+  "POST /club-members/me/erasure-request": "the member's own erasure request (a request with a deadline for the board; nothing is erased by it)",
+  "POST /guardian/wards/:wardId/erasure-request": "guardian files an erasure request for a ward (guardianScope: a ward that is not the caller's is 404)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
 };
 
@@ -163,6 +205,12 @@ const GUEST_DENIED_READS: Array<[string, string]> = [
   ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}`],
   ["GET", "/club-members"],
   ["GET", "/club-members?status=aktiv"],
+  ["GET", "/inventory-items"],
+  ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}`],
+  ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}/loans`],
+  ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}/damage-reports`],
+  ["GET", "/departments"],
+  ["GET", `/departments/${"00000000-0000-4000-8000-000000000001"}`],
 ];
 
 /** Routes whose body validation runs before the permission check need a valid sample body. Default `{}`. */
@@ -177,6 +225,24 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /club-exit-requests/:id/reject": { note: "Nein" },
   "POST /club-members/:id/roles": { roleType: "kassenwart" },
   "POST /club-members/:id/guardians": { guardianMemberId: SOME_ID },
+  "PATCH /club-members/:id/guardians/:guardianMemberId": { canConsent: true },
+  "PUT /club-members/:id/visibility": { phone: "mitglieder" },
+  "POST /absences": { kind: "krank", startsOn: "2030-01-01", endsOn: "2030-01-02" },
+  "PATCH /absences/:id": { note: "kurz" },
+  "PUT /guardian/wards/:wardId/events/:eventId/response": { status: "angemeldet" },
+  "POST /guardian/wards/:wardId/absences": { kind: "krank", startsOn: "2030-01-01", endsOn: "2030-01-02" },
+  "PATCH /guardian/wards/:wardId/absences/:id": { note: "kurz" },
+  "POST /club-members/:id/consents/:purposeId": { textVersionId: SOME_ID },
+  "POST /consent-purposes": { name: "Neuer Zweck" },
+  "PATCH /consent-purposes/:id": { requested: true },
+  "POST /consent-purposes/:id/texts": { body: "Ein Einwilligungstext von ausreichender Länge." },
+  "POST /club-members/:id/data-export": { identityChecked: true },
+  "POST /club-members/:id/erasure/execute": { planDigest: "a".repeat(64), confirm: true },
+  "PUT /club-members/:id/legal-hold": { active: false },
+  "POST /data-subject-requests": { clubMemberId: SOME_ID, kind: "access" },
+  "PATCH /data-subject-requests/:id": { status: "in_progress" },
+  "PUT /retention-policies/:category": { retainDays: 100 },
+  "POST /dpa/accept": { dpaVersionId: SOME_ID, signerName: "Max Mustermann", authorized: true },
   "POST /departments": { name: "Abteilung" },
   "PUT /club-info/:slug": { title: "Titel" },
   "POST /calendars": { name: "Kalender" },
@@ -329,6 +395,28 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     expect((await req("/club-members/me", cookieGuest)).status).toBe(200);
   });
 
+  it("hides calendars and events without a grant from an external guest (no club-wide rule 1), shows granted ones", async () => {
+    const [open] = await db.insert(calendars).values({ clubId, name: "Offen", createdBy: founderId }).returning();
+    const [granted] = await db.insert(calendars).values({ clubId, name: "Freigegeben", createdBy: founderId }).returning();
+    await db.insert(calendarVisibility).values({ calendarId: granted!.id, memberId: guestMemberId });
+    const [openEvent] = await db.insert(events).values({ calendarId: open!.id, title: "Offener Termin", startsAt: new Date("2030-06-01T10:00:00Z"), createdBy: founderId }).returning();
+    const [grantedEvent] = await db.insert(events).values({ calendarId: granted!.id, title: "Freigegebener Termin", startsAt: new Date("2030-06-02T10:00:00Z"), createdBy: founderId }).returning();
+    const ids = async (path: string, cookie: string) => ((await (await req(path, cookie)).json()) as { data: Array<{ id: string }> }).data.map((r) => r.id);
+
+    const guestCalendars = await ids("/calendars", cookieGuest);
+    expect(guestCalendars).toContain(granted!.id);
+    expect(guestCalendars).not.toContain(open!.id);
+    const guestEvents = await ids("/events", cookieGuest);
+    expect(guestEvents).toContain(grantedEvent!.id);
+    expect(guestEvents).not.toContain(openEvent!.id);
+    expect((await req(`/calendars/${open!.id}`, cookieGuest)).status).toBe(404);
+    expect((await req(`/events/${openEvent!.id}`, cookieGuest)).status).toBe(404);
+    expect((await req(`/events/${grantedEvent!.id}`, cookieGuest)).status).toBe(200);
+    // A plain member still sees the club-wide ones.
+    expect(await ids("/calendars", cookiePlain)).toContain(open!.id);
+    expect(await ids("/events", cookiePlain)).toContain(openEvent!.id);
+  });
+
   it("denies the board-only exit-request variants and settings changes to a plain mitglied", async () => {
     const other = (await db.query.clubMembers.findFirst({ where: eq(clubMembers.memberId, adminMemberId) }))!;
     const asBoard = await req("/club-exit-requests", cookiePlain, { method: "POST", body: { clubMemberId: other.id, kind: "cancellation" } });
@@ -352,6 +440,18 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     expect((await req("/club-exit-requests/form", cookiePlain)).status).toBe(200);
     expect((await req("/club-applications", cookieFounder)).status).toBe(200);
     expect((await req(`/club-applications/${appId}`, cookieFounder)).status).toBe(404);
+  });
+
+  it("keeps the audit log behind privacy:read (board allowed; mitglied and guest denied on every route)", async () => {
+    const someMember = "00000000-0000-4000-8000-0000000000bb";
+    for (const cookie of [cookiePlain, cookieGuest]) {
+      for (const path of ["/audit-log", "/audit-log/export", "/audit-log/export.csv", `/audit-log/members/${someMember}`]) {
+        const res = await req(path, cookie);
+        expect(res.status, `${path} -> ${res.status}`).toBe(403);
+      }
+    }
+    expect((await req("/audit-log", cookieFounder)).status).toBe(200);
+    expect((await req(`/audit-log/members/${someMember}`, cookieFounder)).status).toBe(404);
   });
 
   it("keeps the form builder behind forms:write (board allowed, mitglied and guest denied, reads included)", async () => {
@@ -401,6 +501,15 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
       for (const role of ["mitglied", "kassenwart", "beisitzer", "abteilungsleitung", "trainer", "erziehungsberechtigt"]) expect(clubPermissionsFor([role])).not.toContain("announcements:write");
       for (const role of ["abteilungsleitung", "trainer"]) expect(clubPermissionsFor([role])).toContain("announcements:write_department");
       for (const role of ["mitglied", "vorsitz", "kassenwart", "beisitzer", "erziehungsberechtigt"]) expect(clubPermissionsFor([role])).not.toContain("announcements:write_department");
+    });
+
+    it("grants the Wave 10 privacy permissions deny-by-default (B2)", () => {
+      for (const role of ["vorsitz", "stellv_vorsitz"]) expect(clubPermissionsFor([role])).toEqual(expect.arrayContaining(["privacy:read", "privacy:manage", "absences:read"]));
+      for (const role of ["mitglied", "schriftfuehrer", "kassenwart", "beisitzer", "erziehungsberechtigt"]) expect(clubPermissionsFor([role])).not.toEqual(expect.arrayContaining(["privacy:read"]));
+      for (const role of ["abteilungsleitung", "trainer"]) {
+        expect(clubPermissionsFor([role])).toContain("absences:read");
+        expect(clubPermissionsFor([role])).not.toContain("privacy:read");
+      }
     });
 
     it("cannot be assigned (422) or revoked (409) and is listed as implicit, not as a deletable row", async () => {

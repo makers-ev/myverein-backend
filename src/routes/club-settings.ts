@@ -6,7 +6,6 @@ import { eq } from "drizzle-orm";
 
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubSettings, NOTICE_MODES } from "../db/schema/club-settings.js";
 import { normalizeEmail } from "../lib/audience.js";
 import { formatFrom } from "../lib/email.js";
@@ -21,6 +20,7 @@ import { ForbiddenError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Club-wide parameters (Wave 7 B6). Every member reads the values that concern them (notice period/mode for the
@@ -35,6 +35,7 @@ clubSettingsRoutes.use("*", sessionGuard);
 clubSettingsRoutes.use("*", clubGuard);
 
 const MAIL_FIELDS = ["senderName", "signature", "replyTo", "textBlocks"] as const;
+const PRIVACY_FIELDS = ["consentAgeLimit", "consentBothGuardians", "privacyContact", "privacyController"] as const;
 
 clubSettingsRoutes.get("/", async (c) => {
   const settings = await loadClubSettings(db, c.get("clubId"));
@@ -94,6 +95,11 @@ const updateSettingsSchema = z.object({
   notifyHandover: z.boolean().optional(),
   // Language of the system texts in club mails and pushes (decisions, reminders, event changes, invitations).
   mailLanguage: z.enum(MAIL_LANGUAGES).optional(),
+  // Privacy (Wave 10, `privacy:manage`): age of consent, both guardians, contact and controller for the privacy notice.
+  consentAgeLimit: z.number().int().min(10).max(18).optional(),
+  consentBothGuardians: z.boolean().optional(),
+  privacyContact: optionalText(300, false).optional(),
+  privacyController: optionalText(500, true).optional(),
   // Club mail template (B15).
   senderName: optionalText(80, false).optional(),
   signature: optionalText(1000, true).optional(),
@@ -122,17 +128,19 @@ clubSettingsRoutes.patch(
     const clubId = c.get("clubId");
     const changes = Object.fromEntries(Object.entries(c.req.valid("json")).filter(([, v]) => v !== undefined));
     const touchesMail = MAIL_FIELDS.some((f) => f in changes);
-    const touchesOther = Object.keys(changes).some((k) => !(MAIL_FIELDS as readonly string[]).includes(k));
-    // Deny by default: members:write for the club parameters (also for an empty body), announcements:write for the mail template.
-    if ((touchesOther || !touchesMail) && !hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+    const touchesPrivacy = PRIVACY_FIELDS.some((f) => f in changes);
+    const touchesOther = Object.keys(changes).some((k) => !(MAIL_FIELDS as readonly string[]).includes(k) && !(PRIVACY_FIELDS as readonly string[]).includes(k));
+    // Deny by default: members:write for the club parameters (also for an empty body), announcements:write for the mail template, privacy:manage for the privacy fields.
+    if ((touchesOther || (!touchesMail && !touchesPrivacy)) && !hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
     if (touchesMail && !hasClubPermission(c.get("clubRoleTypes"), "announcements:write")) throw new ForbiddenError("Missing announcements:write permission");
+    if (touchesPrivacy && !hasClubPermission(c.get("clubRoleTypes"), "privacy:manage")) throw new ForbiddenError("Missing privacy:manage permission");
 
     await db.transaction(async (tx) => {
       await tx
         .insert(clubSettings)
         .values({ clubId, ...changes })
         .onConflictDoUpdate({ target: clubSettings.clubId, set: { ...changes, updatedAt: new Date() } });
-      await tx.insert(auditLog).values({ eventType: "club_settings.update", subjectId: clubId, payload: { clubId, changedFields: Object.keys(changes), changedBy: c.get("membership").id } });
+      await writeAudit(tx, { eventType: "club_settings.update", subjectId: clubId, payload: { clubId, changedFields: Object.keys(changes), changedBy: c.get("membership").id } });
     });
 
     return c.json({ data: await loadClubSettings(db, clubId) });

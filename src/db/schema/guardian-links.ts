@@ -1,5 +1,5 @@
-import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, uuid, uniqueIndex, index } from "drizzle-orm/pg-core";
+import { relations, sql } from "drizzle-orm";
+import { boolean, date, index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 import { member } from "../../auth/auth-schema.js";
 import { clubMembers } from "./club-members.js";
@@ -26,6 +26,16 @@ export const guardianLinks = pgTable(
     wardClubMemberId: uuid("ward_club_member_id")
       .notNull()
       .references(() => clubMembers.id, { onDelete: "cascade" }),
+    // Wave 10 B1: what the guardian may do for the ward. Valid from/until are checked at READ time (no cron dependency).
+    relationship: text("relationship"),
+    hasCustody: boolean("has_custody").notNull().default(true),
+    canConsent: boolean("can_consent").notNull().default(true),
+    canReportAbsence: boolean("can_report_absence").notNull().default(true),
+    validFrom: date("valid_from", { mode: "string" }).notNull().default(sql`CURRENT_DATE`),
+    validUntil: date("valid_until", { mode: "string" }),
+    // The board confirms a link; NULL = not yet confirmed (the link then grants nothing).
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+    confirmedBy: text("confirmed_by").references(() => member.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

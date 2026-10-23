@@ -1,13 +1,12 @@
 import { createHash } from "node:crypto";
 
-import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, lte, sql } from "drizzle-orm";
 
 import { clubApplications, type ClubApplicationRow } from "../db/schema/club-applications.js";
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMembers, clubMemberStatusHistory, type ClubMemberRow } from "../db/schema/club-members.js";
 import { forms, formSubmissionFiles, formSubmissions, formVersions, memberFieldDefinitions, type FormRow, type FormSubmissionRow, type FormVersionRow } from "../db/schema/forms.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { accountLinkLockKey, type DbExecutor } from "./club-members.js";
@@ -16,6 +15,10 @@ import { ConflictError, isUniqueViolation, NotFoundError } from "./errors.js";
 import { MASTER_TARGETS, planAcceptance } from "./form-acceptance.js";
 import type { FormField } from "./form-schema.js";
 import { markMediaDeleted, reassignMediaOwner } from "./media.js";
+import { writeAudit } from "./audit.js";
+import { consentAgeLimitOf, isUnderConsentAge, recordConsent } from "./consent.js";
+import { latestPublishedNotice } from "./privacy-notice.js";
+import { consentPurposes, consentTexts } from "../db/schema/privacy.js";
 
 /**
  * Link between an application (`club_applications`) and its form submission, and the acceptance step (Wave 8 B6).
@@ -40,12 +43,24 @@ export const applicationPendingError = (details: { clubId: string; applicationId
  * (only so lists and legacy readers keep working; the answers stay the source of truth). Must run in the transaction
  * that moved the submission to `submitted`.
  */
-export async function createApplicationForSubmission(tx: DbExecutor, sub: FormSubmissionRow, fields: readonly FormField[]): Promise<ClubApplicationRow> {
+export async function createApplicationForSubmission(tx: DbExecutor, sub: FormSubmissionRow, fields: readonly FormField[], opts: { privacyNoticeAcknowledged?: boolean } = {}): Promise<ClubApplicationRow> {
+  // The submitter is only gone after the account was deleted, which also ends the open submission (see eraseAccountMemberships).
+  if (!sub.submittedByUserId) throw new ConflictError("The applicant account no longer exists");
   const plan = planAcceptance(fields, sub.answers);
+  // Wave 10 B11: the applicant took note of the club's current privacy notice. Information only: without it the application is filed all the same.
+  const notice = opts.privacyNoticeAcknowledged === true ? await latestPublishedNotice(sub.clubId, tx) : null;
   try {
     const [row] = await tx
       .insert(clubApplications)
-      .values({ userId: sub.submittedByUserId, clubId: sub.clubId, category: plan.categoryKey ?? "aktiv", birthDate: plan.master.birthDate ?? null, formSubmissionId: sub.id, onBehalfOf: sub.onBehalfOf === "guardian" ? "guardian" : "self" })
+      .values({
+        userId: sub.submittedByUserId,
+        clubId: sub.clubId,
+        category: plan.categoryKey ?? "aktiv",
+        birthDate: plan.master.birthDate ?? null,
+        formSubmissionId: sub.id,
+        onBehalfOf: sub.onBehalfOf === "guardian" ? "guardian" : "self",
+        ...(notice ? { privacyNoticeVersionId: notice.id, privacyNoticeAcknowledgedAt: new Date() } : {}),
+      })
       .returning();
     return row!;
   } catch (err) {
@@ -174,9 +189,11 @@ export async function applyAcceptance(
     mapping.customFields = changes.length;
     if (changes.length > 0) {
       // Same trail as a board write: definition ids only, never values.
-      await tx.insert(auditLog).values({ eventType: "member_field.write", subjectId: clubMemberId, payload: { clubId, clubMemberId, fieldIds: changes.map((x) => x.fieldId), changedBy: decidedBy, via: "application" } });
+      await writeAudit(tx, { eventType: "member_field.write", subjectId: clubMemberId, payload: { clubId, clubMemberId, fieldIds: changes.map((x) => x.fieldId), changedBy: decidedBy, via: "application" } });
     }
   }
+
+  await recordFormConsents(tx, { clubId, context, clubMemberId, mapping });
 
   const now = new Date();
   await tx
@@ -185,6 +202,62 @@ export async function applyAcceptance(
     .where(eq(formSubmissions.id, sub.id));
 
   return { clubMember: clubMember!, mapping, purge };
+}
+
+/**
+ * The form builder's consent block (Wave 10 B3): every ticked consent field with a `purposeKey` becomes a consent event of
+ * that club purpose through the SAME service function as the consent routes (`recordConsent`). A guardian's child
+ * application records `guardian`, an own application `self`; the event is dated with the submission. Voluntary: a purpose
+ * that is unknown, inactive or without a published text is skipped (reported in the mapping), never an error for the acceptance.
+ */
+async function recordFormConsents(tx: DbExecutor, input: { clubId: string; context: DecisionContext; clubMemberId: string; mapping: MappingReport }): Promise<void> {
+  const { clubId, context, clubMemberId, mapping } = input;
+  const answers = (context.sub.answers ?? {}) as Record<string, unknown>;
+  const [person] = await tx.select({ birthDate: clubMembers.birthDate }).from(clubMembers).where(eq(clubMembers.id, clubMemberId));
+  const fields = (context.version.fields as FormField[]).filter((f) => f.type === "consent" && f.purposeKey !== undefined && Object.hasOwn(answers, f.key) && answers[f.key] === true);
+  for (const field of fields) {
+    const [purpose] = await tx.select().from(consentPurposes).where(and(eq(consentPurposes.clubId, clubId), eq(consentPurposes.key, field.purposeKey!)));
+    if (!purpose) {
+      mapping.skipped.push({ fieldKey: field.key, reason: "consent_purpose_unknown" });
+      continue;
+    }
+    // The same decision as the consent routes (`authorize`): a minor cannot consent alone, a guardian only decides for a minor.
+    const minor = isUnderConsentAge(person?.birthDate ?? null, await consentAgeLimitOf(clubId, purpose, tx));
+    const guardian = context.sub.onBehalfOf === "guardian";
+    if (guardian !== minor) {
+      mapping.skipped.push({ fieldKey: field.key, reason: guardian ? "consent_not_for_guardian" : "consent_requires_guardian" });
+      continue;
+    }
+    // The applicant saw the text that was published when they submitted; if it changed since, the person is asked again.
+    const seenAt = context.sub.submittedAt ?? new Date();
+    const [seen] = await tx
+      .select({ id: consentTexts.id })
+      .from(consentTexts)
+      .where(and(eq(consentTexts.purposeId, purpose.id), isNotNull(consentTexts.publishedAt), lte(consentTexts.publishedAt, seenAt)))
+      .orderBy(desc(consentTexts.version))
+      .limit(1);
+    if (!seen) {
+      mapping.skipped.push({ fieldKey: field.key, reason: "consent_unavailable" });
+      continue;
+    }
+    try {
+      await recordConsent(tx, {
+        clubId,
+        clubMemberId,
+        purposeId: purpose.id,
+        action: "granted",
+        givenBy: guardian ? "guardian" : "self",
+        recordedByUserId: context.sub.submittedByUserId,
+        textVersionId: seen.id,
+        via: "application",
+        ...(context.sub.submittedAt ? { at: context.sub.submittedAt } : {}),
+      });
+    } catch (err) {
+      if (!(err instanceof ConflictError) && !(err instanceof NotFoundError)) throw err;
+      const outdated = err instanceof ConflictError && (err.details as { code?: string } | undefined)?.code === "consent_text_outdated";
+      mapping.skipped.push({ fieldKey: field.key, reason: outdated ? "consent_text_outdated" : "consent_unavailable" });
+    }
+  }
 }
 
 /** The board rejected the application: the submission keeps its answers (record), its files stay for the retention window. */
@@ -207,7 +280,7 @@ export interface ConsentEvidence {
   /** Hash scheme of `textSha256` (see `consentTextSha256`); absent in older audit entries = scheme 1. */
   textHashScheme: number;
   /** User id of the person who gave the consent (the guardian for a child application). */
-  consentedBy: string;
+  consentedBy: string | null;
   onBehalfOf: string;
   /** ISO time the application was submitted (= when the consent was given); null for a record without it. */
   consentedAt: string | null;

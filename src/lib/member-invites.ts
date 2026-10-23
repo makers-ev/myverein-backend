@@ -11,7 +11,6 @@ import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { auth } from "../auth/auth.js";
 import { member, session, user } from "../auth/auth-schema.js";
 import { db, pool } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubMemberInvites, type ClubMemberInviteRow } from "../db/schema/club-member-invites.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { departments } from "../db/schema/departments.js";
@@ -40,6 +39,7 @@ import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError } from 
 import { inviteLinkContext } from "./invite-context.js";
 import { logger } from "./logger.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "./member-lifecycle.js";
+import { writeAudit } from "./audit.js";
 
 /** Invitation validity in days (`MEMBER_INVITE_TTL_DAYS`, default 14, clamped to 1-60). */
 export function inviteTtlDays(): number {
@@ -82,7 +82,7 @@ export async function createInvite(clubId: string, clubMemberId: string, email: 
       .insert(clubMemberInvites)
       .values({ clubMemberId: row.id, email, tokenHash: hashInviteToken(token), expiresAt: new Date(Date.now() + inviteTtlDays() * 86_400_000), createdBy })
       .returning();
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.invite",
       subjectId: row.id,
       // No e-mail address in the audit log.
@@ -235,7 +235,7 @@ async function acceptClaimed(invite: ClubMemberInviteRow, row: ClubMemberRow, ac
         reason: "Konto verknüpft (Einladung)",
         changedBy: created.id,
       });
-      await tx.insert(auditLog).values({
+      await writeAudit(tx, {
         eventType: "club_member.invite_accept",
         subjectId: locked.id,
         payload: { clubId, inviteId: invite.id, memberId: created.id, userId: account.id },
@@ -336,11 +336,11 @@ async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberR
       await tx.update(clubApplications).set({ clubMemberId: invited.id }).where(eq(clubApplications.clubMemberId, own.id));
       await tx.update(formSubmissions).set({ subjectClubMemberId: invited.id }).where(eq(formSubmissions.subjectClubMemberId, own.id));
       await tx.update(memberFieldValues).set({ clubMemberId: invited.id }).where(eq(memberFieldValues.clubMemberId, own.id));
-      await tx.insert(auditLog).values({
+      await writeAudit(tx, {
         eventType: "club_member.merge",
         subjectId: invited.id,
         // Ids only: the retired row is gone afterwards, this is the trace.
-        payload: { clubId, keptClubMemberId: invited.id, retiredClubMemberId: own.id, memberId: existing.id, userId: account.id, inviteId: invite.id, ...(ownNumberDiscarded ? { note: "own number discarded" } : {}) },
+        payload: { clubId, keptClubMemberId: invited.id, retiredClubMemberId: own.id, memberId: existing.id, userId: account.id, inviteId: invite.id, ...(ownNumberDiscarded ? { ownNumberDiscarded: true } : {}) },
       });
       await tx.delete(clubMembers).where(eq(clubMembers.id, own.id));
     }
@@ -361,7 +361,7 @@ async function mergeIntoInvitedRow(invite: ClubMemberInviteRow, row: ClubMemberR
       reason: own ? "merged" : "Konto verknüpft (Einladung)",
       changedBy: existing.id,
     });
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.invite_accept",
       subjectId: invited.id,
       payload: { clubId, inviteId: invite.id, memberId: existing.id, userId: account.id, merged: Boolean(own) },
@@ -510,7 +510,7 @@ export async function unlinkAccount(clubId: string, clubMemberId: string, actorM
       reason: "Konto-Verknüpfung getrennt",
       changedBy: actorMemberId,
     });
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.unlink",
       subjectId: row.id,
       payload: { clubId, accountMemberId: account.id, userId: account.userId, changedBy: actorMemberId, forced: force, ...counts },

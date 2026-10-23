@@ -601,7 +601,7 @@ describe("account linking by invitation (B4)", () => {
       expect((await stored(t.clubMemberId)).memberNumber).toBe("MANUELL-1");
       const audit = await db.select().from(auditLog).where(eq(auditLog.subjectId, t.clubMemberId));
       const merge = audit.find((a) => a.eventType === "club_member.merge")!;
-      expect(JSON.stringify(merge.payload)).toContain("own number discarded");
+      expect(merge.payload).toMatchObject({ ownNumberDiscarded: true });
       expect(JSON.stringify(merge.payload)).not.toContain(`${slugAbbr}-9001`);
 
       const manual = await join("accept-merge-manual");

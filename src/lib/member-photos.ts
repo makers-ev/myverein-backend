@@ -1,13 +1,14 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers, type ClubMemberRow } from "../db/schema/club-members.js";
-import { guardianLinks } from "../db/schema/guardian-links.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { NotFoundError } from "./errors.js";
 import { discardStoredFile, IMAGE_TYPES, MAX_PHOTO_BYTES, markMediaDeleted, purgeMediaFile, signedMediaUrls, storeUpload } from "./media.js";
 import { ageOn, todayBerlin } from "./member-lifecycle.js";
+import { writeAudit } from "./audit.js";
+import { levelAllows, levelsFor, levelsOf, type Viewer } from "./field-visibility.js";
+import { liveWardIds } from "./guardian-scope.js";
 
 /**
  * Member profile photos (Wave 7 B13) on top of the central media layer.
@@ -31,23 +32,22 @@ export interface PhotoCaller {
   memberId: string;
   canReadSensitive: boolean;
   canWrite?: boolean;
+  /** Wave 10 B12: set for club members (not guests); decides whether the photo level the person chose lets them see it. */
+  viewer?: Viewer;
 }
 
-/** Ids of the given club members that the caller is a linked guardian of. */
+/** Ids of the given club members that the caller is a (live, confirmed) guardian of -- see `guardianScope`. */
 export async function guardedWardIds(callerMemberId: string, clubMemberIds: string[]): Promise<Set<string>> {
-  if (clubMemberIds.length === 0) return new Set();
-  const links = await db
-    .select({ id: guardianLinks.wardClubMemberId })
-    .from(guardianLinks)
-    .where(and(eq(guardianLinks.guardianMemberId, callerMemberId), inArray(guardianLinks.wardClubMemberId, clubMemberIds)));
-  return new Set(links.map((l) => l.id));
+  return liveWardIds(callerMemberId, clubMemberIds);
 }
 
 /** May `caller` see the photo of `row`? (own / members:write / members:read_sensitive / guardian of the ward) */
 export async function canSeeMemberPhoto(row: ClubMemberRow, caller: PhotoCaller): Promise<boolean> {
   if (row.memberId !== null && row.memberId === caller.memberId) return true;
   if (caller.canWrite || caller.canReadSensitive) return true;
-  return (await guardedWardIds(caller.memberId, [row.id])).has(row.id);
+  if ((await guardedWardIds(caller.memberId, [row.id])).has(row.id)) return true;
+  // The person (or their guardian) opened the photo to trainers / members.
+  return caller.viewer !== undefined && levelAllows((await levelsFor(row.id)).photo, caller.viewer);
 }
 
 /**
@@ -67,7 +67,8 @@ export async function memberPhotoUrls(
   const open = caller.canWrite || caller.canReadSensitive ? withPhoto : withPhoto.filter(alreadyVisible);
   const hidden = withPhoto.filter((r) => !open.includes(r));
   const wards = hidden.length > 0 ? await guardedWardIds(caller.memberId, hidden.map((r) => r.id)) : new Set<string>();
-  const visible = [...open, ...hidden.filter((r) => wards.has(r.id))];
+  const shared = hidden.length > 0 && caller.viewer !== undefined ? await levelsOf(hidden.map((r) => r.id)) : new Map();
+  const visible = [...open, ...hidden.filter((r) => wards.has(r.id) || levelAllows(shared.get(r.id)?.photo ?? "nur_vorstand", caller.viewer))];
 
   const urls = await signedMediaUrls(clubId, visible.map((r) => r.photoKey), "club_member");
   for (const r of visible) {
@@ -122,7 +123,7 @@ export async function replaceMemberPhoto(input: { row: ClubMemberRow; file: File
       newKey = media.storageKey;
       const [saved] = await tx.update(clubMembers).set({ photoKey: media.storageKey, updatedAt: new Date() }).where(eq(clubMembers.id, row.id)).returning();
       if (oldKey) oldRemoved = await markMediaDeleted(oldKey, tx, row.clubId);
-      await tx.insert(auditLog).values({ eventType: "club_member.photo_set", subjectId: row.id, payload: { clubId: row.clubId, changedBy: input.changedBy, replaced: oldKey !== null } });
+      await writeAudit(tx, { eventType: "club_member.photo_set", subjectId: row.id, payload: { clubId: row.clubId, changedBy: input.changedBy, replaced: oldKey !== null } });
       return saved!;
     });
     if (oldKey && oldRemoved) await purgeMediaFile(oldKey);
@@ -142,7 +143,7 @@ export async function removeMemberPhoto(input: { row: ClubMemberRow; changedBy: 
     if (!locked || !locked.photoKey) return;
     await tx.update(clubMembers).set({ photoKey: null, updatedAt: new Date() }).where(eq(clubMembers.id, row.id));
     if (await markMediaDeleted(locked.photoKey, tx, row.clubId)) removedKey = locked.photoKey;
-    await tx.insert(auditLog).values({ eventType: "club_member.photo_remove", subjectId: row.id, payload: { clubId: row.clubId, changedBy: input.changedBy } });
+    await writeAudit(tx, { eventType: "club_member.photo_remove", subjectId: row.id, payload: { clubId: row.clubId, changedBy: input.changedBy } });
   });
   if (removedKey) await purgeMediaFile(removedKey);
 }

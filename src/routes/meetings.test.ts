@@ -655,7 +655,10 @@ describe("meetings routes", () => {
       expect(body.data.correctedAt).toBeTruthy();
 
       const audit = await db.query.auditLog.findFirst({ where: (a, { and, eq }) => and(eq(a.eventType, "meeting_resolution.correct"), eq(a.subjectId, resId)) });
-      expect((audit!.payload as { before: { result: string; votesFor: number } }).before).toMatchObject({ result: "abgelehnt", votesFor: 5 });
+      const payload = audit!.payload as Record<string, unknown> & { changedFields: string[] };
+      expect(payload.changedFields).toEqual(expect.arrayContaining(["votesFor"]));
+      expect(JSON.stringify(payload)).not.toContain("Zaehlfehler");
+      expect(payload).not.toHaveProperty("before");
     });
   });
 

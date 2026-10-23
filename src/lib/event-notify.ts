@@ -1,7 +1,6 @@
 import { and, eq, inArray } from "drizzle-orm";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import type { AnnouncementAudience } from "../db/schema/communication.js";
@@ -16,6 +15,7 @@ import type { JobContext } from "./jobs/registry.js";
 import { logger } from "./logger.js";
 import { notify, notifySafely } from "./notify/dispatcher.js";
 import { tr, type MailLanguage } from "./notify/i18n.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * Notifications about changed or cancelled events and meetings (Wave 9 B10). The route detects an essential change
@@ -161,7 +161,7 @@ export async function scheduleEventChanged(
 ): Promise<"queued" | "suppressed" | "no_audience" | "failed"> {
   try {
     if (options.suppressed) {
-      await db.insert(auditLog).values({
+      await writeAudit(db, {
         eventType: `${payload.kind}.notify_suppressed`,
         subjectId: payload.refId,
         payload: { clubId: payload.clubId, cancelled: payload.cancelled, actor: options.actor },

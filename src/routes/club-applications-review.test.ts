@@ -57,7 +57,7 @@ const FIELDS = [
   { key: "attest", type: "file", label: "Attest", sensitive: true },
   { key: "zeugnis", type: "file", label: "Zeugnis" },
   { key: "privacy_notice", type: "info", infoKind: "privacy_notice", label: "Datenschutz" },
-  { key: "privacy_consent", type: "consent", label: "Ich willige ein.", required: true },
+  { key: "privacy_consent", type: "consent", label: "Ich willige ein.", required: false },
 ];
 const answersOf = (over: Record<string, unknown> = {}) => ({ first_name: "Anna", last_name: "Review", category: "passiv", birth_date: "1990-04-02", email: "anna.review@example.com", shirt: "m", health: SECRET, note: "Hallo", privacy_consent: true, ...over });
 

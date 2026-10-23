@@ -45,6 +45,12 @@ import { MAX_PHOTO_BYTES, streamMedia } from "../lib/media.js";
 import { buildCsv, importMaxBytes } from "../lib/member-csv.js";
 import { analyzeImport, createImportToken, IMPORT_FIELDS, IMPORT_TEMPLATE_HEADERS, importFingerprint, importTokenDuplicates, importTokenId, verifyImportToken } from "../lib/member-import.js";
 import { nextMemberNumber } from "../lib/member-number.js";
+import { latestPublishedNotice } from "../lib/privacy-notice.js";
+import { memberConsentRoutes } from "./member-consents.js";
+import { memberPrivacyRoutes } from "./member-privacy.js";
+import { memberVisibilityRoutes } from "./member-visibility.js";
+import { levelAllows, levelsOf, type FieldLevels } from "../lib/field-visibility.js";
+import { liveLinkOf } from "../lib/guardian-scope.js";
 import { memberCustomFieldRoutes } from "./club-member-custom-fields.js";
 import { applicationPendingError } from "../lib/form-applications.js";
 import type { FormField } from "../lib/form-schema.js";
@@ -57,6 +63,7 @@ import { listDefinitions, MAX_CUSTOM_FIELDS_PER_CLUB } from "../lib/custom-field
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 export const clubMemberRoutes = new Hono<ClubEnv>();
 
@@ -103,7 +110,10 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: PhotoCaller, forc
       .orderBy(asc(departments.name), asc(clubMemberDepartments.since)),
   ]);
 
-  // Signed photo URLs, only for rows the caller may see a photo of (own / members:write / read_sensitive / guardian).
+  // Phone / e-mail / address the person opened for the caller's group (B12); default and fallback: nothing.
+  const shared = caller.viewer !== undefined && !caller.canReadSensitive && !forceSensitive ? await levelsOf(rows.filter((r) => r.memberId === null || r.memberId !== caller.memberId).map((r) => r.id)) : new Map<string, FieldLevels>();
+
+  // Signed photo URLs, only for rows the caller may see a photo of (own / members:write / read_sensitive / guardian / opened).
   const photoUrls = await memberPhotoUrls(rows[0]!.clubId, rows, caller, (row) => forceSensitive || (row.memberId !== null && row.memberId === caller.memberId));
 
   const accountById = new Map(accountRows.map((a) => [a.member.id, a]));
@@ -143,6 +153,13 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: PhotoCaller, forc
       roles: (account ? (rolesByMember.get(account.member.id) ?? []) : []).map((r) => ({ id: r.id, roleType: r.roleType, departmentId: r.departmentId, termEndsAt: r.termEndsAt })),
       departments: departmentsByMember.get(row.id) ?? [],
       photoUrl: photoUrls.get(row.id) ?? null,
+      ...(!sensitive && shared.has(row.id)
+        ? {
+            ...(levelAllows(shared.get(row.id)!.phone, caller.viewer) ? { phone: row.phone } : {}),
+            ...(levelAllows(shared.get(row.id)!.email, caller.viewer) ? { email: account?.email ?? null, contactEmail: row.contactEmail } : {}),
+            ...(levelAllows(shared.get(row.id)!.address, caller.viewer) ? { street: row.street, postalCode: row.postalCode, city: row.city } : {}),
+          }
+        : {}),
       ...(sensitive
         ? {
             email: account?.email ?? null,
@@ -170,11 +187,31 @@ async function shapeOne(row: ClubMemberRow, caller: PhotoCaller, forceSensitive 
   return (await shapeClubMembers([row], caller, forceSensitive))[0]!;
 }
 
-function callerOf(c: { get(k: "membership"): { id: string }; get(k: "clubRoleTypes"): string[] }) {
+/** Master data fields that only `members:read_sensitive` (or the person themself) receives in a member response. */
+const SENSITIVE_MEMBER_FIELDS = ["email", "contactEmail", "memberNumber", "firstName", "lastName", "birthDate", "street", "postalCode", "city", "phone", "emergencyContactName", "emergencyContactPhone"];
+
+/**
+ * Read audit (Wave 10 B2): ONE aggregated entry per request when sensitive master data of OTHER people was delivered
+ * (a list page counts once, not per row). Own data and responses without sensitive fields write nothing.
+ */
+async function auditSensitiveRead(c: Context<ClubEnv>, scope: "list" | "detail", rows: ShapedMember[]): Promise<void> {
+  const others = rows.filter((r) => "birthDate" in r && r.memberId !== c.get("membership").id);
+  if (others.length === 0) return;
+  await writeAudit(db, {
+    eventType: "club_member.sensitive_read",
+    subjectId: scope === "detail" ? others[0]!.id : null,
+    payload: { clubId: c.get("clubId"), scope, count: others.length, fields: SENSITIVE_MEMBER_FIELDS },
+  });
+}
+
+function callerOf(c: { get(k: "membership"): { id: string; role: string }; get(k: "clubRoleTypes"): string[] }) {
+  const roleTypes = c.get("clubRoleTypes");
   return {
     memberId: c.get("membership").id,
-    canReadSensitive: hasClubPermission(c.get("clubRoleTypes"), "members:read_sensitive"),
-    canWrite: hasClubPermission(c.get("clubRoleTypes"), "members:write"),
+    canReadSensitive: hasClubPermission(roleTypes, "members:read_sensitive"),
+    canWrite: hasClubPermission(roleTypes, "members:write"),
+    // Wave 10 B12: what the person opened for trainers / members (phone, e-mail, address, photo). Guests (guardians) are neither.
+    ...(c.get("membership").role === "guest" ? {} : { viewer: roleTypes.includes("trainer") || roleTypes.includes("abteilungsleitung") ? ("trainer" as const) : ("member" as const) }),
   };
 }
 
@@ -270,6 +307,8 @@ const applySchema = z
     submissionId: z.uuid().optional(),
     // 'guardian': a parent applies for a child (Wave 8 B8); needs answers or a submissionId, never the legacy shape.
     onBehalfOf: z.enum(["self", "guardian"]).optional(),
+    // Wave 10 B11: the applicant took note of the club's privacy notice (stamped on the application; information, never required).
+    privacyNoticeAcknowledged: z.boolean().optional(),
   })
   .refine((body) => body.clubId ?? body.clubSlug, { message: "clubId or clubSlug is required" });
 
@@ -308,9 +347,10 @@ clubMemberRoutes.post(
         submissionId: body.submissionId,
         onBehalfOf: body.onBehalfOf,
         emailVerified: currentUser.emailVerified === true,
+        privacyNoticeAcknowledged: body.privacyNoticeAcknowledged === true,
       });
       if (filed.created) {
-        await db.insert(auditLog).values({
+        await writeAudit(db, {
           eventType: "club_member.apply",
           subjectId: filed.application.id,
           payload: { clubId, userId: currentUser.id, formSubmissionId: filed.submission.id, formVersionId: filed.submission.formVersionId, onBehalfOf: filed.submission.onBehalfOf },
@@ -340,7 +380,11 @@ clubMemberRoutes.post(
         await assertMayApply(tx, clubId, currentUser.id);
         // Only categories an applicant may choose (like in the form), so "ehrenmitglied" cannot be self-assigned.
         if (!(await applicantCategories(clubId, tx)).some((k) => k.key === body.category)) throw new ValidationError("This category cannot be chosen when applying", { details: { fields: { category: "not_an_option" } } });
-        const [row] = await tx.insert(clubApplications).values({ userId: currentUser.id, clubId, category: body.category, birthDate: body.birthDate }).returning();
+        const notice = body.privacyNoticeAcknowledged === true ? await latestPublishedNotice(clubId, tx) : null;
+        const [row] = await tx
+          .insert(clubApplications)
+          .values({ userId: currentUser.id, clubId, category: body.category, birthDate: body.birthDate, ...(notice ? { privacyNoticeVersionId: notice.id, privacyNoticeAcknowledgedAt: new Date() } : {}) })
+          .returning();
         return row!;
       });
     } catch (err) {
@@ -352,7 +396,7 @@ clubMemberRoutes.post(
       throw err;
     }
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "club_member.apply",
       subjectId: application.id,
       payload: { clubId, userId: currentUser.id, category: body.category, legacy: true },
@@ -465,7 +509,7 @@ clubMemberRoutes.patch("/me", zValidator("json", updateSelfSchema, validationHoo
       .where(eq(clubMembers.id, locked.id))
       .returning();
     if (changedFields.length > 0) {
-      await tx.insert(auditLog).values({ eventType: "club_member.update_self", subjectId: locked.id, payload: { clubId, changedFields } });
+      await writeAudit(tx, { eventType: "club_member.update_self", subjectId: locked.id, payload: { clubId, changedFields } });
     }
     return row!;
   });
@@ -680,6 +724,7 @@ clubMemberRoutes.get("/", zValidator("query", listQuerySchema, validationHook), 
     .offset((query.page - 1) * query.pageSize);
 
   const data = await shapeClubMembers(pageRows.map((r) => r.row), caller, false, today);
+  await auditSensitiveRead(c, "list", data);
   return c.json({ data, page: query.page, pageSize: query.pageSize, total: totalRow?.n ?? 0 });
 });
 
@@ -736,7 +781,7 @@ clubMemberRoutes.post("/", zValidator("json", createMemberSchema, validationHook
       reason: "created",
       changedBy: actor.id,
     });
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.create",
       subjectId: row!.id,
       payload: { clubId, memberNumber: number, categoryId: category!.id, status: row!.status, createdBy: actor.id },
@@ -872,7 +917,7 @@ clubMemberRoutes.post("/import", csvWriteLimiter, requireMembersWriteMiddleware,
       created.map((m) => ({ clubMemberId: m.id, fromStatus: null, toStatus: m.status, toCategoryId: m.categoryId, effectiveOn: m.joinedAt, reason: "import", changedBy: actor.id })),
     );
     // No personal data in the audit trail: counts, actor and a hash of the file only.
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.import",
       subjectId: clubId,
       payload: { clubId, created: created.length, skippedDuplicates: analysis.summary.duplicates, rows: analysis.summary.rows, importedBy: actor.id, fileSha256: fingerprint, tokenId },
@@ -1042,7 +1087,7 @@ async function exportMembers(c: Context<ClubEnv>) {
   );
 
   // No personal data in the audit trail: who exported which columns/filters and how many rows.
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "club_member.export",
     subjectId: clubId,
     payload: { clubId, exportedBy: c.get("membership").id, columns: columnKeys, ...(customDefs.length > 0 ? { customFieldIds: customDefs.map((d) => d.id), sensitiveCustomFieldIds: customDefs.filter((d) => d.sensitive).map((d) => d.id) } : {}), rows: rows.length, filters: { status: query.status ?? null, category: query.category ?? null, departmentId: query.departmentId ?? null, includeFormer: query.includeFormer === "true" } },
@@ -1185,7 +1230,7 @@ clubMemberRoutes.post("/categories", zValidator("json", createCategorySchema, va
         .insert(memberCategories)
         .values({ clubId, name: body.name, votingRight: body.votingRight ?? true, applicantSelectable: body.applicantSelectable ?? false, ...rules, sortOrder: body.sortOrder ?? Number(last?.n ?? -1) + 1 })
         .returning();
-      await tx.insert(auditLog).values({ eventType: "member_category.create", subjectId: row!.id, payload: { clubId, key, createdBy: actor.id } });
+      await writeAudit(tx, { eventType: "member_category.create", subjectId: row!.id, payload: { clubId, key, createdBy: actor.id } });
       return row!;
     });
   } catch (err) {
@@ -1219,7 +1264,7 @@ clubMemberRoutes.patch("/categories/:id", zValidator("json", updateCategorySchem
     if (!current.archivedAt) validateCategoryRules(all, next);
 
     const [row] = await tx.update(memberCategories).set(changes).where(and(eq(memberCategories.id, current.id), eq(memberCategories.clubId, clubId))).returning();
-    await tx.insert(auditLog).values({ eventType: "member_category.update", subjectId: current.id, payload: { clubId, changedFields: Object.keys(changes), changedBy: actor.id } });
+    await writeAudit(tx, { eventType: "member_category.update", subjectId: current.id, payload: { clubId, changedFields: Object.keys(changes), changedBy: actor.id } });
     return row!;
   });
   const counts = await activeMemberCounts(clubId, todayBerlin());
@@ -1272,7 +1317,7 @@ clubMemberRoutes.delete("/categories/:id", async (c) => {
       .where(and(eq(memberCategories.clubId, clubId), eq(memberCategories.autoTransitionToKey, locked.key)))
       .returning({ id: memberCategories.id });
     const [archived] = await tx.update(memberCategories).set({ archivedAt: new Date() }).where(eq(memberCategories.id, locked.id)).returning();
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "member_category.archive",
       subjectId: locked.id,
       payload: { clubId, key: locked.key, movedMembers: active.length, movedTo: active.length > 0 ? moveToParam : null, clearedAutoTransitions: cleared.length, changedBy: actor.id },
@@ -1357,7 +1402,7 @@ clubMemberRoutes.post("/transition-suggestions/apply", zValidator("json", applyS
       applied.push({ id: row.id, fromCategoryId: s.from.id, toCategoryId: s.to.id });
     }
     if (applied.length > 0) {
-      await tx.insert(auditLog).values({ eventType: "club_member.age_transition", subjectId: clubId, payload: { clubId, count: applied.length, memberIds: applied.map((a) => a.id), changedBy: actor.id } });
+      await writeAudit(tx, { eventType: "club_member.age_transition", subjectId: clubId, payload: { clubId, count: applied.length, memberIds: applied.map((a) => a.id), changedBy: actor.id } });
       // The moved members (and guardians) are told, in the same transaction as the move (switch `notify_age_transition`).
       await enqueueMemberCategoryNotices(tx, clubId, applied.map((a) => ({ id: a.id, fromId: a.fromCategoryId, toId: a.toCategoryId })), today);
     }
@@ -1402,7 +1447,7 @@ clubMemberRoutes.post("/:id/transition", zValidator("json", transitionSchema, va
       // The exit forms of those requests follow (lock order as in the exit routes: member row, request row, submission row).
       for (const r of closed) await closeExitSubmission(tx, r.formSubmissionId, "rejected", actor.id);
     }
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.transition",
       subjectId: target.id,
       // Status/category ids and dates only; the free-text reason stays in club_member_status_history.
@@ -1444,7 +1489,9 @@ clubMemberRoutes.get("/:id/history", async (c) => {
 clubMemberRoutes.get("/:id", async (c) => {
   const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
   assertMemberReadable(c, row);
-  return c.json({ data: await shapeOne(row, callerOf(c)) });
+  const data = await shapeOne(row, callerOf(c));
+  await auditSensitiveRead(c, "detail", [data]);
+  return c.json({ data });
 });
 
 const updateMemberSchema = z.object({
@@ -1506,7 +1553,7 @@ clubMemberRoutes.patch("/:id", zValidator("json", updateMemberSchema, validation
         changedBy: actor.id,
       });
     }
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_member.update",
       subjectId: target.id,
       // Field names only -- master data (address, phone, birth date) must not be copied into the audit log.
@@ -1554,7 +1601,7 @@ clubMemberRoutes.post("/:id/departments", zValidator("json", assignDepartmentSch
     throw err;
   }
 
-  await db.insert(auditLog).values({ eventType: "club_member.department_assign", subjectId: target.id, payload: { clubId, departmentId: department.id } });
+  await writeAudit(db, { eventType: "club_member.department_assign", subjectId: target.id, payload: { clubId, departmentId: department.id } });
   return c.json({ data: { id: department.id, name: department.name, since: created!.since, until: created!.until } }, 201);
 });
 
@@ -1577,7 +1624,7 @@ clubMemberRoutes.delete("/:id/departments/:departmentId", async (c) => {
     .returning();
   if (!ended) throw new NotFoundError("Department assignment not found");
 
-  await db.insert(auditLog).values({ eventType: "club_member.department_remove", subjectId: target.id, payload: { clubId, departmentId, until } });
+  await writeAudit(db, { eventType: "club_member.department_remove", subjectId: target.id, payload: { clubId, departmentId, until } });
   return c.body(null, 204);
 });
 
@@ -1614,7 +1661,7 @@ clubMemberRoutes.post("/:id/roles", zValidator("json", assignRoleSchema, validat
     throw err;
   }
 
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "club_role.assign",
     subjectId: memberId,
     payload: { clubId, clubMemberId: row.id, roleType: body.roleType, departmentId: body.departmentId },
@@ -1637,7 +1684,7 @@ clubMemberRoutes.delete("/:id/roles/:roleId", async (c) => {
 
   await db.delete(clubRoles).where(eq(clubRoles.id, roleId));
 
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "club_role.revoke",
     subjectId: memberId,
     payload: { clubId, clubMemberId: row.id, roleId, roleType: existing.roleType },
@@ -1727,7 +1774,7 @@ clubMemberRoutes.post("/:id/invite/resend", inviteLimitPerUser, async (c) => {
   });
   if (!open || target.memberId) throw new NotFoundError("No open invitation");
   const { invite, token } = await createInvite(clubId, target.id, open.email, c.get("membership").id);
-  await db.insert(auditLog).values({ eventType: "club_member.invite_resend", subjectId: target.id, payload: { clubId, inviteId: invite.id, previousInviteId: open.id, resentBy: c.get("membership").id } });
+  await writeAudit(db, { eventType: "club_member.invite_resend", subjectId: target.id, payload: { clubId, inviteId: invite.id, previousInviteId: open.id, resentBy: c.get("membership").id } });
   const emailSent = await sendInviteMail(clubId, target, invite, token, open.email);
   return c.json({ data: { ...shapeInvite(invite), emailSent } }, 201);
 });
@@ -1749,7 +1796,7 @@ clubMemberRoutes.delete("/:id/invite", async (c) => {
   const target = await resolveClubMember(clubId, c.req.param("id"));
   const removed = await db.delete(clubMemberInvites).where(and(eq(clubMemberInvites.clubMemberId, target.id), isNull(clubMemberInvites.acceptedAt))).returning({ id: clubMemberInvites.id });
   if (removed.length === 0) throw new NotFoundError("No open invitation");
-  await db.insert(auditLog).values({ eventType: "club_member.invite_revoke", subjectId: target.id, payload: { clubId, revokedBy: c.get("membership").id } });
+  await writeAudit(db, { eventType: "club_member.invite_revoke", subjectId: target.id, payload: { clubId, revokedBy: c.get("membership").id } });
   return c.body(null, 204);
 });
 
@@ -1767,10 +1814,22 @@ clubMemberRoutes.post("/:id/unlink", zValidator("json", z.object({ force: z.bool
 // MyVerein Backend §6. The ward is a club_members row (may have no account);
 // the guardian must have an account (ADR-003).
 
+const guardianTerms = {
+  relationship: z.union([cleanText(z.string().trim().max(60)), z.null()]).optional().transform((v) => (v === "" ? null : v)),
+  hasCustody: z.boolean().optional(),
+  canConsent: z.boolean().optional(),
+  canReportAbsence: z.boolean().optional(),
+  validFrom: z.iso.date().optional(),
+  validUntil: z.union([z.iso.date(), z.null()]).optional(),
+};
+
 const guardianLinkSchema = z.object({
   // A club_members.id (preferred) or, for older clients, the guardian's Better Auth member.id.
   guardianMemberId: z.string().min(1),
+  ...guardianTerms,
 });
+
+const guardianLinkUpdateSchema = z.object(guardianTerms).refine((v) => Object.keys(v).length > 0, { message: "Nothing to update" });
 
 type GuardianLinkRow = typeof guardianLinks.$inferSelect;
 
@@ -1783,6 +1842,14 @@ function shapeGuardianLink(link: GuardianLinkRow, ward: ClubMemberRow, guardian:
     wardClubMemberId: link.wardClubMemberId,
     // Compatibility: the ward's account id (null for members without an account).
     wardMemberId: ward.memberId,
+    // Wave 10 B4: what the guardian may do; the link grants nothing before `confirmedAt`, outside `validFrom`/`validUntil`, or once the ward is 18.
+    relationship: link.relationship,
+    hasCustody: link.hasCustody,
+    canConsent: link.canConsent,
+    canReportAbsence: link.canReportAbsence,
+    validFrom: link.validFrom,
+    validUntil: link.validUntil,
+    confirmedAt: link.confirmedAt,
     createdAt: link.createdAt,
   };
 }
@@ -1798,9 +1865,11 @@ clubMemberRoutes.get("/:id/guardians", async (c) => {
     .where(eq(guardianLinks.wardClubMemberId, ward.id))
     .orderBy(asc(guardianLinks.createdAt), asc(guardianLinks.id));
   // Names of a child's guardians are personal data: board with members:read_sensitive, or the guardian themself.
-  const isGuardianOfWard = rows.some((r) => r.link.guardianMemberId === caller.memberId);
+  const isGuardianOfWard = (await liveLinkOf(caller.memberId, ward.id)) !== null;
   if (!caller.canReadSensitive && !isGuardianOfWard) throw new ForbiddenError("Missing members:read_sensitive permission");
-  return c.json({ data: rows.map((r) => shapeGuardianLink(r.link, ward, r.guardian)) });
+  // A guardian sees only their own link, never the co-guardians (names and rights of other people).
+  const visible = caller.canReadSensitive ? rows : rows.filter((r) => r.link.guardianMemberId === caller.memberId);
+  return c.json({ data: visible.map((r) => shapeGuardianLink(r.link, ward, r.guardian)) });
 });
 
 clubMemberRoutes.post("/:id/guardians", zValidator("json", guardianLinkSchema, validationHook), async (c) => {
@@ -1814,21 +1883,39 @@ clubMemberRoutes.post("/:id/guardians", zValidator("json", guardianLinkSchema, v
   const guardianAccountId = requireAccount(guardian);
   if (guardian.id === ward.id) throw new ValidationError("A member cannot be their own guardian");
 
+  const body = c.req.valid("json");
+  if (body.validUntil && body.validFrom && body.validUntil < body.validFrom) throw new ValidationError("validUntil must not be before validFrom");
   let created;
   try {
-    [created] = await db.insert(guardianLinks).values({ guardianMemberId: guardianAccountId, wardClubMemberId: ward.id }).returning();
+    created = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(guardianLinks)
+        .values({
+          guardianMemberId: guardianAccountId,
+          wardClubMemberId: ward.id,
+          confirmedAt: new Date(),
+          confirmedBy: c.get("membership").id,
+          ...(body.relationship !== undefined ? { relationship: body.relationship } : {}),
+          ...(body.hasCustody !== undefined ? { hasCustody: body.hasCustody } : {}),
+          ...(body.canConsent !== undefined ? { canConsent: body.canConsent } : {}),
+          ...(body.canReportAbsence !== undefined ? { canReportAbsence: body.canReportAbsence } : {}),
+          ...(body.validFrom !== undefined ? { validFrom: body.validFrom } : {}),
+          ...(body.validUntil !== undefined ? { validUntil: body.validUntil } : {}),
+        })
+        .returning();
+      // An external guest (not a member of the club) becomes a guardian: role `erziehungsberechtigt`, no `mitglied`.
+      if ((await tx.query.member.findFirst({ where: eq(member.id, guardianAccountId), columns: { role: true } }))?.role === "guest") {
+        await tx.insert(clubRoles).values({ memberId: guardianAccountId, roleType: "erziehungsberechtigt" }).onConflictDoNothing();
+      }
+      await writeAudit(tx, { eventType: "guardian_link.create", subjectId: ward.id, payload: { clubId, guardianMemberId: guardianAccountId, decidedBy: c.get("membership").id, via: "board" } });
+      return row!;
+    });
   } catch (err) {
     if (isUniqueViolation(err)) throw new ConflictError("Guardian link already exists");
     throw err;
   }
 
-  await db.insert(auditLog).values({
-    eventType: "guardian_link.create",
-    subjectId: ward.id,
-    payload: { clubId, guardianMemberId: guardianAccountId },
-  });
-
-  return c.json({ data: shapeGuardianLink(created!, ward, guardian) }, 201);
+  return c.json({ data: shapeGuardianLink(created, ward, guardian) }, 201);
 });
 
 clubMemberRoutes.delete("/:id/guardians/:guardianMemberId", async (c) => {
@@ -1839,17 +1926,60 @@ clubMemberRoutes.delete("/:id/guardians/:guardianMemberId", async (c) => {
   const guardian = await resolveClubMember(clubId, c.req.param("guardianMemberId")).catch(() => null);
   if (!guardian?.memberId) throw new NotFoundError("Guardian link not found");
 
-  const [removed] = await db
-    .delete(guardianLinks)
-    .where(and(eq(guardianLinks.wardClubMemberId, ward.id), eq(guardianLinks.guardianMemberId, guardian.memberId)))
-    .returning();
-  if (!removed) throw new NotFoundError("Guardian link not found");
-
-  await db.insert(auditLog).values({
-    eventType: "guardian_link.delete",
-    subjectId: ward.id,
-    payload: { clubId, guardianMemberId: guardian.memberId },
+  const accountId = guardian.memberId;
+  await db.transaction(async (tx) => {
+    const [removed] = await tx
+      .delete(guardianLinks)
+      .where(and(eq(guardianLinks.wardClubMemberId, ward.id), eq(guardianLinks.guardianMemberId, accountId)))
+      .returning();
+    if (!removed) throw new NotFoundError("Guardian link not found");
+    // The last link of an external guest ends the guardian role with it (no stale role without a ward).
+    const remaining = await tx.select({ id: guardianLinks.id }).from(guardianLinks).where(eq(guardianLinks.guardianMemberId, accountId)).limit(1);
+    const account = await tx.query.member.findFirst({ where: eq(member.id, accountId), columns: { role: true } });
+    if (remaining.length === 0 && account?.role === "guest") {
+      await tx.delete(clubRoles).where(and(eq(clubRoles.memberId, accountId), eq(clubRoles.roleType, "erziehungsberechtigt")));
+    }
+    await writeAudit(tx, { eventType: "guardian_link.delete", subjectId: ward.id, payload: { clubId, guardianMemberId: accountId } });
   });
 
   return c.body(null, 204);
 });
+
+clubMemberRoutes.patch("/:id/guardians/:guardianMemberId", zValidator("json", guardianLinkUpdateSchema, validationHook), async (c) => {
+  const clubId = c.get("clubId");
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
+
+  const ward = await resolveClubMember(clubId, c.req.param("id"));
+  const guardian = await resolveClubMember(clubId, c.req.param("guardianMemberId")).catch(() => null);
+  if (!guardian?.memberId) throw new NotFoundError("Guardian link not found");
+  const body = c.req.valid("json");
+
+  const updated = await db.transaction(async (tx) => {
+    const [current] = await tx.select().from(guardianLinks).where(and(eq(guardianLinks.wardClubMemberId, ward.id), eq(guardianLinks.guardianMemberId, guardian.memberId!))).for("update");
+    if (!current) throw new NotFoundError("Guardian link not found");
+    const from = body.validFrom ?? current.validFrom;
+    const until = body.validUntil === undefined ? current.validUntil : body.validUntil;
+    if (until && until < from) throw new ValidationError("validUntil must not be before validFrom");
+    const [row] = await tx
+      .update(guardianLinks)
+      .set({
+        ...(body.relationship !== undefined ? { relationship: body.relationship } : {}),
+        ...(body.hasCustody !== undefined ? { hasCustody: body.hasCustody } : {}),
+        ...(body.canConsent !== undefined ? { canConsent: body.canConsent } : {}),
+        ...(body.canReportAbsence !== undefined ? { canReportAbsence: body.canReportAbsence } : {}),
+        ...(body.validFrom !== undefined ? { validFrom: body.validFrom } : {}),
+        ...(body.validUntil !== undefined ? { validUntil: body.validUntil } : {}),
+      })
+      .where(eq(guardianLinks.id, current.id))
+      .returning();
+    await writeAudit(tx, { eventType: "guardian_link.update", subjectId: ward.id, payload: { clubId, guardianMemberId: guardian.memberId!, changedFields: Object.keys(body) } });
+    return row!;
+  });
+  return c.json({ data: shapeGuardianLink(updated, ward, guardian) });
+});
+
+// Consents of a member (Wave 10 B3): own file, mounted behind the session/club guards above.
+clubMemberRoutes.route("/:id/consents", memberConsentRoutes);
+clubMemberRoutes.route("/", memberPrivacyRoutes);
+// Which of phone / e-mail / address / photo trainers and members may see (Wave 10 B12).
+clubMemberRoutes.route("/:id/visibility", memberVisibilityRoutes);

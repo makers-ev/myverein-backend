@@ -6,7 +6,6 @@ import { z } from "zod";
 import { auth } from "../auth/auth.js";
 import { member, organization, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrations, REGISTRATION_STATUSES, type ClubRegistrationRow } from "../db/schema/club-registrations.js";
 import { ensureDefaultCalendar } from "../lib/calendar-defaults.js";
@@ -26,6 +25,7 @@ import { todayBerlin } from "../lib/member-lifecycle.js";
 import { ensureClubMember } from "../lib/club-members.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { adminGuard, type SessionEnv } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Reviewer side of "Verein gruenden" (Wave 6): platform admins (Better Auth
@@ -184,7 +184,7 @@ adminClubRegistrationRoutes.get("/:id/documents/:docId", async (c) => {
 // --- decisions ---------------------------------------------------------
 
 /** Shared body of request-info / reject: claim pending -> `status` with the reviewer's note. */
-async function decideWithNote(c: { get: (k: "user") => { id: string } }, id: string, status: "needs_info" | "rejected", note: string, eventType: string) {
+async function decideWithNote(c: { get: (k: "user") => { id: string } }, id: string, status: "needs_info" | "rejected", note: string, eventType: "club_registration.request_info" | "club_registration.reject") {
   const reviewer = c.get("user");
   const reg = await loadRegistration(id);
 
@@ -195,7 +195,7 @@ async function decideWithNote(c: { get: (k: "user") => { id: string } }, id: str
       .where(and(eq(clubRegistrations.id, reg.id), eq(clubRegistrations.status, "pending")))
       .returning();
     if (!row) throw new ConflictError("Registration has already been decided or is not pending");
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType,
       subjectId: row.id,
       payload: { userId: row.userId, decidedBy: reviewer.id, note },
@@ -308,7 +308,7 @@ adminClubRegistrationRoutes.post("/:id/approve", async (c) => {
       // Every club starts with its club-wide standard calendar, so events can be created from day one.
       await ensureDefaultCalendar(org.id, { createdBy: reg.userId, source: "club_creation", executor: tx });
 
-      await tx.insert(auditLog).values({
+      await writeAudit(tx, {
         eventType: "club_registration.approve",
         subjectId: reg.id,
         payload: { clubId: org.id, slug: org.slug, userId: reg.userId, memberId: owner.id, clubMemberId: founder.id, decidedBy: reviewer.id, claimedRole: reg.claimedRole, memberNumber },

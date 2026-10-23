@@ -3,7 +3,6 @@ import { and, count, eq, inArray, sql } from "drizzle-orm";
 import { auth } from "../auth/auth.js";
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers, clubMemberStatusHistory } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { formSubmissions } from "../db/schema/forms.js";
@@ -15,6 +14,7 @@ import { ConflictError, ForbiddenError, ValidationError } from "./errors.js";
 import { planAcceptance, type AcceptancePlan } from "./form-acceptance.js";
 import { type FormField } from "./form-schema.js";
 import { ageOn, effectiveStatus, isLeftStatus, todayBerlin } from "./member-lifecycle.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * Application of a parent for a child (Wave 8 B8, `on_behalf_of = 'guardian'`).
@@ -168,9 +168,9 @@ export async function linkGuardian(tx: DbExecutor, input: { clubId: string; guar
   if (guardian.account.role === "guest") {
     await tx.insert(clubRoles).values({ memberId: guardian.account.id, roleType: "erziehungsberechtigt" }).onConflictDoNothing();
   }
-  const inserted = await tx.insert(guardianLinks).values({ guardianMemberId: guardian.account.id, wardClubMemberId: childClubMemberId }).onConflictDoNothing().returning({ id: guardianLinks.id });
+  const inserted = await tx.insert(guardianLinks).values({ guardianMemberId: guardian.account.id, wardClubMemberId: childClubMemberId, confirmedAt: new Date(), confirmedBy: decidedBy }).onConflictDoNothing().returning({ id: guardianLinks.id });
   if (inserted.length > 0) {
-    await tx.insert(auditLog).values({ eventType: "guardian_link.create", subjectId: childClubMemberId, payload: { clubId, guardianMemberId: guardian.account.id, via: "application", decidedBy } });
+    await writeAudit(tx, { eventType: "guardian_link.create", subjectId: childClubMemberId, payload: { clubId, guardianMemberId: guardian.account.id, via: "application", decidedBy } });
   }
   return { linked: inserted.length > 0 };
 }

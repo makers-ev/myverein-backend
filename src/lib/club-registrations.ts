@@ -9,9 +9,9 @@ import {
   type ClubRegistrationDocumentRow,
   type ClubRegistrationRow,
 } from "../db/schema/club-registrations.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { NotFoundError } from "./errors.js";
 import { findMediaByKey, registerLegacyFile, streamSensitiveMedia } from "./media.js";
+import { writeAudit } from "./audit.js";
 
 /** Shared by the applicant API (routes/club-registrations.ts) and the reviewer API (routes/admin-club-registrations.ts). */
 
@@ -149,7 +149,7 @@ export async function documentResponse(c: Context, doc: ClubRegistrationDocument
 
 /** Platform admins reading an applicant's proof documents is sensitive (GDPR): every such access is audit-logged. */
 export async function recordAdminDocumentAccess(adminId: string, registrationId: string, doc: ClubRegistrationDocumentRow): Promise<void> {
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "club_registration.document_access",
     subjectId: registrationId,
     payload: { documentId: doc.id, kind: doc.kind, accessedBy: adminId },

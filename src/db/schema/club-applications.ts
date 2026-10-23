@@ -3,6 +3,7 @@ import { pgTable, text, timestamp, date, uuid, uniqueIndex, index } from "drizzl
 
 import { member, organization, user } from "../../auth/auth-schema.js";
 import { clubMembers } from "./club-members.js";
+import { clubPrivacyNotices } from "./club-privacy-notices.js";
 import { formSubmissions } from "./forms.js";
 
 /**
@@ -38,6 +39,9 @@ export const clubApplications = pgTable(
     formSubmissionId: uuid("form_submission_id").references(() => formSubmissions.id, { onDelete: "set null" }),
     // Set when the application is accepted: the club_members row that was created or reused.
     clubMemberId: uuid("club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
+    // Privacy notice shown to the applicant and when they acknowledged it (Wave 10 B11); NULL for older applications.
+    privacyNoticeVersionId: uuid("privacy_notice_version_id").references(() => clubPrivacyNotices.id, { onDelete: "set null" }),
+    privacyNoticeAcknowledgedAt: timestamp("privacy_notice_acknowledged_at", { withTimezone: true }),
   },
   (table) => [
     uniqueIndex("club_applications_pending_user_club_uidx")

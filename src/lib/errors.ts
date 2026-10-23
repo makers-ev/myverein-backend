@@ -24,7 +24,8 @@ export type ErrorCode =
   | "APPLICATION_PENDING"
   | "QUOTA_EXCEEDED"
   | "FORM_VERSION_OUTDATED"
-  | "RECIPIENT_CONFIRMATION_REQUIRED";
+  | "RECIPIENT_CONFIRMATION_REQUIRED"
+  | "DPA_REQUIRED";
 
 export interface AppErrorOptions {
   cause?: unknown;

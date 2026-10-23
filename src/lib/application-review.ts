@@ -199,7 +199,7 @@ function consentEvidenceOf(sub: FormSubmissionRow, version: FormVersionRow): Con
 
 export interface ApplicationReview {
   /** `birthDate` is null without `members:read_sensitive`. */
-  application: { id: string; status: string; onBehalfOf: string; legacy: boolean; createdAt: Date; decidedAt: Date | null; decidedBy: string | null; clubMemberId: string | null; category: string; birthDate: string | null };
+  application: { id: string; status: string; onBehalfOf: string; legacy: boolean; createdAt: Date; decidedAt: Date | null; decidedBy: string | null; clubMemberId: string | null; category: string; birthDate: string | null; privacyNoticeVersionId: string | null; privacyNoticeAcknowledgedAt: Date | null };
   applicant: { userId: string; name: string; email: string };
   /** The person the application is for. */
   /** `birthDate` and `ageYears` need `members:read_sensitive`; everybody else gets `isMinor` and the `ageBand` only. */
@@ -223,7 +223,7 @@ export interface ApplicationReview {
     path: string | null;
     createdAt: Date;
   }>;
-  consent: (ConsentEvidence & { givenBy: { userId: string; name: string }; role: "self" | "guardian"; fields: Array<{ key: string; label: string; given: boolean }>; privacyNoticeShown: boolean }) | null;
+  consent: (ConsentEvidence & { givenBy: { userId: string | null; name: string }; role: "self" | "guardian"; fields: Array<{ key: string; label: string; given: boolean }>; privacyNoticeShown: boolean }) | null;
   duplicates: DuplicateHint[];
   warnings: ChildWarning[];
   decision: { decidedAt: Date | null; decidedBy: string | null; decisionNote: string | null; internalNote: string | null } | null;
@@ -249,7 +249,7 @@ export async function buildApplicationReview(application: ClubApplicationRow, in
     : [];
 
   const base = {
-    application: { id: application.id, status: application.status, onBehalfOf: application.onBehalfOf, legacy: application.formSubmissionId === null, createdAt: application.createdAt, decidedAt: application.decidedAt, decidedBy: application.decidedBy, clubMemberId: application.clubMemberId, category: application.category, birthDate: application.birthDate },
+    application: { id: application.id, status: application.status, onBehalfOf: application.onBehalfOf, legacy: application.formSubmissionId === null, createdAt: application.createdAt, decidedAt: application.decidedAt, decidedBy: application.decidedBy, clubMemberId: application.clubMemberId, category: application.category, birthDate: application.birthDate, privacyNoticeVersionId: application.privacyNoticeVersionId, privacyNoticeAcknowledgedAt: application.privacyNoticeAcknowledgedAt },
     applicant,
   };
   const pending = application.status === "pending";
@@ -317,7 +317,7 @@ export async function buildApplicationReview(application: ClubApplicationRow, in
     photoFileFieldKeys: new Set(fileRows.filter((r) => r.kind === "image").map((r) => r.file.fieldKey)),
   });
 
-  const [submitter] = await executor.select({ name: user.name }).from(user).where(eq(user.id, sub.submittedByUserId)).limit(1);
+  const [submitter] = sub.submittedByUserId ? await executor.select({ name: user.name }).from(user).where(eq(user.id, sub.submittedByUserId)).limit(1) : [];
   const evidence = consentEvidence({ sub, version }, application.clubMemberId ?? sub.subjectClubMemberId ?? undefined);
   const consentFields = fields.filter((f) => f.type === "consent").map((f) => ({ key: f.key, label: f.label, given: evidence.consentFieldKeys.includes(f.key) }));
 

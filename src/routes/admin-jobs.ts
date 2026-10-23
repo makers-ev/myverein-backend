@@ -2,12 +2,12 @@ import { and, asc, count, desc, eq, inArray, lte, sql } from "drizzle-orm";
 import { Hono } from "hono";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { JOB_STATUSES, jobs, type JobStatus } from "../db/schema/jobs.js";
 import { ConflictError, NotFoundError } from "../lib/errors.js";
 import { isUuid } from "../lib/club-members.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { adminGuard, type SessionEnv } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Platform-admin view of the job queue (Wave 9 A1): counts per status and job type, the oldest due jobs, the dead jobs and
@@ -108,7 +108,7 @@ adminJobRoutes.post("/:id/retry", async (c) => {
       .where(and(eq(jobs.id, id), eq(jobs.status, "dead")))
       .returning({ id: jobs.id, type: jobs.type });
     if (updated) {
-      await tx.insert(auditLog).values({ eventType: "admin.job_retry", subjectId: id, payload: { type: updated.type, actor: c.get("user").id } });
+      await writeAudit(tx, { eventType: "admin.job_retry", subjectId: id, payload: { type: updated.type, actor: c.get("user").id } });
       return updated;
     }
     const [existing] = await tx.select({ status: jobs.status }).from(jobs).where(eq(jobs.id, id));

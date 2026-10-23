@@ -1,10 +1,10 @@
 import { and, eq, inArray, or } from "drizzle-orm";
 
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import { formSubmissionFiles, formSubmissions } from "../db/schema/forms.js";
 import type { DbExecutor } from "./club-members.js";
 import { removeFiles } from "./forms.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * The list-friendly COPIES of answers on `club_applications` (`birth_date`, `category`) are personal data of the person the
@@ -58,7 +58,7 @@ export async function eraseFormDataOfMember(tx: DbExecutor, input: { clubId: str
     purge.push(...(await removeFiles(tx, rows)));
     files += rows.length;
     await tx.update(formSubmissions).set({ answers: {}, decisionNote: null, decisionInternalNote: null, updatedAt: new Date() }).where(eq(formSubmissions.id, id));
-    await tx.insert(auditLog).values({ eventType: "form_submission.erased", subjectId: id, payload: { clubId, clubMemberId, fileCount: rows.length, erasedBy: input.erasedBy, reason: "member_anonymisation" } });
+    await writeAudit(tx, { eventType: "form_submission.erased", subjectId: id, payload: { clubId, clubMemberId, fileCount: rows.length, erasedBy: input.erasedBy, reason: "member_anonymisation" } });
   }
   await scrubApplicationCopies(tx, and(eq(clubApplications.clubId, clubId), eq(clubApplications.clubMemberId, clubMemberId)));
   if (applicationSubmissionIds.length > 0) await scrubApplicationCopies(tx, inArray(clubApplications.formSubmissionId, applicationSubmissionIds));

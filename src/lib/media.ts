@@ -4,7 +4,6 @@ import { and, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Context } from "hono";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import {
   mediaFiles,
   UNATTACHED_OWNER,
@@ -17,6 +16,7 @@ import { MalformedImageError, stripImageMetadata } from "./image-sanitize.js";
 import { logger } from "./logger.js";
 import { buildMediaUrl } from "./media-url.js";
 import { deleteObject, getObject, objectSize, putObject, sanitizeFilename, writeObject } from "./storage.js";
+import { writeAudit } from "./audit.js";
 
 /**
  * Central media security layer (Wave 7 B18). THE only module that touches stored user files: every upload, URL and
@@ -442,7 +442,7 @@ export async function streamMedia(c: Context, row: MediaFileRow): Promise<Respon
  */
 export async function streamSensitiveMedia(c: Context, row: MediaFileRow, access: { accessedBy: string; subjectId?: string; reason?: string }): Promise<Response> {
   if (!row.sensitive) throw new ConflictError("Not a sensitive file");
-  await db.insert(auditLog).values({
+  await writeAudit(db, {
     eventType: "media.sensitive_access",
     subjectId: access.subjectId ?? row.id,
     payload: { mediaId: row.id, ownerType: row.ownerType, ownerId: row.ownerId, accessedBy: access.accessedBy, ...(access.reason ? { reason: access.reason } : {}) },

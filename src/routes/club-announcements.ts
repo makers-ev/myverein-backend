@@ -4,7 +4,6 @@ import { Hono, type Context } from "hono";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { ANNOUNCEMENT_STATUSES, clubAnnouncements, messageDeliveries, type ClubAnnouncementRow } from "../db/schema/communication.js";
 import { assertWithinSendLimits } from "../lib/announcement-limits.js";
@@ -30,6 +29,7 @@ import { EMAIL_JOB_TYPE, type DeliveryContent } from "../lib/notify/types.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Club announcements (Wave 9 B7, ADR-006). Authoring side `/club-announcements` (needs `announcements:write` or
@@ -268,7 +268,7 @@ clubAnnouncementRoutes.patch("/:id", zValidator("json", patchSchema, validationH
         set.expiresAt = new Date();
         set.pinned = false;
         await skipUnsentDeliveries(tx, id);
-        await tx.insert(auditLog).values({ eventType: "club_announcement.withdraw", subjectId: id, payload: { clubId, actor: c.get("user").id } });
+        await writeAudit(tx, { eventType: "club_announcement.withdraw", subjectId: id, payload: { clubId, actor: c.get("user").id } });
       }
     }
     const [done] = await tx.update(clubAnnouncements).set(set).where(eq(clubAnnouncements.id, id)).returning();
@@ -288,7 +288,7 @@ clubAnnouncementRoutes.delete("/:id", async (c) => {
     // The deliveries of a sent announcement are the proof of delivery: withdraw instead of delete.
     if (row.status === "sending" || row.status === "sent") throw new ConflictError("A sent announcement cannot be deleted, withdraw it instead", { code: "CONFLICT" });
     await tx.delete(clubAnnouncements).where(eq(clubAnnouncements.id, id));
-    await tx.insert(auditLog).values({ eventType: "club_announcement.delete", subjectId: id, payload: { clubId: c.get("clubId"), actor: c.get("user").id, status: row.status } });
+    await writeAudit(tx, { eventType: "club_announcement.delete", subjectId: id, payload: { clubId: c.get("clubId"), actor: c.get("user").id, status: row.status } });
   });
   return c.body(null, 204);
 });
@@ -315,7 +315,7 @@ clubAnnouncementRoutes.post("/:id/send", sendLimit, zValidator("json", sendSchem
       if (!row || !isEditable(row)) throw new ConflictError("Only a draft or scheduled announcement can be sent", { code: "CONFLICT" });
       const [done] = await tx.update(clubAnnouncements).set({ status: "scheduled", publishAt: requested, updatedAt: new Date() }).where(eq(clubAnnouncements.id, id)).returning();
       await schedulePublish(done!);
-      await tx.insert(auditLog).values({ eventType: "club_announcement.schedule", subjectId: id, payload: { clubId, actor: c.get("user").id, publishAt: requested.toISOString() } });
+      await writeAudit(tx, { eventType: "club_announcement.schedule", subjectId: id, payload: { clubId, actor: c.get("user").id, publishAt: requested.toISOString() } });
       return done!;
     });
     return c.json({ data: { status: scheduled.status, publishAt: scheduled.publishAt, delivery: null } });
@@ -338,7 +338,7 @@ clubAnnouncementRoutes.post("/:id/cancel", async (c) => {
     if (row.status !== "scheduled") throw new ConflictError("Only a scheduled announcement can be cancelled", { code: "CONFLICT" });
     const [done] = await tx.update(clubAnnouncements).set({ status: "cancelled", updatedAt: new Date() }).where(eq(clubAnnouncements.id, id)).returning();
     await skipUnsentDeliveries(tx, id);
-    await tx.insert(auditLog).values({ eventType: "club_announcement.cancel", subjectId: id, payload: { clubId: c.get("clubId"), actor: c.get("user").id } });
+    await writeAudit(tx, { eventType: "club_announcement.cancel", subjectId: id, payload: { clubId: c.get("clubId"), actor: c.get("user").id } });
     return done!;
   });
   const { authorName } = await loadVisible(c, id);
@@ -401,7 +401,7 @@ clubAnnouncementRoutes.get("/:id/deliveries", zValidator("query", deliveriesQuer
     .limit(query.pageSize)
     .offset((query.page - 1) * query.pageSize);
   // Read state is behavioural data (ADR-006): looking at the individual list leaves a trace.
-  await db.insert(auditLog).values({ eventType: "club_announcement.deliveries_read", subjectId: id, payload: { clubId, actor: c.get("user").id, page: query.page } });
+  await writeAudit(db, { eventType: "club_announcement.deliveries_read", subjectId: id, payload: { clubId, actor: c.get("user").id, page: query.page } });
   c.header("Cache-Control", "private, no-store");
   return c.json({ data: { summary, recipients: rows }, pagination: { page: query.page, pageSize: query.pageSize, total: total?.n ?? 0 } });
 });
@@ -425,7 +425,7 @@ clubAnnouncementRoutes.post("/:id/resend-failed", sendLimit, async (c) => {
     if (failed.length > 0) await tx.update(messageDeliveries).set({ status: "queued", attempts: 0, errorCode: null }).where(inArray(messageDeliveries.id, failed.map((r) => r.id)));
     const stamp = Date.now();
     for (const f of failed) await enqueue({ type: EMAIL_JOB_TYPE, payload: { deliveryId: f.id }, dedupeKey: `${EMAIL_JOB_TYPE}:${f.id}:retry:${stamp}` }, tx);
-    await tx.insert(auditLog).values({ eventType: "club_announcement.resend_failed", subjectId: id, payload: { clubId, actor: c.get("user").id, requeued: failed.length } });
+    await writeAudit(tx, { eventType: "club_announcement.resend_failed", subjectId: id, payload: { clubId, actor: c.get("user").id, requeued: failed.length } });
     return failed.length;
   });
   return c.json({ data: { requeued } });

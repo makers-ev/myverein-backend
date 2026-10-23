@@ -1,7 +1,6 @@
 import { and, eq, exists, inArray, isNull, lt, notExists, or, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import { scrubApplicationCopies } from "./form-retention.js";
 import { formSubmissionFiles, formSubmissions } from "../db/schema/forms.js";
@@ -9,6 +8,7 @@ import { mediaFiles } from "../db/schema/media-files.js";
 import { draftTtlDays, rejectedFileTtlDays, removeFiles } from "./forms.js";
 import { logger } from "./logger.js";
 import { deleteMedia, purgeMediaFile } from "./media.js";
+import { writeAudit } from "./audit.js";
 
 /** An upload registered for a submission whose file row never got committed is orphaned after this long. */
 const ORPHAN_AFTER_MS = 60 * 60 * 1000;
@@ -42,7 +42,7 @@ export async function sweepStaleFormDrafts(now = Date.now(), scope: { userId?: s
       const files = await tx.select().from(formSubmissionFiles).where(eq(formSubmissionFiles.submissionId, id));
       purge.push(...(await removeFiles(tx, files)));
       await tx.delete(formSubmissions).where(eq(formSubmissions.id, id));
-      await tx.insert(auditLog).values({ eventType: "form_submission.draft_swept", subjectId: id, payload: { clubId: locked.clubId, userId: locked.submittedByUserId, fileCount: files.length } });
+      await writeAudit(tx, { eventType: "form_submission.draft_swept", subjectId: id, payload: { clubId: locked.clubId, userId: locked.submittedByUserId, fileCount: files.length } });
       return true;
     });
     if (removed) {
@@ -106,7 +106,7 @@ export async function sweepRejectedFormFiles(now = Date.now(), scope: { clubId?:
         if (rows.length === 0) return;
         purge.push(...(await removeFiles(tx, rows)));
         files += rows.length;
-        await tx.insert(auditLog).values({ eventType: "form_submission.files_expired", subjectId: id, payload: { clubId: locked.clubId, fileCount: rows.length, reason: "rejected_retention" } });
+        await writeAudit(tx, { eventType: "form_submission.files_expired", subjectId: id, payload: { clubId: locked.clubId, fileCount: rows.length, reason: "rejected_retention" } });
       });
       await Promise.all(purge.map((key) => purgeMediaFile(key)));
     } catch (err) {
@@ -151,7 +151,7 @@ export async function sweepRejectedChildAnswers(now = Date.now(), scope: { clubI
         await tx.update(formSubmissions).set({ answers: {}, decisionNote: null, decisionInternalNote: null, updatedAt: new Date() }).where(eq(formSubmissions.id, id));
         // The copies on the application row (birth date, category) go with the answers.
         await scrubApplicationCopies(tx, eq(clubApplications.formSubmissionId, id));
-        await tx.insert(auditLog).values({ eventType: "form_submission.answers_erased", subjectId: id, payload: { clubId: locked.clubId, reason: "rejected_child_retention" } });
+        await writeAudit(tx, { eventType: "form_submission.answers_erased", subjectId: id, payload: { clubId: locked.clubId, reason: "rejected_child_retention" } });
         erased += 1;
       });
     } catch (err) {

@@ -52,7 +52,7 @@ const CUSTOM_FIELDS = [
   { key: "extra_doc", type: "file", label: "Weitere Datei" },
   { key: "photo", type: "image", label: "Foto", mapsTo: "photo" },
   { key: "privacy_notice", type: "info", infoKind: "privacy_notice", label: "Datenschutz" },
-  { key: "privacy_consent", type: "consent", label: "Einwilligung", required: true },
+  { key: "privacy_consent", type: "consent", label: "Einwilligung", required: false },
 ];
 
 describe("form submissions (applicant side)", () => {
@@ -355,7 +355,7 @@ describe("form submissions (applicant side)", () => {
     const id = await draftId(who, c);
     const empty = await submit(who, id);
     expect(empty.status).toBe(422);
-    expect((await body(empty)).error.details.fields).toEqual({ category: "required", privacy_consent: "required" });
+    expect((await body(empty)).error.details.fields).toEqual({ category: "required" });
 
     // sport = b makes the scan mandatory (a required file field).
     await patch(who, id, { answers: { category: "aktiv", privacy_consent: true, sport: "b" } });
@@ -386,7 +386,7 @@ describe("form submissions (applicant side)", () => {
 
   it("lets only one of several parallel submits win", async () => {
     const who = await newApplicant("race");
-    const id = await draftId(who, a, { answers: { category: "aktiv", privacy_consent: true } });
+    const id = await draftId(who, a, { answers: { category: "aktiv" } });
     const results = await Promise.all(Array.from({ length: 5 }, () => submit(who, id)));
     expect(results.map((r) => r.status).sort()).toEqual([200, 409, 409, 409, 409]);
     expect((await rowOf(id))!.status).toBe("submitted");
@@ -397,13 +397,13 @@ describe("form submissions (applicant side)", () => {
   it("completes the standard form end to end (club with the default form)", async () => {
     const who = await newApplicant("std");
     const form = (await body(await call(who, `/club-forms/${a.slug}/aufnahme`))).data;
-    expect(form.fields.map((f: { key: string }) => f.key)).toEqual(["category", "birth_date", "photo", "privacy_notice", "privacy_consent"]);
+    expect(form.fields.map((f: { key: string }) => f.key)).toEqual(["category", "birth_date", "photo", "privacy_notice"]);
     const id = await draftId(who, a, { formVersionId: form.formVersionId });
-    expect((await submit(who, id, { answers: { category: "aktiv" } })).status).toBe(422); // consent missing
-    const ok = await submit(who, id, { answers: { category: "aktiv", privacy_consent: true } });
+    expect((await submit(who, id, { answers: {} })).status).toBe(422); // the category is missing; there is no consent to tick
+    const ok = await submit(who, id, { answers: { category: "aktiv" } });
     expect(ok.status).toBe(200);
     expect((await body(ok)).data.submission.status).toBe("submitted");
-    // The consent is evidence of the pinned version: submission -> version id -> immutable text.
+    // The submission is pinned to the version it was filled in: submission -> version id -> immutable text.
     expect((await rowOf(id))!.formVersionId).toBe(form.formVersionId);
   });
 

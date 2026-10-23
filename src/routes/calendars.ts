@@ -5,7 +5,6 @@ import { z } from "zod";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { calendarVisibility } from "../db/schema/calendar-visibility.js";
 import { calendars } from "../db/schema/calendars.js";
 import { departments } from "../db/schema/departments.js";
@@ -16,6 +15,7 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from ".
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 export const calendarRoutes = new Hono<ClubEnv>();
 
@@ -106,7 +106,7 @@ calendarRoutes.post(
         await tx.update(calendars).set({ isDefault: false }).where(eq(calendars.clubId, clubId));
       }
       const [created] = await tx.insert(calendars).values({ clubId, createdBy: currentUser.id, ...body }).returning();
-      await tx.insert(auditLog).values({ eventType: "calendar.create", subjectId: created.id, payload: { clubId, calendarId: created.id } });
+      await writeAudit(tx, { eventType: "calendar.create", subjectId: created.id, payload: { clubId, calendarId: created.id } });
       return created;
     });
 
@@ -165,7 +165,7 @@ calendarRoutes.patch(
       return updated;
     });
 
-    await db.insert(auditLog).values({ eventType: "calendar.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body) } });
+    await writeAudit(db, { eventType: "calendar.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body) } });
 
     return c.json({ data: row });
   },
@@ -188,7 +188,7 @@ calendarRoutes.delete("/:id", async (c) => {
     if (!current) throw new NotFoundError("Calendar not found");
     if (current.isDefault) throw defaultRequired();
     await tx.delete(calendars).where(and(eq(calendars.id, id), eq(calendars.clubId, clubId)));
-    await tx.insert(auditLog).values({ eventType: "calendar.delete", subjectId: id, payload: { clubId } });
+    await writeAudit(tx, { eventType: "calendar.delete", subjectId: id, payload: { clubId } });
   });
 
   return c.body(null, 204);
@@ -251,7 +251,7 @@ calendarRoutes.post(
 
     const [created] = await db.insert(calendarVisibility).values({ calendarId: id, ...body }).returning();
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: "calendar_visibility.create",
       subjectId: id,
       payload: { clubId, memberId: body.memberId, roleType: body.roleType, departmentId: body.departmentId },
@@ -279,7 +279,7 @@ calendarRoutes.delete("/:id/visibility/:visibilityId", async (c) => {
   if (!existing) throw new NotFoundError("Visibility grant not found");
 
   await db.delete(calendarVisibility).where(eq(calendarVisibility.id, visibilityId));
-  await db.insert(auditLog).values({ eventType: "calendar_visibility.delete", subjectId: id, payload: { clubId, visibilityId } });
+  await writeAudit(db, { eventType: "calendar_visibility.delete", subjectId: id, payload: { clubId, visibilityId } });
 
   return c.body(null, 204);
 });

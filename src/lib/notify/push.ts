@@ -115,6 +115,9 @@ const GENERIC_TEXT_BY_KEY: Record<string, string> = {
   "reminder.rsvp": "Bitte antworten",
   "reminder.loan_due": "Rückgabe fällig",
   "reminder.loan_overdue": "Rückgabe überfällig",
+  "absence.reported": "Neue Abwesenheitsmeldung",
+  "absence.changed": "Abwesenheitsmeldung geändert",
+  "absence.withdrawn": "Abwesenheitsmeldung zurückgezogen",
 };
 
 const GENERIC_TEXT_EN: Record<DeliveryContent["template"], string> = {
@@ -136,6 +139,9 @@ const GENERIC_TEXT_BY_KEY_EN: Record<string, string> = {
   "reminder.rsvp": "Please respond",
   "reminder.loan_due": "Return due",
   "reminder.loan_overdue": "Return overdue",
+  "absence.reported": "New absence report",
+  "absence.changed": "Absence report changed",
+  "absence.withdrawn": "Absence report withdrawn",
 };
 
 export function genericPushText(eventKey: string | null, template: DeliveryContent["template"], lang: MailLanguage = "de"): string {

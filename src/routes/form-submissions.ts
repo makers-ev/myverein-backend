@@ -6,7 +6,6 @@ import { z } from "zod";
 
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubApplications, type ClubApplicationRow } from "../db/schema/club-applications.js";
 import { forms, formSubmissionFiles, formSubmissions, formVersions, type FormRow, type FormSubmissionFileRow, type FormSubmissionRow, type FormVersionRow } from "../db/schema/forms.js";
 import { mediaFiles } from "../db/schema/media-files.js";
@@ -56,6 +55,7 @@ import {
 } from "../lib/media.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard, type SessionEnv } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Applicant side, write part (Wave 8 B5): draft -> fill in -> upload files -> submit / withdraw. Session only (the
@@ -313,7 +313,7 @@ formSubmissionRoutes.post("/", createLimiter, jsonLimit, zValidator("json", crea
       .insert(formSubmissions)
       .values({ formId: current.form.id, formVersionId: current.version.id, clubId: org.id, submittedByUserId: userId, onBehalfOf, answers, status: "draft" })
       .returning();
-    await tx.insert(auditLog).values({ eventType: "form_submission.create", subjectId: row!.id, payload: { clubId: org.id, formId: current.form.id, formVersionId: current.version.id, userId, onBehalfOf } });
+    await writeAudit(tx, { eventType: "form_submission.create", subjectId: row!.id, payload: { clubId: org.id, formId: current.form.id, formVersionId: current.version.id, userId, onBehalfOf } });
     return row!;
   });
   return c.json({ data: { submission: (await shapeSubmissions([created]))[0] } }, 201);
@@ -371,7 +371,7 @@ formSubmissionRoutes.delete("/:id", discardLimiter, async (c) => {
     const files = await loadFiles(tx, [sub.id]);
     const keys = await removeFiles(tx, files.map((f) => f.file));
     await tx.delete(formSubmissions).where(eq(formSubmissions.id, sub.id));
-    await tx.insert(auditLog).values({ eventType: "form_submission.delete", subjectId: sub.id, payload: { clubId: sub.clubId, formId: sub.formId, formVersionId: sub.formVersionId, userId, fileCount: files.length } });
+    await writeAudit(tx, { eventType: "form_submission.delete", subjectId: sub.id, payload: { clubId: sub.clubId, formId: sub.formId, formVersionId: sub.formVersionId, userId, fileCount: files.length } });
     return keys;
   });
   await purgeAll(purge);
@@ -541,7 +541,7 @@ formSubmissionRoutes.post(
           .values({ submissionId: sub.id, fieldKey, storageKey: media!.storageKey, filename: media!.originalFilename, mimeType: media!.mimeType, sizeBytes: media!.sizeBytes })
           .returning();
         await tx.update(formSubmissions).set({ updatedAt: new Date() }).where(eq(formSubmissions.id, sub.id));
-        await tx.insert(auditLog).values({ eventType: "form_submission.file_add", subjectId: sub.id, payload: { fileId: row!.id, fieldKey, userId, via: claim ? "claim" : "upload" } });
+        await writeAudit(tx, { eventType: "form_submission.file_add", subjectId: sub.id, payload: { fileId: row!.id, fieldKey, userId, via: claim ? "claim" : "upload" } });
         return { sub, row: row!, kind: media!.kind, urlKey: media!.sensitive ? null : media!.storageKey };
       });
       await purgeAll(purge);
@@ -573,7 +573,7 @@ formSubmissionRoutes.delete("/:id/files/:fileId", deleteLimiter, async (c) => {
     if (!file) throw new NotFoundError("File not found");
     const keys = await removeFiles(tx, [file]);
     await tx.update(formSubmissions).set({ updatedAt: new Date() }).where(eq(formSubmissions.id, sub.id));
-    await tx.insert(auditLog).values({ eventType: "form_submission.file_remove", subjectId: sub.id, payload: { fileId, fieldKey: file.fieldKey, userId } });
+    await writeAudit(tx, { eventType: "form_submission.file_remove", subjectId: sub.id, payload: { fileId, fieldKey: file.fieldKey, userId } });
     return keys;
   });
   await purgeAll(purge);
@@ -615,7 +615,7 @@ formSubmissionRoutes.get("/:id/files/:fileId", async (c) => {
 
   const reason = viaBoard ? "form_submission:board" : "form_submission:submitter";
   if (media.sensitive) return streamSensitiveMedia(c, media, { accessedBy: userId, subjectId: sub.id, reason });
-  await db.insert(auditLog).values({ eventType: "form_submission.file_access", subjectId: sub.id, payload: { fileId: file.id, accessedBy: userId, reason } });
+  await writeAudit(db, { eventType: "form_submission.file_access", subjectId: sub.id, payload: { fileId: file.id, accessedBy: userId, reason } });
   return streamMedia(c, media);
 });
 
@@ -632,6 +632,7 @@ export async function submitDraftInTx(
   sub: FormSubmissionRow,
   userId: string,
   extraAnswers: unknown,
+  opts: { privacyNoticeAcknowledged?: boolean } = {},
 ): Promise<{ row: FormSubmissionRow; application: ClubApplicationRow | null; purge: string[]; warnings: ChildWarning[] }> {
   const purge: string[] = [];
   // The advisory lock orders parallel submits / applies of the same user and club behind each other.
@@ -667,8 +668,8 @@ export async function submitDraftInTx(
     .where(and(eq(formSubmissions.id, sub.id), eq(formSubmissions.status, "draft")))
     .returning();
   if (!row) throw new ConflictError("The submission can no longer be changed", { details: { code: "submission_not_editable" } });
-  const application = target.form.purpose === PURPOSE ? await createApplicationForSubmission(tx, row, fields) : null;
-  await tx.insert(auditLog).values({
+  const application = target.form.purpose === PURPOSE ? await createApplicationForSubmission(tx, row, fields, opts) : null;
+  await writeAudit(tx, {
     eventType: "form_submission.submit",
     subjectId: sub.id,
     payload: { clubId: sub.clubId, formId: sub.formId, formVersionId: sub.formVersionId, userId, onBehalfOf: sub.onBehalfOf, fileCount: files.length - hidden.length, ...(application ? { applicationId: application.id } : {}), ...(warnings.length > 0 ? { warnings } : {}) },
@@ -678,13 +679,14 @@ export async function submitDraftInTx(
 
 const applicationDto = (a: ClubApplicationRow) => ({ id: a.id, status: a.status, createdAt: a.createdAt });
 
-formSubmissionRoutes.post("/:id/submit", submitLimiter, jsonLimit, zValidator("json", z.object({ answers: z.unknown().optional() }).default({}), validationHook), async (c) => {
+// `privacyNoticeAcknowledged`: the applicant took note of the club's privacy notice (stamped on the application, never required).
+formSubmissionRoutes.post("/:id/submit", submitLimiter, jsonLimit, zValidator("json", z.object({ answers: z.unknown().optional(), privacyNoticeAcknowledged: z.boolean().optional() }).default({}), validationHook), async (c) => {
   const userId = c.get("user").id;
   const body = c.req.valid("json");
 
   const submitted = await db.transaction(async (tx) => {
     const sub = await loadOwn(tx, c.req.param("id"), userId, true);
-    return submitDraftInTx(tx, sub, userId, body.answers);
+    return submitDraftInTx(tx, sub, userId, body.answers, { privacyNoticeAcknowledged: body.privacyNoticeAcknowledged === true });
   });
   await purgeAll(submitted.purge);
   if (submitted.application) await notifyApplicationReceived({ clubId: submitted.application.clubId, applicationId: submitted.application.id, userId, onBehalfOf: submitted.application.onBehalfOf === "guardian" ? "guardian" : "self" });
@@ -706,6 +708,8 @@ export async function applyWithForm(input: {
   /** New answers only: who the application is for (a submissionId carries its own). */
   onBehalfOf?: "self" | "guardian";
   emailVerified?: boolean;
+  /** The applicant took note of the club's privacy notice (information, never required). */
+  privacyNoticeAcknowledged?: boolean;
 }): Promise<{ application: ClubApplicationRow; submission: FormSubmissionRow; created: boolean; warnings: ChildWarning[] }> {
   const { userId, clubId } = input;
   await ensureFormBasics(clubId);
@@ -730,7 +734,7 @@ export async function applyWithForm(input: {
             .limit(1);
           if (other) throw applicationPendingError({ clubId, applicationId: other.id, submittedAt: other.createdAt });
         }
-        return { application: await createApplicationForSubmission(tx, sub, pinned.version.fields as FormField[]), submission: sub, created: true, warnings: [] };
+        return { application: await createApplicationForSubmission(tx, sub, pinned.version.fields as FormField[], { privacyNoticeAcknowledged: input.privacyNoticeAcknowledged === true }), submission: sub, created: true, warnings: [] };
       }
       if (sub.status !== "draft") throw new ConflictError("The submission can no longer be changed", { details: { code: "submission_not_editable", status: sub.status } });
       if (input.onBehalfOf !== undefined && input.onBehalfOf !== sub.onBehalfOf) throw new ValidationError("onBehalfOf does not match the submission");
@@ -739,7 +743,7 @@ export async function applyWithForm(input: {
         const current = await findCurrentForm(clubId, PURPOSE, tx);
         if (!current || current.version.id !== input.formVersionId) throw outdatedError(await currentDefinition(clubId, tx), sub.id);
       }
-      const submitted = await submitDraftInTx(tx, sub, userId, input.answers);
+      const submitted = await submitDraftInTx(tx, sub, userId, input.answers, { privacyNoticeAcknowledged: input.privacyNoticeAcknowledged === true });
       purge.push(...submitted.purge);
       return { application: submitted.application!, submission: submitted.row, created: true, warnings: submitted.warnings };
     }
@@ -764,7 +768,7 @@ export async function applyWithForm(input: {
       .insert(formSubmissions)
       .values({ formId: current.form.id, formVersionId: current.version.id, clubId, submittedByUserId: userId, onBehalfOf, answers: draftAnswers.answers, status: "draft" })
       .returning();
-    const submitted = await submitDraftInTx(tx, draft!, userId, undefined);
+    const submitted = await submitDraftInTx(tx, draft!, userId, undefined, { privacyNoticeAcknowledged: input.privacyNoticeAcknowledged === true });
     purge.push(...submitted.purge);
     return { application: submitted.application!, submission: submitted.row, created: true, warnings: submitted.warnings };
   });
@@ -787,7 +791,7 @@ formSubmissionRoutes.post("/:id/withdraw", async (c) => {
     const [row] = await tx.update(formSubmissions).set({ status: "withdrawn", updatedAt: new Date() }).where(eq(formSubmissions.id, sub.id)).returning();
     // Lock order: submission row (above), then the application row.
     await closeApplicationOfSubmission(tx, sub.id);
-    await tx.insert(auditLog).values({ eventType: "form_submission.withdraw", subjectId: sub.id, payload: { clubId: sub.clubId, userId, previousStatus: sub.status } });
+    await writeAudit(tx, { eventType: "form_submission.withdraw", subjectId: sub.id, payload: { clubId: sub.clubId, userId, previousStatus: sub.status } });
     return row!;
   });
   await purgeAll(purge);

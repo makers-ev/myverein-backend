@@ -5,7 +5,6 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubExitRequests, EXIT_KINDS, EXIT_STATUSES, type ClubExitRequestRow } from "../db/schema/club-exit-requests.js";
 import { clubMembers, type ClubMemberRow } from "../db/schema/club-members.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
@@ -25,6 +24,7 @@ import type { FormField } from "../lib/form-schema.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 /**
  * Exit workflow (Wave 7 B6): cancellation by the member (needs the board's approval) and cancellation / exclusion
@@ -233,7 +233,7 @@ clubExitRequestRoutes.get("/:id", async (c) => {
   const delivered = rendered && submission && submission.sub.submittedByUserId !== c.get("user").id ? rendered.answers.filter((a) => a.sensitive && a.answered && !a.redacted).map((a) => a.key) : [];
   if (delivered.length > 0 && submission) {
     // Keys only, never values (same trail as the application review).
-    await db.insert(auditLog).values({ eventType: "club_exit_request.sensitive_read", subjectId: request.id, payload: { clubId, readBy: actor.id, formSubmissionId: submission.sub.id, fieldKeys: delivered } });
+    await writeAudit(db, { eventType: "club_exit_request.sensitive_read", subjectId: request.id, payload: { clubId, readBy: actor.id, formSubmissionId: submission.sub.id, fieldKeys: delivered } });
   }
   c.header("Cache-Control", "private, no-store");
   return c.json({ data: { ...shapeRequest(request, member, settings), checklist, submission: rendered } });
@@ -311,7 +311,7 @@ clubExitRequestRoutes.post("/", createBodyLimit, zValidator("json", createSchema
         reason: requestReason,
         formSubmissionId: submission?.id ?? null,
       });
-      await tx.insert(auditLog).values({
+      await writeAudit(tx, {
         eventType: "club_exit_request.create",
         subjectId: inserted!.id,
         // Ids only: the answers (reason text, ...) are never part of an audit entry.
@@ -372,7 +372,7 @@ clubExitRequestRoutes.post("/", createBodyLimit, zValidator("json", createSchema
     const done = await transitionMember(tx, clubId, row.id, { toStatus: kind === "exclusion" ? "ausgeschlossen" : "ausgetreten", effectiveOn, reason: requestReason }, actor.id, today);
     // The board recorded the cancellation itself: the answers are decided with it.
     await closeExitSubmission(tx, submission?.id ?? null, "accepted", actor.id);
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_exit_request.create",
       subjectId: inserted!.id,
       payload: { clubId, clubMemberId: row.id, kind, requestedBy: actor.id, decidedBy: actor.id, effectiveOn, status: "approved", ...(submission ? { formSubmissionId: submission.id, formVersionId: submission.formVersionId } : {}) },
@@ -469,7 +469,7 @@ clubExitRequestRoutes.post("/:id/approve", zValidator("json", approveSchema, val
       actor.id,
       today,
     );
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_exit_request.approve",
       subjectId: claimed.id,
       payload: { clubId, clubMemberId: claimed.clubMemberId, kind: claimed.kind, effectiveOn, transitionKind: done.kind, decidedBy: actor.id },
@@ -511,7 +511,7 @@ clubExitRequestRoutes.post("/:id/reject", zValidator("json", rejectSchema, valid
       .returning();
     if (!row) throw new ConflictError("Exit request has already been decided");
     await closeExitSubmission(tx, row.formSubmissionId, "rejected", actor.id);
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_exit_request.reject",
       subjectId: row.id,
       payload: { clubId, clubMemberId: row.clubMemberId, kind: row.kind, decidedBy: actor.id },
@@ -568,7 +568,7 @@ clubExitRequestRoutes.post("/:id/withdraw", zValidator("json", withdrawSchema, v
       .returning();
     if (!withdrawn) throw new ConflictError("Exit request can no longer be withdrawn");
     await closeExitSubmission(tx, withdrawn.formSubmissionId, "withdrawn", null);
-    await tx.insert(auditLog).values({
+    await writeAudit(tx, {
       eventType: "club_exit_request.withdraw",
       subjectId: withdrawn.id,
       payload: { clubId, clubMemberId: withdrawn.clubMemberId, kind: withdrawn.kind, previousStatus: current.status, withdrawnBy: actor.id },

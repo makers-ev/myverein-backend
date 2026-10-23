@@ -57,6 +57,12 @@ export const clubSettings = pgTable("club_settings", {
   // Language of the system texts around club mails and pushes (decisions, reminders, event changes, invitations): 'de' | 'en'.
   // Text written by a person (announcements) is sent as written.
   mailLanguage: text("mail_language").notNull().default("de"),
+  // Privacy (Wave 10): age from which a person consents alone (below: guardian or board with paper proof), whether BOTH
+  // guardians are needed, the privacy contact and the controller (Verantwortlicher) as free text for the privacy notice.
+  consentAgeLimit: integer("consent_age_limit").notNull().default(18),
+  consentBothGuardians: boolean("consent_both_guardians").notNull().default(false),
+  privacyContact: text("privacy_contact"),
+  privacyController: text("privacy_controller"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

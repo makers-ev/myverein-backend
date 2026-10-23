@@ -5,7 +5,6 @@ import { z } from "zod";
 
 import { member, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { clubInfoPages } from "../db/schema/club-info-pages.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { departments } from "../db/schema/departments.js";
@@ -15,6 +14,7 @@ import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 export const clubInfoRoutes = new Hono<ClubEnv>();
 
@@ -115,7 +115,7 @@ clubInfoRoutes.put(
         )[0]
       : (await db.insert(clubInfoPages).values({ clubId, slug, ...body }).returning())[0];
 
-    await db.insert(auditLog).values({
+    await writeAudit(db, {
       eventType: existing ? "club_info_page.update" : "club_info_page.create",
       subjectId: row.id,
       payload: { clubId, slug },
@@ -137,7 +137,7 @@ clubInfoRoutes.delete("/:slug", async (c) => {
   if (!existing) throw new NotFoundError("Info page not found");
 
   await db.delete(clubInfoPages).where(eq(clubInfoPages.id, existing.id));
-  await db.insert(auditLog).values({ eventType: "club_info_page.delete", subjectId: existing.id, payload: { clubId, slug } });
+  await writeAudit(db, { eventType: "club_info_page.delete", subjectId: existing.id, payload: { clubId, slug } });
 
   return c.body(null, 204);
 });
