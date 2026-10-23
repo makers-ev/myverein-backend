@@ -39,6 +39,8 @@ import { enqueueMemberCategoryNotices } from "../lib/age-transition.js";
 import { clubMailLanguage } from "../lib/club-settings.js";
 import { tr } from "../lib/notify/i18n.js";
 import { effectiveStatus, isLeftStatus, subtractYears, suggestCategory, todayBerlin, transitionMember, wouldCreateCycle } from "../lib/member-lifecycle.js";
+import { loadAssemblyRules } from "../lib/assembly-rules.js";
+import { termInfo } from "../lib/term-status.js";
 import { assertMemberReadable, canSeeAllMembers, visibleStatusCondition } from "../lib/member-read-scope.js";
 import { findMemberPhotoMedia, canSeeMemberPhoto, isMinor, memberPhotoUrls, removeMemberPhoto, replaceMemberPhoto, type PhotoCaller } from "../lib/member-photos.js";
 import { MAX_PHOTO_BYTES, streamMedia } from "../lib/media.js";
@@ -116,6 +118,7 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: PhotoCaller, forc
   // Signed photo URLs, only for rows the caller may see a photo of (own / members:write / read_sensitive / guardian / opened).
   const photoUrls = await memberPhotoUrls(rows[0]!.clubId, rows, caller, (row) => forceSensitive || (row.memberId !== null && row.memberId === caller.memberId));
 
+  const warningDays = roleRows.some((r) => r.termEndsAt) ? (await loadAssemblyRules(db, rows[0]!.clubId)).termWarningDays : null;
   const accountById = new Map(accountRows.map((a) => [a.member.id, a]));
   const rolesByMember = new Map<string, typeof roleRows>();
   for (const r of roleRows) rolesByMember.set(r.memberId, [...(rolesByMember.get(r.memberId) ?? []), r]);
@@ -150,7 +153,7 @@ async function shapeClubMembers(rows: ClubMemberRow[], caller: PhotoCaller, forc
       joinedAt: row.joinedAt,
       leftAt: row.leftAt,
       orgRole: account?.member.role ?? null,
-      roles: (account ? (rolesByMember.get(account.member.id) ?? []) : []).map((r) => ({ id: r.id, roleType: r.roleType, departmentId: r.departmentId, termEndsAt: r.termEndsAt })),
+      roles: (account ? (rolesByMember.get(account.member.id) ?? []) : []).map((r) => ({ id: r.id, roleType: r.roleType, departmentId: r.departmentId, termEndsAt: r.termEndsAt, ...termInfo(r.termEndsAt, today, warningDays) })),
       departments: departmentsByMember.get(row.id) ?? [],
       photoUrl: photoUrls.get(row.id) ?? null,
       ...(!sensitive && shared.has(row.id)
@@ -1641,8 +1644,10 @@ clubMemberRoutes.get("/:id/roles", async (c) => {
   const row = await resolveClubMember(c.get("clubId"), c.req.param("id"));
   assertMemberReadable(c, row);
   const rows = await db.query.clubRoles.findMany({ where: eq(clubRoles.memberId, requireAccount(row)) });
-  // `data` = stored (revocable) club_roles rows only; the implicit base role is listed separately.
-  return c.json({ data: rows, implicit: [IMPLICIT_ROLE_TYPE] });
+  // `data` = stored (revocable) club_roles rows only (with the derived term status); the implicit base role is listed separately.
+  const warningDays = rows.some((r) => r.termEndsAt) ? (await loadAssemblyRules(db, c.get("clubId"))).termWarningDays : null;
+  const today = todayBerlin();
+  return c.json({ data: rows.map((r) => ({ ...r, ...termInfo(r.termEndsAt, today, warningDays) })), implicit: [IMPLICIT_ROLE_TYPE] });
 });
 
 clubMemberRoutes.post("/:id/roles", zValidator("json", assignRoleSchema, validationHook), async (c) => {

@@ -45,6 +45,7 @@ import { calendarRoutes } from "./calendars.js";
 import { clubApplicationRoutes } from "./club-applications.js";
 import { clubFormRoutes } from "./club-forms.js";
 import { clubInfoRoutes } from "./club-info.js";
+import { clubRoleRoutes } from "./club-roles.js";
 import { formRoutes } from "./forms.js";
 import { formSubmissionRoutes } from "./form-submissions.js";
 import { clubMemberRoutes } from "./club-members.js";
@@ -120,6 +121,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/form-submissions", "formSubmissionRoutes", formSubmissionRoutes],
   ["/departments", "departmentRoutes", departmentRoutes],
   ["/club-info", "clubInfoRoutes", clubInfoRoutes],
+  ["/club-roles", "clubRoleRoutes", clubRoleRoutes],
   ["/calendars", "calendarRoutes", calendarRoutes],
   ["/events", "eventRoutes", eventRoutes],
   ["/events.ics", "icsRoutes", icsRoutes],

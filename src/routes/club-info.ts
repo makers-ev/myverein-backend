@@ -9,6 +9,9 @@ import { clubInfoPages } from "../db/schema/club-info-pages.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { departments } from "../db/schema/departments.js";
 import { BOARD_ROLE_TYPES, hasClubPermission } from "../lib/club-permissions.js";
+import { loadAssemblyRules } from "../lib/assembly-rules.js";
+import { todayBerlin } from "../lib/member-lifecycle.js";
+import { termInfo } from "../lib/term-status.js";
 import { boardPhotoUrls } from "../lib/member-photos.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
@@ -57,6 +60,8 @@ clubInfoRoutes.get("/", async (c) => {
     canWrite: hasClubPermission(roleTypes, "members:write"),
   });
 
+  const today = todayBerlin();
+  const warningDays = (await loadAssemblyRules(db, clubId)).termWarningDays;
   const board = boardRoleRows.map((roleRow) => {
     const memberRow = membersById.get(roleRow.memberId);
     const userRow = memberRow ? usersById.get(memberRow.userId) : undefined;
@@ -65,6 +70,7 @@ clubInfoRoutes.get("/", async (c) => {
       name: userRow?.name ?? null,
       roleType: roleRow.roleType,
       termEndsAt: roleRow.termEndsAt,
+      ...termInfo(roleRow.termEndsAt, today, warningDays),
       photoUrl: boardPhotos.get(roleRow.memberId) ?? null,
     };
   });
