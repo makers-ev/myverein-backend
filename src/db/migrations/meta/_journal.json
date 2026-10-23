@@ -358,6 +358,13 @@
       "when": 1792788177094,
       "tag": "0050_ballots-lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1792789978592,
+      "tag": "0051_minutes-approval",
+      "breakpoints": true
     }
   ]
 }

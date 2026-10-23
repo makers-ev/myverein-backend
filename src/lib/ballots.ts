@@ -22,6 +22,7 @@ import { member } from "../auth/auth-schema.js";
 import { writeAudit } from "./audit.js";
 import { computeQuorum, deriveAll, freezeVotingRoll, loadEligibility, rulesOfMeeting, type QuorumStatus } from "./assembly-attendance.js";
 import { hashContent } from "./assembly-invitation.js";
+import { minutesHash } from "./minutes.js";
 import { loadAssemblyRules, majorityFor, parseStoredAssemblyRules, type AssemblyRules, type MajorityTopic } from "./assembly-rules.js";
 import { evaluateBallot, evaluateChoices } from "./ballot-evaluation.js";
 import type { DbExecutor } from "./club-members.js";
@@ -606,7 +607,7 @@ export async function finalizeBallot(clubId: string, ballotId: string, actorUser
         if (ids.length > 0) await tx.insert(meetingInvitees).values(ids.map((clubMemberId) => ({ meetingId: meetingId!, clubMemberId, response: "zugesagt" })));
       }
       const content = minutesText({ b, result, resultHash, timezone });
-      await tx.insert(meetingMinutes).values({ meetingId, version: 1, status: "archiviert", content, contentHash: hashContent(content), approvedAt: finalizedAt, createdBy: b.createdBy });
+      await tx.insert(meetingMinutes).values({ meetingId, version: 1, status: "archiviert", content, contentHash: minutesHash(content), approvedAt: finalizedAt, createdBy: b.createdBy });
     }
 
     if (b.kind === "resolution" && meetingId) {

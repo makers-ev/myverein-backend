@@ -25,6 +25,8 @@ export const BALLOT_OPTION_KINDS = ["yes", "no", "abstain", "choice", "candidate
 /** Who votes in a circular resolution: every member with a voting right, or the board accounts. */
 export const BALLOT_AUDIENCES = ["all_voting_members", "board"] as const;
 export const MINUTES_STATUSES = ["entwurf", "zur_genehmigung", "genehmigt", "archiviert"] as const;
+/** Who confirms the text of minutes in text form: the chair of the meeting and the secretary (no qualified signature). */
+export const MINUTES_CONFIRM_ROLES = ["leitung", "schriftfuehrung"] as const;
 export const ELECTION_STATUSES = ["planned", "running", "decided", "closed"] as const;
 export const CANDIDATE_STATUSES = ["proposed", "willing", "declined", "withdrawn", "elected", "accepted", "pending_account"] as const;
 
@@ -342,6 +344,24 @@ export const meetingMinutes = pgTable(
   (table) => [unique("meeting_minutes_meeting_version_uq").on(table.meetingId, table.version), index("meeting_minutes_approved_in_idx").on(table.approvedInMeetingId)],
 );
 
+/** Electronic confirmation (text form) of one minutes version by the meeting chair and the secretary; dropped when the draft changes. */
+export const meetingMinutesConfirmations = pgTable(
+  "meeting_minutes_confirmations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    minutesId: uuid("minutes_id")
+      .notNull()
+      .references(() => meetingMinutes.id, { onDelete: "cascade" }),
+    // One of MINUTES_CONFIRM_ROLES.
+    role: text("role").notNull(),
+    confirmedBy: text("confirmed_by").references(() => user.id, { onDelete: "set null" }),
+    // Hash of the confirmed text, so the confirmation can be checked against the stored version.
+    contentHash: text("content_hash").notNull(),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [unique("meeting_minutes_confirmations_role_uq").on(table.minutesId, table.role)],
+);
+
 /** Berichtigungsvermerk on approved minutes. */
 export const meetingMinutesAmendments = pgTable(
   "meeting_minutes_amendments",
@@ -380,3 +400,4 @@ export type BallotRow = typeof ballots.$inferSelect;
 export type BallotOptionRow = typeof ballotOptions.$inferSelect;
 export type ElectionRow = typeof elections.$inferSelect;
 export type ElectionCandidateRow = typeof electionCandidates.$inferSelect;
+export type MeetingMinutesRow = typeof meetingMinutes.$inferSelect;

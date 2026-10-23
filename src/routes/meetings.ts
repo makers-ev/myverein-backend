@@ -6,7 +6,7 @@ import { z } from "zod";
 
 import { db } from "../db/client.js";
 import { clubMembers, type ClubMemberRow } from "../db/schema/club-members.js";
-import { meetingProxies } from "../db/schema/assembly.js";
+import { meetingMinutes, meetingProxies } from "../db/schema/assembly.js";
 import { clubMailLanguage } from "../lib/club-settings.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
 import { MEETING_TYPES, meetingAttendance, meetingInvitees, meetingResolutions, meetings } from "../db/schema/meetings.js";
@@ -18,6 +18,9 @@ import { callerClubMemberId, clubMembersByIds, resolveClubMember } from "../lib/
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { loadClubMeeting, canReadAllMeetings, denyGuests } from "../lib/meeting-access.js";
 import { meetingAssemblyRoutes } from "./meeting-assembly.js";
+import { meetingMinutesRoutes } from "./meeting-minutes.js";
+import { attachMinutes, saveMinutesDraft } from "../lib/minutes.js";
+import { cleanText } from "../lib/text-policy.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -31,6 +34,7 @@ meetingRoutes.use("*", clubGuard);
 
 // Agenda items and invitations of the general assembly (Wave 11) live in their own file, behind the same guards.
 meetingRoutes.route("/", meetingAssemblyRoutes);
+meetingRoutes.route("/", meetingMinutesRoutes);
 
 // --- Meetings CRUD ---------------------------------------------------------
 
@@ -57,13 +61,13 @@ meetingRoutes.get("/", async (c) => {
     orderBy: (m, { asc }) => [asc(m.scheduledAt), asc(m.createdAt)],
   });
 
-  return c.json({ data: rows });
+  return c.json({ data: await attachMinutes(rows, hasClubPermission(c.get("clubRoleTypes"), "meetings:write") || hasClubPermission(c.get("clubRoleTypes"), "assembly:manage")) });
 });
 
 meetingRoutes.get("/:id", async (c) => {
   const id = c.req.param("id");
   const row = await loadClubMeeting(c, id);
-  return c.json({ data: row });
+  return c.json({ data: (await attachMinutes([row], hasClubPermission(c.get("clubRoleTypes"), "meetings:write") || hasClubPermission(c.get("clubRoleTypes"), "assembly:manage")))[0] });
 });
 
 const createMeetingSchema = z.object({
@@ -112,7 +116,8 @@ const updateMeetingSchema = z.object({
   scheduledAt: z.string().datetime({ offset: true }).nullable().optional(),
   agenda: z.string().nullable().optional(),
   status: z.string().min(1).optional(),
-  minutes: z.string().nullable().optional(),
+  /** Redirected to the working draft of the minutes (409 once the version is locked); `null` clears the draft. */
+  minutes: cleanText(z.string().max(200_000), true).nullable().optional(),
   /** `false` saves a reschedule / cancellation without telling the invitees (audited). */
   notify: z.boolean().optional(),
 });
@@ -132,8 +137,11 @@ meetingRoutes.patch(
       throw new ForbiddenError("Missing meetings:write permission");
     }
     const id = c.req.param("id");
-    const { notify: notifyFlag, ...body } = c.req.valid("json");
+    const { notify: notifyFlag, minutes, ...body } = c.req.valid("json");
     const existing = await loadClubMeeting(c, id);
+
+    // The free-text field is the working draft of the minutes now (versions, approval and lock: lib/minutes.ts).
+    if (minutes !== undefined) await saveMinutesDraft({ clubId, meetingId: id, content: minutes ?? "", userId: c.get("user").id });
 
     const [row] = await db
       .update(meetings)
@@ -145,7 +153,7 @@ meetingRoutes.patch(
       .where(eq(meetings.id, id))
       .returning();
 
-    await writeAudit(db, { eventType: "meeting.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body), ...(notifyFlag === false ? { notify: false } : {}) } });
+    await writeAudit(db, { eventType: "meeting.update", subjectId: id, payload: { clubId, changedFields: [...Object.keys(body), ...(minutes !== undefined ? ["minutes"] : [])], ...(notifyFlag === false ? { notify: false } : {}) } });
 
     // A moved or cancelled meeting is announced to the invitees (B10).
     const cancelled = row!.status === CANCELLED_MEETING_STATUS && existing.status !== CANCELLED_MEETING_STATUS;
@@ -171,7 +179,7 @@ meetingRoutes.patch(
       }
     }
 
-    return c.json({ data: row });
+    return c.json({ data: (await attachMinutes([row!], true))[0] });
   },
 );
 
@@ -183,6 +191,9 @@ meetingRoutes.delete("/:id", async (c) => {
   }
   const id = c.req.param("id");
   const existing = await loadClubMeeting(c, id);
+  // Approved minutes (and the record of a decision) belong to the club's documents: the meeting stays.
+  const approved = await db.query.meetingMinutes.findFirst({ where: and(eq(meetingMinutes.meetingId, id), inArray(meetingMinutes.status, ["genehmigt", "archiviert"])), columns: { id: true } });
+  if (approved) throw new ConflictError("A meeting with approved minutes cannot be deleted", { details: { code: "minutes_approved" } });
 
   // Deleting a meeting that is still open (Terminfindung or planned) is a cancellation for the invitees: capture them before they vanish.
   const notifyFlag = c.req.query("notify");
