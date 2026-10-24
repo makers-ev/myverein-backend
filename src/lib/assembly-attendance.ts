@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
-import { meetingProxies, meetingVotingRoll } from "../db/schema/assembly.js";
+import { ballots, meetingProxies, meetingVotingRoll } from "../db/schema/assembly.js";
 import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { meetingAttendance, meetings, type MeetingRow } from "../db/schema/meetings.js";
 import { writeAudit } from "./audit.js";
@@ -118,6 +118,8 @@ export interface GrantProxyArgs {
   holderClubMemberId: string;
   grantedBy: string;
   byBoard: boolean;
+  /** Where the proxy document comes from; mandatory when the board records a proxy for somebody else. */
+  proofSource?: string | null | undefined;
 }
 
 const refuse = (message: string, code: string, extra: Record<string, unknown> = {}, conflict = false) =>
@@ -129,6 +131,13 @@ export async function grantProxy(tx: DbExecutor, args: GrantProxyArgs): Promise<
   if (grantor === holder) throw refuse("A member cannot be their own proxy", "proxy_self");
   // Members can no longer give a proxy once the meeting is over; the board still records them for the minutes.
   if (!args.byBoard && ["abgehalten", "protokolliert", "abgesagt"].includes(meeting.status)) throw refuse("The meeting is over", "meeting_closed", {}, true);
+  const proofSource = args.proofSource?.trim() || null;
+  if (args.byBoard && !proofSource) throw refuse("A proxy recorded by the board needs a documented proof", "proof_required");
+  if (args.byBoard) {
+    // Somebody who already voted in a running secret ballot must not be represented behind their back: nobody can tell afterwards.
+    const [secretOpen] = await tx.select({ id: ballots.id }).from(ballots).where(and(eq(ballots.meetingId, meeting.id), eq(ballots.secret, true), eq(ballots.status, "open"))).limit(1);
+    if (secretOpen) throw refuse("A secret ballot of this meeting is open", "secret_ballot_open", {}, true);
+  }
   const rules = await rulesOfMeeting(tx, clubId, meeting);
   if (rules.proxyAllowed === null || (rules.proxyAllowed && rules.maxProxiesPerPerson === null)) throw refuse("The statute parameters for proxies are not stated", "assembly_rules_incomplete", { missing: ["proxyAllowed", "maxProxiesPerPerson"].filter((k) => (k === "proxyAllowed" ? rules.proxyAllowed === null : rules.proxyAllowed && rules.maxProxiesPerPerson === null)) });
   if (!rules.proxyAllowed) throw refuse("The statute does not allow proxies", "proxy_not_allowed");
@@ -144,13 +153,13 @@ export async function grantProxy(tx: DbExecutor, args: GrantProxyArgs): Promise<
   if (held + 1 > (rules.maxProxiesPerPerson ?? 0)) throw refuse("The proxy holder already holds the maximum number of proxies", "max_proxies_reached", { max: rules.maxProxiesPerPerson }, true);
   await tx
     .insert(meetingProxies)
-    .values({ meetingId: meeting.id, grantorClubMemberId: grantor, holderClubMemberId: holder, grantedBy: args.grantedBy })
-    .onConflictDoUpdate({ target: [meetingProxies.meetingId, meetingProxies.grantorClubMemberId], set: { holderClubMemberId: holder, grantedBy: args.grantedBy } });
+    .values({ meetingId: meeting.id, grantorClubMemberId: grantor, holderClubMemberId: holder, grantedBy: args.grantedBy, proofSource })
+    .onConflictDoUpdate({ target: [meetingProxies.meetingId, meetingProxies.grantorClubMemberId], set: { holderClubMemberId: holder, grantedBy: args.grantedBy, proofSource } });
   await writeAudit(tx, {
     eventType: "meeting_proxy.grant",
     subjectId: meeting.id,
     actorUserId: args.grantedBy,
-    payload: { clubId, meetingId: meeting.id, grantorClubMemberId: grantor, holderClubMemberId: holder, byBoard: args.byBoard },
+    payload: { clubId, meetingId: meeting.id, grantorClubMemberId: grantor, holderClubMemberId: holder, byBoard: args.byBoard, ...(proofSource ? { proofSource } : {}) },
   });
 }
 

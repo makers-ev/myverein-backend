@@ -8,7 +8,7 @@ import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
-import { meetingVotingRoll } from "../db/schema/assembly.js";
+import { ballots, meetingVotingRoll } from "../db/schema/assembly.js";
 import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubSettings } from "../db/schema/club-settings.js";
@@ -236,11 +236,14 @@ describe("proxies", () => {
   it("lets only assembly:manage record a proxy for somebody else, and only the giver or the board withdraw it", async () => {
     const forOther = await give(plain, { grantorClubMemberId: cm.Bert, holderClubMemberId: cm.Anna });
     expect(forOther.status).toBe(403);
-    const byBoard = await give(clerk, { grantorClubMemberId: cm.Ruhend, holderClubMemberId: cm.Anna });
+    const byBoard = await give(clerk, { grantorClubMemberId: cm.Ruhend, holderClubMemberId: cm.Anna, proofSource: "Vollmacht per E-Mail" });
     expect(byBoard.status).toBe(422);
     expect((await json(byBoard)).error.details.code).toBe("grantor_not_eligible");
     await checkIn([cm.Bert!], false);
-    const ok = await give(clerk, { grantorClubMemberId: cm.Bert, holderClubMemberId: cm.Anna });
+    // Review M9: the board needs a documented proof.
+    const noProof = await give(clerk, { grantorClubMemberId: cm.Bert, holderClubMemberId: cm.Anna });
+    expect((await json(noProof)).error.details.code).toBe("proof_required");
+    const ok = await give(clerk, { grantorClubMemberId: cm.Bert, holderClubMemberId: cm.Anna, proofSource: "Vollmacht per E-Mail" });
     expect(ok.status).toBe(201);
     // Giving a new holder replaces the old one.
     expect((await call(plain, `/meetings/${meetingId}/proxies/${cm.Bert}`, { method: "DELETE" })).status).toBe(403);
@@ -248,6 +251,12 @@ describe("proxies", () => {
     expect((await call(clerk, `/meetings/${meetingId}/proxies/${cm.Bert}`, { method: "DELETE" })).status).toBe(404);
     expect((await call(plain, `/meetings/${meetingId}/proxies/${cm.plain}`, { method: "DELETE" })).status).toBe(204);
     expect((await quorum()).proxiesRepresented).toBe(0);
+    // Not while a secret ballot of the meeting is open (review M9).
+    const [secret] = await db.insert(ballots).values({ clubId: club, meetingId, title: "Geheim", status: "open", mode: "in_session", kind: "resolution", topic: "allgemein", secret: true, maxChoices: 1, createdBy: chair.userId }).returning({ id: ballots.id });
+    const during = await give(clerk, { grantorClubMemberId: cm.Bert, holderClubMemberId: cm.Anna, proofSource: "Vollmacht per E-Mail" });
+    expect(during.status).toBe(409);
+    expect((await json(during)).error.details.code).toBe("secret_ballot_open");
+    await db.delete(ballots).where(eq(ballots.id, secret!.id));
     const revoke = await db.select().from(auditLog).where(and(eq(auditLog.eventType, "meeting_proxy.revoke"), eq(auditLog.subjectId, meetingId)));
     expect(revoke).toHaveLength(2);
   });

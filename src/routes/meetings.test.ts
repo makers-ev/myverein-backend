@@ -384,7 +384,7 @@ describe("meetings routes", () => {
         headers: { cookie: cookieA, "content-type": "application/json" },
         body: JSON.stringify([
           { memberId: memberAId, present: false },
-          { memberId: memberSecondId, present: true, hasVotingRight: true, proxyForMemberId: memberAId },
+          { memberId: memberSecondId, present: true, hasVotingRight: true, proxyForMemberId: memberAId, proxyProofSource: "Vollmacht" },
         ]),
       });
       expect(res.status).toBe(200);
@@ -600,7 +600,7 @@ describe("meetings routes", () => {
     });
 
     it("keeps an existing proxy when it is omitted, sets it, and clears it with null", async () => {
-      expect((await att([{ memberId: memberAId, proxyForMemberId: memberSecondId }])).status).toBe(200);
+      expect((await att([{ memberId: memberAId, proxyForMemberId: memberSecondId, proxyProofSource: "Vollmacht" }])).status).toBe(200);
       expect((await load()).find((r) => r.memberId === memberAId)).toMatchObject({ present: true, proxyForMemberId: memberSecondId });
 
       expect((await att([{ memberId: memberAId, present: true }])).status).toBe(200);
@@ -611,7 +611,7 @@ describe("meetings routes", () => {
     });
 
     it("rejects a self-proxy (422), a proxy from another club (404) and non-writers (403)", async () => {
-      expect((await att([{ memberId: memberAId, proxyForMemberId: memberAId }])).status).toBe(422);
+      expect((await att([{ memberId: memberAId, proxyForMemberId: memberAId, proxyProofSource: "Vollmacht" }])).status).toBe(422);
       expect((await att([{ memberId: memberAId, proxyForMemberId: memberBId }])).status).toBe(404);
       expect((await att([{ memberId: memberAId, present: true }], cookieSecond)).status).toBe(403);
     });
@@ -769,10 +769,10 @@ describe("meetings routes", () => {
       expect(rows.find((r) => r.clubMemberId === guestlessId)).toMatchObject({ present: true, memberId: null, proxyFor: [], checkInMethod: "schriftfuehrer", hasVotingRight: true });
       expect(rows.find((r) => r.clubMemberId === guestlessId)!.checkedInAt).toBeTruthy();
       // Somebody who is present cannot give a proxy; once they left, the clerk can record it for them.
-      const blocked = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ memberId: memberSecondId, proxyForClubMemberId: guestlessId }] });
+      const blocked = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ memberId: memberSecondId, proxyProofSource: "Vollmacht", proxyForClubMemberId: guestlessId }] });
       expect(blocked.status).toBe(409);
       expect(((await blocked.json()) as { error: { details: { code: string } } }).error.details.code).toBe("grantor_present");
-      const left = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ clubMemberId: guestlessId, present: false }, { memberId: memberSecondId, proxyForClubMemberId: guestlessId }] });
+      const left = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ clubMemberId: guestlessId, present: false }, { memberId: memberSecondId, proxyProofSource: "Vollmacht", proxyForClubMemberId: guestlessId }] });
       expect(left.status).toBe(200);
       const after = ((await left.json()) as { data: Array<Record<string, unknown>> }).data;
       expect(after.find((r) => r.clubMemberId === guestlessId)).toMatchObject({ present: false, proxyFor: [] });

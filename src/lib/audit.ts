@@ -176,7 +176,7 @@ export const AUDIT_EVENTS = {
   "meeting_agenda_item.update": spec(["changedFields", "clubId", "meetingId"]),
   "meeting_voting_roll.freeze": spec(["clubId", "eligible", "meetingId", "total"]),
   "meeting_voting_roll.override": spec(["clubId", "clubMemberId", "eligible", "meetingId"], "clubMemberId"),
-  "meeting_proxy.grant": spec(["byBoard", "clubId", "grantorClubMemberId", "holderClubMemberId", "meetingId"], "grantorClubMemberId"),
+  "meeting_proxy.grant": spec(["byBoard", "clubId", "grantorClubMemberId", "holderClubMemberId", "meetingId", "proofSource"], "grantorClubMemberId"),
   "meeting_proxy.revoke": spec(["byBoard", "clubId", "grantorClubMemberId", "meetingId"], "grantorClubMemberId"),
   "meeting_attendance.self_online": spec(["clubId", "join", "meetingId"]),
   "meeting_attendance.record": spec(["clubId", "count", "meetingId"]),

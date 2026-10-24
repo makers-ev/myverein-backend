@@ -262,7 +262,7 @@ describe("voting (open ballot)", () => {
     const proxy = await call(plain, `/meetings/${meetingId}/proxies`, { method: "POST", body: { holderClubMemberId: cm.clerk } });
     // plain is present: the proxy giver must be absent.
     expect(proxy.status).toBe(409);
-    expect((await call(clerk, `/meetings/${meetingId}/proxies`, { method: "POST", body: { holderClubMemberId: cm.clerk, grantorClubMemberId: cm.Anna } })).status).toBe(201);
+    expect((await call(clerk, `/meetings/${meetingId}/proxies`, { method: "POST", body: { holderClubMemberId: cm.clerk, grantorClubMemberId: cm.Anna, proofSource: "Vollmacht liegt vor" } })).status).toBe(201);
     const d = await detail(clerk, ballotId);
     expect(d.me.proxies).toEqual([expect.objectContaining({ grantorClubMemberId: cm.Anna, hasVoted: false })]);
     expect((await vote(chair, ballotId, [yes], { forClubMemberId: cm.Anna })).status).toBe(403);

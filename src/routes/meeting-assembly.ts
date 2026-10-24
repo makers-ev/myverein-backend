@@ -402,7 +402,12 @@ meetingAssemblyRoutes.patch("/:id/voting-roll/:clubMemberId", validate(overrideS
   return c.json({ data: { clubMemberId: person.id, eligible: body.eligible, basis: "override", overrideReason: body.reason } });
 });
 
-const proxySchema = z.object({ holderClubMemberId: uuid, grantorClubMemberId: uuid.optional() });
+const proxySchema = z.object({
+  holderClubMemberId: uuid,
+  grantorClubMemberId: uuid.optional(),
+  /** Mandatory when the board records the proxy for somebody else, e.g. "Vollmacht per E-Mail vom 3.3."; stays on the proxy and in the audit. */
+  proofSource: cleanText(z.string().trim().min(1).max(500)).optional(),
+});
 
 /** Proxies of the meeting: managers see all with names, a member only the proxies they gave or hold. */
 meetingAssemblyRoutes.get("/:id/proxies", async (c) => {
@@ -420,6 +425,7 @@ meetingAssemblyRoutes.get("/:id/proxies", async (c) => {
       holderClubMemberId: p.holderClubMemberId,
       holderName: p.holderClubMemberId ? (people.get(p.holderClubMemberId)?.displayName ?? null) : null,
       createdAt: p.createdAt,
+      ...(hasClubPermission(roles(c), "assembly:manage") ? { proofSource: p.proofSource } : {}),
     })),
   });
 });
@@ -442,7 +448,7 @@ meetingAssemblyRoutes.post("/:id/proxies", validate(proxySchema), async (c) => {
   if (!grantor || !holder) throw new NotFoundError("Member not found in this club");
   await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(meetings).where(eq(meetings.id, meeting.id)).for("update");
-    await grantProxy(tx, { clubId, meeting: locked!, grantorClubMemberId: grantor.id, holderClubMemberId: holder.id, grantedBy: c.get("user").id, byBoard });
+    await grantProxy(tx, { clubId, meeting: locked!, grantorClubMemberId: grantor.id, holderClubMemberId: holder.id, grantedBy: c.get("user").id, byBoard, proofSource: body.proofSource });
   });
   return c.json({ data: { grantorClubMemberId: grantor.id, holderClubMemberId: holder.id } }, 201);
 });

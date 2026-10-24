@@ -491,6 +491,8 @@ const attendanceEntrySchema = z
     method: z.enum(["schriftfuehrer", "vollmacht"]).optional(),
     proxyForClubMemberId: z.string().uuid().nullable().optional(),
     proxyForMemberId: z.string().min(1).nullable().optional(),
+    /** Proof of the proxy (mandatory with `proxyForClubMemberId` / `proxyForMemberId`): where the proxy document comes from. */
+    proxyProofSource: cleanText(z.string().trim().min(1).max(500)).optional(),
   })
   .refine((v) => v.clubMemberId || v.memberId, { message: "clubMemberId is required" });
 const attendanceBatchSchema = z.array(attendanceEntrySchema).min(1).max(500);
@@ -556,7 +558,7 @@ meetingRoutes.patch(
             set: Object.keys(patch).length > 0 ? patch : { meetingId: id },
           });
         if (clearProxies) await tx.delete(meetingProxies).where(and(eq(meetingProxies.meetingId, id), eq(meetingProxies.holderClubMemberId, person.id)));
-        if (grantor) await grantProxy(tx, { clubId, meeting: locked!, grantorClubMemberId: grantor.id, holderClubMemberId: person.id, grantedBy: c.get("user").id, byBoard: true });
+        if (grantor) await grantProxy(tx, { clubId, meeting: locked!, grantorClubMemberId: grantor.id, holderClubMemberId: person.id, grantedBy: c.get("user").id, byBoard: true, proofSource: entry.proxyProofSource });
       }
 
       // One audit entry summarizing the batch, not one per row -- this data
