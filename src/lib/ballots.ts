@@ -670,13 +670,20 @@ export async function finalizeBallot(clubId: string, ballotId: string, actorUser
   });
 }
 
-export async function cancelBallot(clubId: string, ballotId: string, actorUserId: string): Promise<BallotRow> {
+/**
+ * Cancels a draft (no reason needed) or an OPEN ballot (reason mandatory, kept on the ballot and in the audit). Once the voting is over
+ * (`closed` / `counted`) the votes exist and the result has to be finalized, never withdrawn: `409 ballot_not_cancellable`.
+ */
+export async function cancelBallot(clubId: string, ballotId: string, actorUserId: string, reason?: string | null): Promise<BallotRow> {
   return db.transaction(async (tx) => {
     const [b] = await tx.select().from(ballots).where(and(eq(ballots.id, ballotId), eq(ballots.clubId, clubId))).for("update");
     if (!b) throw new NotFoundError("Ballot not found");
     if (b.status === "finalized" || b.status === "cancelled") throw fail.conflict("The ballot is already final", "ballot_final");
-    const [row] = await tx.update(ballots).set({ status: "cancelled", updatedAt: new Date() }).where(eq(ballots.id, b.id)).returning();
-    await writeAudit(tx, { eventType: "ballot.cancel", subjectId: b.id, actorUserId, payload: { clubId, previousStatus: b.status } });
+    if (b.status === "closed" || b.status === "counted") throw fail.conflict("A ballot whose voting is over cannot be cancelled: finalize the result", "ballot_not_cancellable", { status: b.status });
+    const cleanReason = reason?.trim() || null;
+    if (b.status === "open" && !cleanReason) throw fail.invalid("Cancelling an open ballot needs a reason", "reason_required");
+    const [row] = await tx.update(ballots).set({ status: "cancelled", cancelReason: cleanReason, updatedAt: new Date() }).where(eq(ballots.id, b.id)).returning();
+    await writeAudit(tx, { eventType: "ballot.cancel", subjectId: b.id, actorUserId, payload: { clubId, previousStatus: b.status, ...(cleanReason ? { reason: cleanReason } : {}) } });
     return row!;
   });
 }

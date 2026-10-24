@@ -161,7 +161,11 @@ describe("opening a ballot", () => {
     const [{ frozen }] = (await db.execute(sql`select voting_roll_frozen_at is not null as frozen from meetings where id = ${meetingId}`)).rows as Array<{ frozen: boolean }>;
     expect(frozen).toBe(true);
     // Leaving the room later does not matter for a ballot that is already open, but the next opening checks again.
-    await call(clerk, `/ballots/${b.id}/cancel`, { method: "POST" });
+    const noReason = await call(clerk, `/ballots/${b.id}/cancel`, { method: "POST" });
+    expect((await json(noReason)).error.details.code).toBe("reason_required");
+    await call(clerk, `/ballots/${b.id}/cancel`, { method: "POST", body: { reason: "Falsch geöffnet" } });
+    const [cancelled] = await db.select({ reason: ballots.cancelReason }).from(ballots).where(eq(ballots.id, b.id));
+    expect(cancelled!.reason).toBe("Falsch geöffnet");
     await checkIn([cm.clerk!, cm.plain!], false);
     const next = await create();
     expect((await open(next.id)).status).toBe(409);
@@ -191,7 +195,7 @@ describe("opening a ballot", () => {
     expect(plainTopic.status).toBe(200);
     expect((await json(plainTopic)).data.warnings).toEqual(["no_invitation", "agenda_item_not_announced"]);
     await setRules(RULES);
-    for (const id of [a.id, statute.id]) await call(clerk, `/ballots/${id}/cancel`, { method: "POST" });
+    for (const id of [a.id, statute.id]) await call(clerk, `/ballots/${id}/cancel`, { method: "POST", body: { reason: "Testende" } });
   });
 
   it("keeps the digital secret ballot switched off until the club allows it", async () => {
@@ -292,7 +296,10 @@ describe("voting (open ballot)", () => {
     expect((await detail(chair, b.id)).status).toBe("closed");
     const [{ n }] = (await db.execute(sql`select count(*)::int as n from audit_log where event_type = 'ballot.close' and subject_id = ${b.id}`)).rows as Array<{ n: number }>;
     expect(n).toBe(1);
-    await call(clerk, `/ballots/${b.id}/cancel`, { method: "POST" });
+    // The voting is over: the result is finalized, never withdrawn (review M3).
+    const cancelLate = await call(clerk, `/ballots/${b.id}/cancel`, { method: "POST", body: { reason: "zu spaet" } });
+    expect(cancelLate.status).toBe(409);
+    expect((await json(cancelLate)).error.details).toMatchObject({ code: "ballot_not_cancellable", status: "closed" });
   });
 
   it("closes, counts and finalizes: named votes for the board, result for members only when final, resolution with checksum", async () => {

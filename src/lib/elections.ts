@@ -216,7 +216,7 @@ export async function createRound(input: CreateRoundInput): Promise<{ ballotId: 
     if (election.status === "decided" || election.status === "closed") throw fail.conflict("The seats are filled", "election_filled");
     const rounds = await tx.select().from(ballots).where(eq(ballots.electionId, election.id)).orderBy(asc(ballots.round));
     if (rounds.some((r) => !["finalized", "cancelled"].includes(r.status))) throw fail.conflict("The previous round is not finished", "round_pending");
-    // A finalized round must be decided (or its result discarded by cancelling) before the next one starts.
+    // A finalized round must be decided before the next one starts (a finalized or counted result cannot be cancelled).
     const decided = new Set((((election.decision ?? {}) as { rounds?: Array<{ ballotId: string }> }).rounds ?? []).map((r) => r.ballotId));
     if (rounds.some((r) => r.status === "finalized" && !decided.has(r.id))) throw fail.conflict("Decide the previous round first", "round_not_decided");
 

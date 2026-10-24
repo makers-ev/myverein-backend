@@ -274,9 +274,15 @@ ballotRoutes.post("/:id/finalize", async (c) => {
   return c.json({ data: await shape(c, row, await optionsOf(db, row.id), true) });
 });
 
+const cancelSchema = z.object({ reason: cleanText(z.string().trim().min(1).max(1000), true).optional() });
+
 ballotRoutes.post("/:id/cancel", async (c) => {
   requireManager(c);
-  const row = await cancelBallot(c.get("clubId"), paramId(c), c.get("user").id);
+  // The body is optional for a draft; an open ballot needs the reason.
+  const raw = await c.req.json().catch(() => ({}));
+  const parsed = cancelSchema.safeParse(raw);
+  if (!parsed.success) throw new ValidationError("Invalid request body", { details: parsed.error.issues });
+  const row = await cancelBallot(c.get("clubId"), paramId(c), c.get("user").id, parsed.data.reason);
   return c.json({ data: await shape(c, row, await optionsOf(db, row.id), true) });
 });
 

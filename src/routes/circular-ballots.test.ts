@@ -255,7 +255,7 @@ describe("reminder", () => {
     const job = (kind: string) => ({ id: randomUUID(), type: "ballot_notify", payload: { kind, ballotId: b.id }, attempt: 1, maxAttempts: 5 });
     await expect(handleBallotNotify(job("opened"))).resolves.toBeUndefined();
     await expect(handleBallotNotify(job("reminder"))).resolves.toBeUndefined();
-    await call(clerk, `/ballots/${b.id}/cancel`, { method: "POST" });
+    await call(clerk, `/ballots/${b.id}/cancel`, { method: "POST", body: { reason: "Testende" } });
     await expect(handleBallotNotify(job("reminder"))).resolves.toBeUndefined();
     expect((await db.select({ status: ballots.status }).from(ballots).where(eq(ballots.id, b.id)))[0]!.status).toBe("cancelled");
   });

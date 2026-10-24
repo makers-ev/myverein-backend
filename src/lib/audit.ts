@@ -27,7 +27,7 @@ export const AUDIT_EVENTS = {
   "admin.job_retry": spec(["actor", "type"]),
   "admin.user_remove": spec(["userId"]),
   "audit_log.export": spec(["clubId", "filters", "rows"]),
-  "ballot.cancel": spec(["clubId", "previousStatus"]),
+  "ballot.cancel": spec(["clubId", "previousStatus", "reason"]),
   "ballot.close": spec(["by", "clubId", "eligible", "participants"]),
   "ballot.count": spec(["clubId", "outcome"]),
   "ballot.create": spec(["anonymous", "clubId", "kind", "meetingId", "mode"]),
