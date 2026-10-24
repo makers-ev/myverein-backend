@@ -149,7 +149,7 @@ describe("approval by a resolution of a later meeting", () => {
     expect((await call(chair, `/meetings/${mv1}`, { method: "DELETE" })).status).toBe(409);
     await expect(db.update(meetingMinutes).set({ content: "manipuliert" }).where(eq(meetingMinutes.meetingId, mv1))).rejects.toThrow();
     await expect(db.update(meetingMinutes).set({ status: "entwurf" }).where(eq(meetingMinutes.meetingId, mv1))).rejects.toThrow();
-    await expect(db.update(meetingMinutes).set({ approvedResolutionId: null }).where(eq(meetingMinutes.meetingId, mv1))).rejects.toThrow();
+    await expect(db.update(meetingMinutes).set({ approvedAt: new Date() }).where(eq(meetingMinutes.meetingId, mv1))).rejects.toThrow();
     await expect(db.delete(meetingMinutes).where(eq(meetingMinutes.meetingId, mv1))).rejects.toThrow();
     const [row] = await db.select().from(meetingMinutes).where(eq(meetingMinutes.meetingId, mv1));
     expect(row!.content).toBe("Protokoll der MV 2025, korrigiert");
@@ -236,5 +236,16 @@ describe("visibility and export", () => {
     expect(text).toContain(sha("Protokoll der MV 2025, korrigiert"));
     expect((await call(plain, `/meetings/${mv1}/minutes/export?format=pdf`)).status).toBe(422);
     void sql;
+  });
+});
+
+describe("database guards (migration 0052)", () => {
+  it("lets new minutes start as a draft only and keeps the decision record insert possible", async () => {
+    const other = await meetingRow("sonstige", "Guard", new Date("2025-07-01T18:00:00Z"));
+    for (const status of ["genehmigt", "zur_genehmigung"]) {
+      await expect(db.insert(meetingMinutes).values({ meetingId: other, version: 1, status, content: "x", contentHash: sha("x"), approvedAt: new Date() })).rejects.toThrow();
+    }
+    await expect(db.insert(meetingMinutes).values({ meetingId: other, version: 1, status: "archiviert", content: "x", contentHash: sha("x") })).rejects.toThrow();
+    await db.insert(meetingMinutes).values({ meetingId: other, version: 1, status: "archiviert", content: "x", contentHash: sha("x"), approvedAt: new Date() });
   });
 });

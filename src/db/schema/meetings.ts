@@ -38,6 +38,8 @@ export const meetings = pgTable(
     participationMode: text("participation_mode").notNull().default("praesenz"),
     // Join link of a hybrid / virtual meeting; only shown to invited people.
     onlineUrl: text("online_url"),
+    // Date changes after the invitation that missed the statute period, each with the reason of `assembly:manage`.
+    scheduleExceptions: jsonb("schedule_exceptions").$type<Array<Record<string, unknown>>>().notNull().default([]),
     // Set once the voting roll (Stimmberechtigtenverzeichnis) is frozen.
     votingRollFrozenAt: timestamp("voting_roll_frozen_at", { withTimezone: true }),
     // The creating account; NULL once it is deleted (the meeting, its resolutions and attendance belong to the club).

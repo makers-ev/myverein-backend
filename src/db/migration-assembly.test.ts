@@ -91,6 +91,6 @@ describe("migrations 0048/0049", () => {
     const columns = await q(pool, `SELECT column_name FROM information_schema.columns WHERE table_name = 'ballot_votes_secret' ORDER BY column_name`);
     expect(columns.map((c) => c.column_name)).toEqual(["ballot_id", "id", "option_id"]);
     const refs = await q(pool, `SELECT confrelid::regclass::text AS target FROM pg_constraint WHERE conrelid = 'ballot_votes_secret'::regclass AND contype = 'f' ORDER BY 1`);
-    expect(refs.map((r) => r.target)).toEqual(["ballot_options", "ballots"]);
+    expect(refs.map((r) => r.target)).toEqual(["ballot_options", "ballot_options", "ballots"]);
   });
 });

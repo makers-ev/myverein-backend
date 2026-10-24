@@ -1,10 +1,10 @@
 import { relations } from "drizzle-orm";
-import { boolean, date, index, integer, jsonb, pgTable, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, date, foreignKey, index, integer, jsonb, pgTable, text, timestamp, unique, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 import { organization, user } from "../../auth/auth-schema.js";
 import { clubMembers } from "./club-members.js";
 import { departments } from "./departments.js";
-import { meetings } from "./meetings.js";
+import { meetingResolutions, meetings } from "./meetings.js";
 
 /**
  * General assembly (Wave 11). All club-member references are `set null` or `cascade` of the row that is about the person,
@@ -132,6 +132,8 @@ export const meetingProxies = pgTable(
     grantorClubMemberId: uuid("grantor_club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
     holderClubMemberId: uuid("holder_club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
     grantedBy: text("granted_by").references(() => user.id, { onDelete: "set null" }),
+    // Documented proof when the board records the proxy for somebody else (e.g. "Vollmacht per E-Mail vom 3.3."); NULL for self-service.
+    proofSource: text("proof_source"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [uniqueIndex("meeting_proxies_meeting_grantor_uidx").on(table.meetingId, table.grantorClubMemberId), index("meeting_proxies_holder_idx").on(table.meetingId, table.holderClubMemberId)],
@@ -170,6 +172,8 @@ export const ballots = pgTable(
     rulesSnapshot: jsonb("rules_snapshot").$type<Record<string, unknown>>(),
     // What counted when the ballot was opened (quorum, number of eligible voters, reference day).
     opening: jsonb("opening").$type<Record<string, unknown>>(),
+    // Why an open ballot was cancelled (mandatory then).
+    cancelReason: text("cancel_reason"),
     closedAt: timestamp("closed_at", { withTimezone: true }),
     countedAt: timestamp("counted_at", { withTimezone: true }),
     finalizedAt: timestamp("finalized_at", { withTimezone: true }),
@@ -197,7 +201,12 @@ export const ballotOptions = pgTable(
     // Set for an election option that is a candidate.
     candidateClubMemberId: uuid("candidate_club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
   },
-  (table) => [index("ballot_options_ballot_idx").on(table.ballotId, table.position), index("ballot_options_candidate_idx").on(table.candidateClubMemberId)],
+  (table) => [
+    index("ballot_options_ballot_idx").on(table.ballotId, table.position),
+    index("ballot_options_candidate_idx").on(table.candidateClubMemberId),
+    // Target of the composite keys of the votes: an option can only be voted for in its own ballot.
+    unique("ballot_options_ballot_id_uq").on(table.ballotId, table.id),
+  ],
 );
 
 /** Voter roll of a ballot. The unique pair stops double votes. `cast_by` is the proxy holder when the vote is cast for someone else. */
@@ -235,7 +244,11 @@ export const ballotVotesOpen = pgTable(
     clubMemberId: uuid("club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("ballot_votes_open_ballot_idx").on(table.ballotId), index("ballot_votes_open_member_idx").on(table.clubMemberId)],
+  (table) => [
+    index("ballot_votes_open_ballot_idx").on(table.ballotId),
+    index("ballot_votes_open_member_idx").on(table.clubMemberId),
+    foreignKey({ name: "ballot_votes_open_option_in_ballot_fk", columns: [table.ballotId, table.optionId], foreignColumns: [ballotOptions.ballotId, ballotOptions.id] }).onDelete("cascade"),
+  ],
 );
 
 /**
@@ -253,7 +266,10 @@ export const ballotVotesSecret = pgTable(
       .notNull()
       .references(() => ballotOptions.id, { onDelete: "cascade" }),
   },
-  (table) => [index("ballot_votes_secret_ballot_idx").on(table.ballotId)],
+  (table) => [
+    index("ballot_votes_secret_ballot_idx").on(table.ballotId),
+    foreignKey({ name: "ballot_votes_secret_option_in_ballot_fk", columns: [table.ballotId, table.optionId], foreignColumns: [ballotOptions.ballotId, ballotOptions.id] }).onDelete("cascade"),
+  ],
 );
 
 /** An election of an office; the rounds are `ballots` (kind election). */
@@ -335,7 +351,9 @@ export const meetingMinutes = pgTable(
     content: text("content").notNull().default(""),
     contentHash: text("content_hash").notNull(),
     approvedInMeetingId: uuid("approved_in_meeting_id").references(() => meetings.id, { onDelete: "set null" }),
-    approvedResolutionId: uuid("approved_resolution_id"),
+    approvedResolutionId: uuid("approved_resolution_id").references(() => meetingResolutions.id, { onDelete: "set null" }),
+    // Counts frozen when the version is submitted (present, eligible, proxies, quorum), so later erasure cannot change them.
+    attendanceSnapshot: jsonb("attendance_snapshot").$type<Record<string, unknown>>(),
     approvedAt: timestamp("approved_at", { withTimezone: true }),
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

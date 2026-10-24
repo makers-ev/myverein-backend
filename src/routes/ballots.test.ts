@@ -355,7 +355,7 @@ describe("secret ballot (ADR option A)", () => {
     const cols = (await db.execute(sql`select column_name from information_schema.columns where table_name = 'ballot_votes_secret' order by column_name`)).rows.map((r) => (r as Json).column_name);
     expect(cols).toEqual(["ballot_id", "id", "option_id"]);
     const fks = (await db.execute(sql`select confrelid::regclass::text as target from pg_constraint where conrelid = 'ballot_votes_secret'::regclass and contype = 'f' order by 1`)).rows.map((r) => (r as Json).target);
-    expect(fks).toEqual(["ballot_options", "ballots"]);
+    expect(fks).toEqual(["ballot_options", "ballot_options", "ballots"]);
     const idDefault = (await db.execute(sql`select column_default from information_schema.columns where table_name = 'ballot_votes_secret' and column_name = 'id'`)).rows[0] as Json;
     expect(idDefault.column_default).toContain("gen_random_uuid");
   });
