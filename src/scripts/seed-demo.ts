@@ -23,6 +23,7 @@ import { findClubBySlug, resetDemoClub } from "./demo/reset.js";
 import { neutralizeOutbound } from "./demo/outbound.js";
 import { seedBoardMeetings } from "./demo/meetings.js";
 import { seedInventory, seedLocations } from "./demo/places.js";
+import { seedConsents, seedPrivacy } from "./demo/privacy.js";
 import { seedRoles } from "./demo/roles.js";
 
 /**
@@ -71,6 +72,8 @@ const STEPS: Step[] = [
   { name: "Abwesenheiten", run: seedAbsences },
   { name: "Vorstandssitzungen", run: seedBoardMeetings },
   { name: "Mitgliederversammlungen", run: seedAssembly },
+  { name: "Einwilligungen", run: seedConsents },
+  { name: "Datenschutz", run: seedPrivacy },
   { name: "Versand abschließen", run: async (ctx) => void (await neutralizeOutbound(ctx)) },
 ];
 
