@@ -5,7 +5,7 @@ import { and, asc, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubRoles } from "../db/schema/club-roles.js";
-import { MINUTES_CONFIRM_ROLES, meetingInvitations, meetingMinutes, meetingMinutesAmendments, meetingMinutesConfirmations, type MeetingMinutesRow } from "../db/schema/assembly.js";
+import { MINUTES_CONFIRM_ROLES, ballots, meetingInvitations, meetingMinutes, meetingMinutesAmendments, meetingMinutesConfirmations, type MeetingMinutesRow } from "../db/schema/assembly.js";
 import { meetingAttendance, meetingResolutions, meetings, type MeetingRow } from "../db/schema/meetings.js";
 import { writeAudit } from "./audit.js";
 import { computeQuorum } from "./assembly-attendance.js";
@@ -153,6 +153,12 @@ export async function approveMinutes(args: { clubId: string; meetingId: string; 
     const approving = found.meeting;
     if (approving.id === meeting.id || !approving.scheduledAt || !meeting.scheduledAt || approving.scheduledAt.getTime() <= meeting.scheduledAt.getTime()) {
       throw fail.invalid("Minutes are approved in a later meeting", "approval_meeting_not_later");
+    }
+    // Only a meeting that was held can approve minutes; a digital resolution must come from a finalized ballot, a manual one is the secretary's record of the hand vote.
+    if (!["abgehalten", "protokolliert"].includes(approving.status)) throw fail.invalid("The approving meeting has not been held", "approval_meeting_not_held");
+    if (found.resolution.source === "digital") {
+      const ballot = found.resolution.ballotId ? await tx.query.ballots.findFirst({ where: eq(ballots.id, found.resolution.ballotId), columns: { status: true } }) : undefined;
+      if (ballot?.status !== "finalized") throw fail.invalid("A digital resolution needs its finalized ballot", "resolution_ballot_missing");
     }
     if (approving.type !== meeting.type) throw fail.invalid("The approving meeting must be of the same type", "approval_meeting_type_mismatch");
     if (!found.resolution.result.trim().toLowerCase().startsWith("angenommen")) throw fail.invalid("The resolution was not accepted", "resolution_not_accepted");

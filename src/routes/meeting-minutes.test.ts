@@ -142,6 +142,12 @@ describe("approval by a resolution of a later meeting", () => {
     expect((await json(await approve(acceptedEarlier))).error.details.code).toBe("approval_meeting_not_later");
     expect((await json(await approve(rejectedLater))).error.details.code).toBe("resolution_not_accepted");
     expect((await approve(randomUUID())).status).toBe(404);
+    // Review M6: the approving meeting has to be held, and a digital resolution needs its finalized ballot.
+    const planned = await db.insert(meetings).values({ clubId: club, type: "mitgliederversammlung", title: "MV geplant", scheduledAt: new Date("2026-09-01T18:00:00Z"), status: "geplant" }).returning({ id: meetings.id });
+    const inPlanned = await resolutionIn(planned[0]!.id, "angenommen");
+    expect((await json(await approve(inPlanned))).error.details.code).toBe("approval_meeting_not_held");
+    const orphan = (await db.insert(meetingResolutions).values({ meetingId: mv2, description: "digital ohne Abstimmung", result: "angenommen", source: "digital" }).returning({ id: meetingResolutions.id }))[0]!.id;
+    expect((await json(await approve(orphan))).error.details.code).toBe("resolution_ballot_missing");
     expect((await call(clerk, `/meetings/${mv1}/minutes/approve`, { method: "POST", body: { resolutionId: acceptedLater } })).status).toBe(200);
     const view = (await json(await call(plain, `/meetings/${mv1}/minutes`))).data;
     expect(view.current).toMatchObject({ status: "genehmigt", approved: true, approvedInMeetingId: mv2, approvedResolutionId: acceptedLater, content: "Protokoll der MV 2025, korrigiert" });
