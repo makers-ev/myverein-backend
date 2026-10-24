@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
+import { ballotOptions, ballotVotesOpen, ballots } from "../db/schema/assembly.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubSettings } from "../db/schema/club-settings.js";
@@ -427,6 +428,28 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     expect((await req("/meetings", cookiePlain)).status).toBe(200);
     expect((await req("/club-members", cookiePlain)).status).toBe(200);
     expect((await req("/club-members/me", cookieGuest)).status).toBe(200);
+  });
+
+  it("answers an external guest 404 on the assembly self-service routes, and a member who is not on the voter roll 403 on a vote (review)", async () => {
+    const some = randomUUID();
+    for (const [method, path, body] of [
+      ["POST", `/meetings/${some}/proxies`, { holderClubMemberId: some }],
+      ["POST", `/meetings/${some}/online/join`, undefined],
+      ["POST", `/meetings/${some}/online/leave`, undefined],
+      ["PATCH", `/meetings/${some}/invitees/me`, { response: "zugesagt" }],
+      ["POST", `/ballots/${some}/vote`, { optionIds: [some] }],
+    ] as const) {
+      const res = await req(path, cookieGuest, { method, body });
+      expect(res.status, `${method} ${path}`).toBe(404);
+    }
+    // A running ballot whose voter roll does not contain the caller: 403 not_eligible, nothing is counted.
+    const [ballot] = await db.insert(ballots).values({ clubId, title: "Matrix", status: "open", mode: "circular", kind: "resolution", audience: "board", topic: "allgemein", maxChoices: 1, opensAt: new Date(Date.now() - 60_000), closesAt: new Date(Date.now() + 3_600_000), createdBy: founderId }).returning({ id: ballots.id });
+    const [option] = await db.insert(ballotOptions).values({ ballotId: ballot!.id, position: 1, label: "Ja", kind: "yes" }).returning({ id: ballotOptions.id });
+    const vote = await req(`/ballots/${ballot!.id}/vote`, cookiePlain, { method: "POST", body: { optionIds: [option!.id] } });
+    expect(vote.status).toBe(403);
+    expect((await vote.json()).error.details.code).toBe("not_eligible");
+    const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(ballotVotesOpen).where(eq(ballotVotesOpen.ballotId, ballot!.id));
+    expect(n).toBe(0);
   });
 
   it("hides calendars and events without a grant from an external guest (no club-wide rule 1), shows granted ones", async () => {
