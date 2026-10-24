@@ -129,6 +129,22 @@ describe("push for reminders", () => {
   });
 });
 
+describe("push deep links of the general assembly", () => {
+  it("opens the ballot for ballot.* and the assembly (real meeting id) for an invitation, with ids only", () => {
+    expect(pushDataFor("ballot.opened", "b-1", null, clubId, false)).toEqual({ type: "ballot", urgent: false, clubId, ballotId: "b-1" });
+    expect(pushDataFor("ballot.reminder", "b-1#2030-01-01", null, clubId, false)).toMatchObject({ type: "ballot", ballotId: "b-1" });
+    // The ref of an invitation is the invitation id, never a meeting id.
+    const invitation = pushDataFor("meeting.invitation", "inv-1", null, clubId, false, "m-9");
+    expect(invitation).toEqual({ type: "assembly", urgent: false, clubId, meetingId: "m-9" });
+    expect(pushDataFor("meeting.invitation", "inv-1", null, clubId, false)).toEqual({ type: "assembly", urgent: false, clubId });
+    // Other meeting events keep their behaviour.
+    expect(pushDataFor("meeting.changed", "m-1", null, clubId, false)).toMatchObject({ type: "meeting", meetingId: "m-1" });
+    expect(JSON.stringify([invitation, pushDataFor("ballot.opened", "b-1", null, clubId, false)])).not.toMatch(/title|choice|label/i);
+    expect(genericPushText("ballot.opened", "announcement")).toBe("Neue Abstimmung");
+    expect(genericPushText("meeting.invitation", "announcement")).toBe("Einladung zur Versammlung");
+  });
+});
+
 describe("push for decisions (mandatory)", () => {
   it("approval carries in_app + email + push and an id-free inbox payload", async () => {
     const applicationId = randomUUID();
