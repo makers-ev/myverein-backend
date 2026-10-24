@@ -112,9 +112,15 @@ describe("draft, confirmation and submission", () => {
     const early = await call(chair, `/meetings/${mv1}/minutes/submit`, { method: "POST" });
     expect(early.status).toBe(409);
     expect((await json(early)).error.details).toMatchObject({ code: "minutes_not_confirmed", missing: ["leitung", "schriftfuehrung"] });
+    // Each confirmation belongs to its role (review M5): the secretary exists, so the chair cannot stand in for them.
+    const wrong = await call(clerk, `/meetings/${mv1}/minutes/confirm`, { method: "POST", body: { role: "leitung" } });
+    expect(wrong.status).toBe(403);
+    expect((await json(wrong)).error.details.code).toBe("role_required");
+    expect((await call(chair, `/meetings/${mv1}/minutes/confirm`, { method: "POST", body: { role: "schriftfuehrung" } })).status).toBe(403);
     expect((await call(chair, `/meetings/${mv1}/minutes/confirm`, { method: "POST", body: { role: "leitung" } })).status).toBe(200);
-    const same = await call(chair, `/meetings/${mv1}/minutes/confirm`, { method: "POST", body: { role: "schriftfuehrung" } });
-    expect((await json(same)).error.details.code).toBe("minutes_two_persons");
+    // The same account cannot confirm twice for the two roles (it would need both roles, which the secretary rule forbids anyway).
+    const same = await call(chair, `/meetings/${mv1}/minutes/confirm`, { method: "POST", body: { role: "leitung" } });
+    expect((await json(same)).error.details.code).toBe("minutes_already_confirmed");
     expect((await call(plain, `/meetings/${mv1}/minutes/confirm`, { method: "POST", body: { role: "schriftfuehrung" } })).status).toBe(403);
     // A change of the text drops the confirmations.
     await call(chair, `/meetings/${mv1}/minutes`, { method: "PUT", body: { content: "Protokoll der MV 2025, korrigiert" } });

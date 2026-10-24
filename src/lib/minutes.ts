@@ -2,13 +2,15 @@ import { createHash } from "node:crypto";
 
 import { and, asc, desc, eq, inArray, isNotNull } from "drizzle-orm";
 
+import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
+import { clubRoles } from "../db/schema/club-roles.js";
 import { MINUTES_CONFIRM_ROLES, meetingInvitations, meetingMinutes, meetingMinutesAmendments, meetingMinutesConfirmations, type MeetingMinutesRow } from "../db/schema/assembly.js";
 import { meetingAttendance, meetingResolutions, meetings, type MeetingRow } from "../db/schema/meetings.js";
 import { writeAudit } from "./audit.js";
 import { computeQuorum } from "./assembly-attendance.js";
 import { deliverySummary } from "./assembly-invitation.js";
-import { ConflictError, NotFoundError, ValidationError } from "./errors.js";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "./errors.js";
 import { clubTimezone, formatWhen, locationName } from "./event-notify.js";
 import { clubMembersByIds } from "./meeting-members.js";
 
@@ -72,8 +74,25 @@ export async function saveMinutesDraft(args: { clubId: string; meetingId: string
   });
 }
 
+const CHAIR_ROLES = ["vorsitz", "stellv_vorsitz"];
+
+/**
+ * `leitung` is confirmed by the chair or the deputy chair, `schriftfuehrung` by the secretary; a club that has no secretary at all lets the
+ * chair or deputy stand in. 403 `role_required` otherwise.
+ */
+async function assertMayConfirm(clubId: string, role: (typeof MINUTES_CONFIRM_ROLES)[number], roleTypes: readonly string[]): Promise<void> {
+  const chair = roleTypes.some((r) => CHAIR_ROLES.includes(r));
+  if (role === "leitung" ? chair : roleTypes.includes("schriftfuehrer")) return;
+  if (role === "schriftfuehrung" && chair) {
+    const [secretary] = await db.select({ id: clubRoles.id }).from(clubRoles).innerJoin(member, eq(member.id, clubRoles.memberId)).where(and(eq(member.organizationId, clubId), eq(clubRoles.roleType, "schriftfuehrer"))).limit(1);
+    if (!secretary) return;
+  }
+  throw new ForbiddenError("This confirmation belongs to another role", { details: { code: "role_required", role } });
+}
+
 /** Chair or secretary confirms the current draft text. Two different accounts are needed for the two roles. */
-export async function confirmMinutes(args: { clubId: string; meetingId: string; role: (typeof MINUTES_CONFIRM_ROLES)[number]; userId: string }): Promise<MeetingMinutesRow> {
+export async function confirmMinutes(args: { clubId: string; meetingId: string; role: (typeof MINUTES_CONFIRM_ROLES)[number]; userId: string; roleTypes: readonly string[] }): Promise<MeetingMinutesRow> {
+  await assertMayConfirm(args.clubId, args.role, args.roleTypes);
   return db.transaction(async (tx) => {
     await lockMeeting(tx, args.clubId, args.meetingId);
     const latest = await latestOf(tx, args.meetingId);

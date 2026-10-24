@@ -60,7 +60,7 @@ meetingMinutesRoutes.put("/:id/minutes", validate(z.object({ content: minutesCon
 meetingMinutesRoutes.post("/:id/minutes/confirm", validate(z.object({ role: z.enum(MINUTES_CONFIRM_ROLES) })), async (c) => {
   requireAssemblyManage(c);
   const meeting = await loadClubMeeting(c, idOf(c));
-  await confirmMinutes({ clubId: c.get("clubId"), meetingId: meeting.id, role: c.req.valid("json").role, userId: c.get("user").id });
+  await confirmMinutes({ clubId: c.get("clubId"), meetingId: meeting.id, role: c.req.valid("json").role, userId: c.get("user").id, roleTypes: c.get("clubRoleTypes") });
   return c.json({ data: await readMinutes(meeting, true) });
 });
 
