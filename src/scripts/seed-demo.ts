@@ -14,7 +14,11 @@ import {
   type DemoCtx,
   type DemoOptions,
 } from "./demo/context.js";
+import { seedCustomFields } from "./demo/fields.js";
+import { seedGuardians } from "./demo/guardians.js";
+import { seedDepartmentLeads, seedMembers } from "./demo/members.js";
 import { findClubBySlug, resetDemoClub } from "./demo/reset.js";
+import { seedRoles } from "./demo/roles.js";
 
 /**
  * Demo club seed (`npm run seed:demo`): ONE fully populated club ("Demo Sportverein Wiesbach e.V.") so the whole MyVerein
@@ -49,6 +53,11 @@ const STEPS: Step[] = [
   { name: "Abteilungen", run: seedDepartments },
   { name: "Kalender (Standard)", run: seedDefaultCalendar },
   { name: "Kontomitgliedschaften", run: joinAccounts },
+  { name: "Mitglieder", run: seedMembers },
+  { name: "Abteilungsleitungen", run: seedDepartmentLeads },
+  { name: "Vereinsrollen", run: seedRoles },
+  { name: "Erziehungsberechtigte", run: seedGuardians },
+  { name: "Zusatzfelder und Qualifikationen", run: async (ctx) => void (await seedCustomFields(ctx)) },
 ];
 
 export function optionsFromEnv(argv: readonly string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): DemoOptions {
