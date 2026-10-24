@@ -1,8 +1,11 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../../db/client.js";
+import { meetingInvitationDeliveries, meetingInvitations } from "../../db/schema/assembly.js";
+import { meetings } from "../../db/schema/meetings.js";
 import { messageDeliveries } from "../../db/schema/communication.js";
 import { jobs } from "../../db/schema/jobs.js";
+import { syncInvitationDeliveries } from "../../lib/assembly-invitation.js";
 import { EMAIL_JOB_TYPE, PUSH_JOB_TYPE } from "../../lib/notify/types.js";
 import type { DemoCtx } from "./context.js";
 
@@ -12,6 +15,12 @@ import type { DemoCtx } from "./context.js";
  * closed as sent here and their jobs removed: running the worker afterwards must not try to mail anybody. In-app entries stay.
  */
 export async function neutralizeOutbound(ctx: DemoCtx): Promise<number> {
+  const count = await closeQueuedMessages(ctx);
+  await settleInvitationProof(ctx);
+  return count;
+}
+
+async function closeQueuedMessages(ctx: DemoCtx): Promise<number> {
   const queued = await db
     .select({ id: messageDeliveries.id })
     .from(messageDeliveries)
@@ -25,4 +34,32 @@ export async function neutralizeOutbound(ctx: DemoCtx): Promise<number> {
   }
   ctx.log(`${ids.length} wartende E-Mail-/Push-Zustellungen als versendet markiert (Demo-Adressen sind nicht zustellbar)`);
   return ids.length;
+}
+
+/**
+ * The delivery proof of every invitation follows the (now closed) mails; members without any address stay on the post list.
+ * Older invitations were posted by hand ("manual_posted"), the newest one still waits for the clerk.
+ */
+async function settleInvitationProof(ctx: DemoCtx): Promise<void> {
+  const rows = await db
+    .select({ id: meetingInvitations.id, meetingId: meetingInvitations.meetingId, sentAt: meetingInvitations.sentAt, version: meetingInvitations.version })
+    .from(meetingInvitations)
+    .innerJoin(meetings, eq(meetings.id, meetingInvitations.meetingId))
+    .where(eq(meetings.clubId, ctx.clubId))
+    .orderBy(asc(meetingInvitations.sentAt));
+  const newestPerMeeting = new Map<string, number>();
+  for (const r of rows) newestPerMeeting.set(r.meetingId, Math.max(newestPerMeeting.get(r.meetingId) ?? 0, r.version));
+  for (const inv of rows) {
+    await syncInvitationDeliveries(inv.id);
+    const proofAt = new Date(inv.sentAt.getTime() + 2 * 60_000);
+    await db.update(meetingInvitationDeliveries).set({ statusAt: proofAt }).where(and(eq(meetingInvitationDeliveries.invitationId, inv.id), inArray(meetingInvitationDeliveries.channel, ["email", "inapp"])));
+    const posted = inv.version < (newestPerMeeting.get(inv.meetingId) ?? 0) || inv.sentAt.getTime() < ctx.now.getTime() - 7 * 86_400_000;
+    if (posted) {
+      const day = new Date(inv.sentAt.getTime() + 86_400_000);
+      await db
+        .update(meetingInvitationDeliveries)
+        .set({ status: "manual_posted", postedAt: day, statusAt: day })
+        .where(and(eq(meetingInvitationDeliveries.invitationId, inv.id), eq(meetingInvitationDeliveries.channel, "post")));
+    }
+  }
 }

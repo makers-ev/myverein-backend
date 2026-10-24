@@ -41,6 +41,8 @@ interface MemberSpec {
   exitReason?: string | null;
   /** Account-less members get no number while only interested. */
   noNumber?: boolean;
+  /** Local part of the contact e-mail (shared by siblings); null = no e-mail address (reached by post). Default: derived from the name. */
+  email?: string | null;
   phone?: boolean;
   address?: boolean;
   emergency?: [string, string];
@@ -73,10 +75,10 @@ function specs(today: string): MemberSpec[] {
     { key: "eltern", account: "eltern", first: "Petra", last: "Wagner", birth: A(40, 200), cat: "aktiv", status: "interessent", joined: J(3, 15), phone: true, address: true, noNumber: true, history: [] },
     { key: "gast", account: "gast", first: "Katrin", last: "Meyer", display: "Dr. Katrin Meyer", birth: A(46, 60), cat: "aktiv", status: "interessent", joined: D(-120), noNumber: true, history: [] },
     // --- children and youth (without account) ---
-    { key: "noah", first: "Noah", last: "Wagner", birth: A(10, 80), cat: "kind", status: "aktiv", joined: J(3, 10), emergency: ["Petra Wagner", "0151 5550 2001"], depts: [{ key: "turnen" }], history: [entry(J(3, 10), "aktiv", "kind")] },
-    { key: "mia", first: "Mia", last: "Wagner", birth: A(8, 150), cat: "kind", status: "aktiv", joined: J(2, 30), emergency: ["Petra Wagner", "0151 5550 2001"], depts: [{ key: "turnen" }] },
-    { key: "lina", first: "Lina", last: "Wagner", birth: A(6, 20), cat: "kind", status: "aktiv", joined: D(-20), emergency: ["Petra Wagner", "0151 5550 2001"], depts: [{ key: "turnen" }] },
-    { key: "tim", first: "Tim", last: "Wagner", birth: A(18, 25), cat: "jugend", status: "aktiv", joined: J(9, 60), depts: [{ key: "fussball", until: D(-60) }], history: [entry(J(9, 60), "aktiv", "kind"), { on: J(4, 20), from: "aktiv", to: "aktiv", fromCat: "kind", toCat: "jugend", reason: "Altersübergang Kinder -> Jugend" }] },
+    { key: "noah", email: "petra.wagner", first: "Noah", last: "Wagner", birth: A(10, 80), cat: "kind", status: "aktiv", joined: J(3, 10), emergency: ["Petra Wagner", "0151 5550 2001"], depts: [{ key: "turnen" }], history: [entry(J(3, 10), "aktiv", "kind")] },
+    { key: "mia", email: "petra.wagner", first: "Mia", last: "Wagner", birth: A(8, 150), cat: "kind", status: "aktiv", joined: J(2, 30), emergency: ["Petra Wagner", "0151 5550 2001"], depts: [{ key: "turnen" }] },
+    { key: "lina", email: "petra.wagner", first: "Lina", last: "Wagner", birth: A(6, 20), cat: "kind", status: "aktiv", joined: D(-20), emergency: ["Petra Wagner", "0151 5550 2001"], depts: [{ key: "turnen" }] },
+    { key: "tim", email: "petra.wagner", first: "Tim", last: "Wagner", birth: A(18, 25), cat: "jugend", status: "aktiv", joined: J(9, 60), depts: [{ key: "fussball", until: D(-60) }], history: [entry(J(9, 60), "aktiv", "kind"), { on: J(4, 20), from: "aktiv", to: "aktiv", fromCat: "kind", toCat: "jugend", reason: "Altersübergang Kinder -> Jugend" }] },
     { key: "finn", first: "Finn", last: "Fischer", birth: A(9, 33), cat: "kind", status: "aktiv", joined: J(2, 12), emergency: ["Lukas Fischer", "0151 5550 3001"], depts: [{ key: "turnen" }] },
     { key: "leon", first: "Leon", last: "Schulze", birth: A(12, 110), cat: "kind", status: "aktiv", joined: J(1, 40), depts: [{ key: "schwimmen" }] },
     { key: "hannah", first: "Hannah", last: "Becker", birth: A(14, 70), cat: "jugend", status: "aktiv", joined: J(3, 90), depts: [{ key: "schwimmen" }] },
@@ -93,10 +95,10 @@ function specs(today: string): MemberSpec[] {
     },
     { key: "sophie", first: "Sophie", last: "Lang", birth: yearsAgo(today, 14, -20), cat: "kind", status: "aktiv", joined: J(2, 100), depts: [{ key: "turnen" }] },
     // --- honorary / passive / sponsors ---
-    { key: "dieter", first: "Dieter", last: "Hoffmann", birth: A(78, 20), cat: "ehrenmitglied", status: "aktiv", joined: J(51, 30), phone: true, address: true },
+    { key: "dieter", email: null, first: "Dieter", last: "Hoffmann", birth: A(78, 20), cat: "ehrenmitglied", status: "aktiv", joined: J(51, 30), phone: true, address: true },
     { key: "gisela", first: "Gisela", last: "Hoffmann", birth: A(76, 100), cat: "ehrenmitglied", status: "verstorben", joined: J(48, 10), left: D(-150), exitReason: "Verstorben", address: true, history: [entry(J(48, 10), "aktiv", "ehrenmitglied"), { on: D(-150), from: "aktiv", to: "verstorben", reason: "Verstorben" }] },
     { key: "walter", first: "Walter", last: "Krüger", birth: A(81, 140), cat: "ehrenmitglied", status: "aktiv", joined: J(55, 9), address: true },
-    { key: "renate", first: "Renate", last: "Albrecht", birth: A(66, 50), cat: "passiv", status: "aktiv", joined: J(30, 20), phone: true, address: true, history: [entry(J(30, 20), "aktiv", "aktiv"), { on: J(6, 0), from: "aktiv", to: "aktiv", fromCat: "aktiv", toCat: "passiv", reason: "Wechsel zur passiven Mitgliedschaft" }], depts: [{ key: "tennis" }] },
+    { key: "renate", email: null, first: "Renate", last: "Albrecht", birth: A(66, 50), cat: "passiv", status: "aktiv", joined: J(30, 20), phone: true, address: true, history: [entry(J(30, 20), "aktiv", "aktiv"), { on: J(6, 0), from: "aktiv", to: "aktiv", fromCat: "aktiv", toCat: "passiv", reason: "Wechsel zur passiven Mitgliedschaft" }], depts: [{ key: "tennis" }] },
     { key: "klaus", first: "Klaus", last: "Zimmermann", birth: A(59, 210), cat: "passiv", status: "aktiv", joined: J(22, 60), phone: true, depts: [{ key: "tennis" }] },
     { key: "birgit", first: "Birgit", last: "Roth", birth: A(52, 15), cat: "foerdernd", status: "aktiv", joined: J(7, 100), address: true },
     { key: "meier", first: null, last: "Autohaus Meier GmbH", display: "Autohaus Meier GmbH", birth: null, cat: "foerdernd", status: "aktiv", joined: J(6, 5), address: true },
@@ -176,7 +178,7 @@ export async function seedMembers(ctx: DemoCtx): Promise<void> {
           .values({
             clubId: ctx.clubId,
             ...contactFields,
-            contactEmail: `${slugName(display)}@${ctx.opts.emailDomain}`,
+            contactEmail: s.email === null ? null : `${s.email ?? slugName(display)}@${ctx.opts.emailDomain}`,
             memberNumber,
             privacyNoticeSentAt: null,
           })
