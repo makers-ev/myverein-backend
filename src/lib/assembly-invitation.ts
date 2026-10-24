@@ -406,3 +406,15 @@ export async function deliverySummary(invitationId: string): Promise<Array<{ cha
 }
 
 export type { AssemblyRules };
+
+/**
+ * A change of the meeting date after the invitation went out is judged against the first invitation: the days between ITS sending day and the
+ * new meeting day must still meet the statute period (`invitationRulesAtSending` = rules frozen with that invitation). Returns null while no
+ * invitation exists or the period holds; otherwise the failed check, which needs an exception reason of `assembly:manage` to go ahead.
+ */
+export async function rescheduleCheck(meetingId: string, newDate: Date, timezone: string): Promise<{ invitation: MeetingInvitationRow; period: PeriodCheck } | null> {
+  const [first] = await db.select().from(meetingInvitations).where(eq(meetingInvitations.meetingId, meetingId)).orderBy(asc(meetingInvitations.version)).limit(1);
+  if (!first) return null;
+  const period = checkInvitationPeriod({ scheduledAt: newDate }, first.rulesSnapshot as unknown as Pick<AssemblyRules, "invitationMinDays" | "invitationDeliveryBufferDays">, first.sentAt, timezone);
+  return period.ok ? null : { invitation: first, period };
+}

@@ -10,6 +10,7 @@ import {
   ballotVotesSecret,
   ballots,
   meetingAgendaItems,
+  meetingInvitations,
   meetingMinutes,
   meetingProxies,
   type BallotOptionRow,
@@ -296,6 +297,14 @@ export async function openBallot(args: OpenBallotArgs): Promise<{ ballot: Ballot
       const eligibility = await loadEligibility(tx, clubId, meeting);
       asOf = eligibility.asOf;
       voters = [...eligibility.byMember.entries()].filter(([, e]) => e.eligible).map(([clubMemberId, e]) => ({ clubMemberId, basis: e.basis }));
+
+      // Record the invitation the assembly was called with; a missing or late one is a warning on the ballot, shown with the result.
+      const [firstInvitation] = await tx.select().from(meetingInvitations).where(eq(meetingInvitations.meetingId, meeting.id)).orderBy(asc(meetingInvitations.version)).limit(1);
+      if (!firstInvitation) warnings.push("no_invitation");
+      else {
+        if ((firstInvitation.periodCheck as { ok?: boolean }).ok === false) warnings.push(firstInvitation.exceptionReason ? "invitation_period_exception" : "invitation_period_violated");
+        if (meeting.scheduleExceptions.length > 0) warnings.push("date_changed_after_invitation");
+      }
 
       // A resolution needs an announced agenda item; statute-level topics and elections are blocked outright.
       const item = b.agendaItemId ? await tx.query.meetingAgendaItems.findFirst({ where: eq(meetingAgendaItems.id, b.agendaItemId) }) : undefined;

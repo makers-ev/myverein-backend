@@ -307,3 +307,23 @@ describe("invitation", () => {
     await db.update(clubSettings).set({ assemblyRules: RULES }).where(eq(clubSettings.clubId, club));
   });
 });
+
+describe("moving the date after the invitation (review M1)", () => {
+  it("re-checks the period from the first invitation and records an exception", async () => {
+    const meetingId = await newMeeting(chair, inDays(30));
+    await addItem(chair, meetingId, "Berichte");
+    expect((await call(chair, `/meetings/${meetingId}/invitations`, { method: "POST", body: {} })).status).toBe(201);
+    // Later is fine, too early (10 days < 14 + 3) is refused with the facts.
+    expect((await call(chair, `/meetings/${meetingId}`, { method: "PATCH", body: { scheduledAt: inDays(40) } })).status).toBe(200);
+    const refused = await call(chair, `/meetings/${meetingId}`, { method: "PATCH", body: { scheduledAt: inDays(10) } });
+    expect(refused.status).toBe(422);
+    expect((await json(refused)).error.details).toMatchObject({ code: "invitation_period_violated", requiredDays: 17 });
+    expect((await call(chair, `/meetings/${meetingId}`, { method: "PATCH", body: { scheduledAt: null } })).status).toBe(422);
+    const ok = await json(await call(chair, `/meetings/${meetingId}`, { method: "PATCH", body: { scheduledAt: inDays(10), exceptionReason: "Hallenvermieter kann nur dann" } }));
+    expect(ok.data.scheduleExceptions).toHaveLength(1);
+    expect(ok.data.scheduleExceptions[0]).toMatchObject({ reason: "Hallenvermieter kann nur dann", requiredDays: 17 });
+    // A meeting that was never invited moves freely.
+    const free = await newMeeting(chair, inDays(30));
+    expect((await call(chair, `/meetings/${free}`, { method: "PATCH", body: { scheduledAt: inDays(3) } })).status).toBe(200);
+  });
+});

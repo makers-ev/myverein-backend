@@ -20,6 +20,7 @@ import { loadClubMeeting, canReadAllMeetings, denyGuests } from "../lib/meeting-
 import { meetingAssemblyRoutes } from "./meeting-assembly.js";
 import { meetingMinutesRoutes } from "./meeting-minutes.js";
 import { attachMinutes, saveMinutesDraft } from "../lib/minutes.js";
+import { rescheduleCheck } from "../lib/assembly-invitation.js";
 import { assertParticipation, PARTICIPATION_MODES, withVisibleOnlineUrl } from "../lib/meeting-online.js";
 import { meetingOnlineRoutes } from "./meeting-online.js";
 import { cleanText } from "../lib/text-policy.js";
@@ -131,6 +132,8 @@ const updateMeetingSchema = z.object({
   minutes: cleanText(z.string().max(200_000), true).nullable().optional(),
   participationMode: z.enum(PARTICIPATION_MODES).optional(),
   onlineUrl: joinUrlSchema.nullable().optional(),
+  /** Needed (with `assembly:manage`) to move the date of an invited assembly although the invitation period is no longer met; recorded and shown in the minutes. */
+  exceptionReason: cleanText(z.string().trim().min(1).max(1000), true).optional(),
   /** `false` saves a reschedule / cancellation without telling the invitees (audited). */
   notify: z.boolean().optional(),
 });
@@ -150,10 +153,24 @@ meetingRoutes.patch(
       throw new ForbiddenError("Missing meetings:write permission");
     }
     const id = c.req.param("id");
-    const { notify: notifyFlag, minutes, ...body } = c.req.valid("json");
+    const { notify: notifyFlag, minutes, exceptionReason, ...body } = c.req.valid("json");
     const existing = await loadClubMeeting(c, id);
 
     // The free-text field is the working draft of the minutes now (versions, approval and lock: lib/minutes.ts).
+    // After the formal invitation the new date must still meet the statute period (counted from the day the invitation went out).
+    let scheduleException: Record<string, unknown> | null = null;
+    if (body.scheduledAt !== undefined && existing.type === "mitgliederversammlung" && body.scheduledAt !== existing.scheduledAt?.toISOString()) {
+      if (body.scheduledAt === null) {
+        if (await rescheduleCheck(id, new Date(), await clubTimezone(clubId))) throw new ValidationError("An invited assembly keeps its date", { details: { code: "meeting_without_date" } });
+      } else {
+        const failed = await rescheduleCheck(id, new Date(body.scheduledAt), await clubTimezone(clubId));
+        if (failed) {
+          if (!exceptionReason) throw new ValidationError("The invitation period is no longer met for the new date", { details: { code: "invitation_period_violated", ...failed.period } });
+          if (!hasClubPermission(roleTypes, "assembly:manage")) throw new ForbiddenError("Missing assembly:manage permission for an exception");
+          scheduleException = { at: new Date().toISOString(), from: existing.scheduledAt?.toISOString() ?? null, to: body.scheduledAt, reason: exceptionReason, requiredDays: failed.period.requiredDays, daysAvailable: failed.period.daysAvailable, by: c.get("user").id };
+        }
+      }
+    }
     if (body.participationMode !== undefined || body.onlineUrl !== undefined) {
       const mode = (body.participationMode ?? existing.participationMode) as (typeof PARTICIPATION_MODES)[number];
       // Switching back to the room clears the link; a link on a room meeting is refused.
@@ -169,6 +186,7 @@ meetingRoutes.patch(
       .set({
         ...body,
         scheduledAt: body.scheduledAt === undefined ? undefined : body.scheduledAt === null ? null : new Date(body.scheduledAt),
+        ...(scheduleException ? { scheduleExceptions: [...existing.scheduleExceptions, scheduleException] } : {}),
         updatedAt: new Date(),
       })
       .where(eq(meetings.id, id))

@@ -183,7 +183,7 @@ describe("opening a ballot", () => {
     // A plain resolution is only warned about, and the warning travels into the result.
     const plainTopic = await open(a.id);
     expect(plainTopic.status).toBe(200);
-    expect((await json(plainTopic)).data.warnings).toEqual(["agenda_item_not_announced"]);
+    expect((await json(plainTopic)).data.warnings).toEqual(["no_invitation", "agenda_item_not_announced"]);
     await setRules(RULES);
     for (const id of [a.id, statute.id]) await call(clerk, `/ballots/${id}/cancel`, { method: "POST" });
   });
