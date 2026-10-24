@@ -118,7 +118,8 @@ export interface CreateBallotInput {
   title: string;
   description?: string | null | undefined;
   secret: boolean;
-  topic: MajorityTopic;
+  /** Optional: taken from the agenda item; see `resolveTopic`. */
+  topic?: MajorityTopic | undefined;
   maxChoices: number;
   choices?: string[] | undefined;
   allowAbstain?: boolean | undefined;
@@ -144,6 +145,24 @@ async function assertMeetingAndItem(executor: DbExecutor, clubId: string, meetin
   }
 }
 
+/**
+ * The topic of a resolution decides its majority, so it is not free text of the ballot: with an agenda item it IS the topic of that item
+ * (a different one is `topic_mismatch`, never lower, never higher than what the invitation announced), without an agenda item only
+ * `allgemein` is possible (`topic_needs_agenda_item`). A circular resolution has no agenda and keeps the requested topic.
+ */
+async function resolveTopic(executor: DbExecutor, args: { circular: boolean; agendaItemId: string | null; requested: MajorityTopic | undefined; fallback: MajorityTopic }): Promise<MajorityTopic> {
+  if (args.circular) return args.requested ?? args.fallback;
+  if (args.agendaItemId) {
+    const item = await executor.query.meetingAgendaItems.findFirst({ where: eq(meetingAgendaItems.id, args.agendaItemId), columns: { topic: true } });
+    if (!item) throw new NotFoundError("Agenda item not found");
+    if (args.requested !== undefined && args.requested !== item.topic) throw fail.invalid("The topic of a ballot is the topic of its agenda item", "topic_mismatch", { agendaItemTopic: item.topic });
+    return item.topic as MajorityTopic;
+  }
+  const topic = args.requested ?? "allgemein";
+  if (topic !== "allgemein") throw fail.invalid("A topic other than allgemein needs an announced agenda item", "topic_needs_agenda_item");
+  return topic;
+}
+
 export async function createBallot(input: CreateBallotInput): Promise<BallotRow> {
   const circular = input.mode === "circular";
   if (circular && input.meetingId) throw fail.invalid("A circular resolution has no meeting; its record is created when it is finalized", "circular_without_meeting");
@@ -151,6 +170,7 @@ export async function createBallot(input: CreateBallotInput): Promise<BallotRow>
   if (!circular && input.audience) throw fail.invalid("audience applies to circular resolutions only", "audience_circular_only");
   await assertSwitches(db, input.clubId, input.mode, input.secret);
   if (input.meetingId) await assertMeetingAndItem(db, input.clubId, input.meetingId, input.agendaItemId);
+  const topic = await resolveTopic(db, { circular, agendaItemId: input.agendaItemId ?? null, requested: input.topic, fallback: "allgemein" });
   const { options, maxChoices } = buildOptions({ choices: input.choices, allowAbstain: input.allowAbstain, circular, maxChoices: input.maxChoices });
   return db.transaction(async (tx) => {
     const row = await insertBallot(
@@ -165,7 +185,7 @@ export async function createBallot(input: CreateBallotInput): Promise<BallotRow>
         kind: "resolution",
         audience: circular ? (input.audience ?? "all_voting_members") : null,
         secret: input.secret,
-        topic: input.topic,
+        topic,
         maxChoices,
         closesAt: input.closesAt ?? null,
         createdBy: input.actorUserId,
@@ -193,7 +213,14 @@ export async function updateBallot(clubId: string, ballotId: string, actorUserId
     if (patch.title !== undefined) set.title = patch.title;
     if (patch.description !== undefined) set.description = patch.description;
     if (patch.secret !== undefined) set.secret = patch.secret;
-    if (patch.topic !== undefined) set.topic = patch.topic;
+    if (patch.topic !== undefined || patch.agendaItemId !== undefined) {
+      set.topic = await resolveTopic(tx, {
+        circular,
+        agendaItemId: patch.agendaItemId !== undefined ? patch.agendaItemId : locked.agendaItemId,
+        requested: patch.topic,
+        fallback: locked.topic as MajorityTopic,
+      });
+    }
     if (patch.audience !== undefined) set.audience = patch.audience;
     if (patch.closesAt !== undefined) set.closesAt = patch.closesAt;
     if (patch.agendaItemId !== undefined) set.agendaItemId = patch.agendaItemId;
@@ -240,7 +267,6 @@ function requireRules(rules: AssemblyRules, b: Pick<BallotRow, "topic" | "kind" 
   return { majority: majority! };
 }
 
-const STATUTE_LEVEL_TOPICS: readonly string[] = ["satzungsaenderung", "zweckaenderung", "aufloesung"];
 
 export interface OpenBallotArgs {
   clubId: string;
@@ -308,8 +334,10 @@ export async function openBallot(args: OpenBallotArgs): Promise<{ ballot: Ballot
 
       // A resolution needs an announced agenda item; statute-level topics and elections are blocked outright.
       const item = b.agendaItemId ? await tx.query.meetingAgendaItems.findFirst({ where: eq(meetingAgendaItems.id, b.agendaItemId) }) : undefined;
+      // The agenda item may have been edited after the ballot was drafted: its topic still decides the majority.
+      if (item && b.kind === "resolution" && item.topic !== b.topic) throw fail.conflict("The topic of the agenda item changed: update the ballot", "topic_mismatch", { agendaItemTopic: item.topic });
       if (!item || item.announcedInInvitationId === null) {
-        const statuteLevel = b.kind === "election" || STATUTE_LEVEL_TOPICS.includes(b.topic);
+        const statuteLevel = b.kind === "election" || b.topic !== "allgemein";
         if (statuteLevel && rules.agendaRequiredInInvitation !== false) throw fail.invalid("This topic needs an agenda item announced in the invitation", "agenda_item_not_announced");
         warnings.push("agenda_item_not_announced");
       }

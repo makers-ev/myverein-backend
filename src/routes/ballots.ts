@@ -166,7 +166,7 @@ const createSchema = z.object({
   title: bodyFields.title,
   description: bodyFields.description,
   secret: bodyFields.secret.default(false),
-  topic: bodyFields.topic.default("allgemein"),
+  topic: bodyFields.topic.optional(),
   maxChoices: bodyFields.maxChoices.default(1),
   choices: bodyFields.choices.optional(),
   allowAbstain: bodyFields.allowAbstain.optional(),

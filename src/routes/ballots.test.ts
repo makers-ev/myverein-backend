@@ -176,7 +176,13 @@ describe("opening a ballot", () => {
     expect(refused.status).toBe(422);
     expect((await json(refused)).error.details).toMatchObject({ code: "assembly_rules_incomplete", missing: ["abstainCountsAs"] });
     await setRules({ ...RULES, agendaRequiredInInvitation: true });
-    const statute = await create({ topic: "satzungsaenderung" });
+    // The topic comes from the agenda item and cannot be chosen freely (review M2).
+    expect((await call(clerk, "/ballots", { method: "POST", body: { meetingId, title: "Frei", topic: "satzungsaenderung" } })).status).toBe(422);
+    const item = (await json(await call(clerk, `/meetings/${meetingId}/agenda-items`, { method: "POST", body: { title: "Satzung", voteKind: "resolution", topic: "satzungsaenderung" } }))).data;
+    const mismatch = await call(clerk, "/ballots", { method: "POST", body: { meetingId, title: "Falsch", agendaItemId: item.id, topic: "allgemein" } });
+    expect((await json(mismatch)).error.details).toMatchObject({ code: "topic_mismatch", agendaItemTopic: "satzungsaenderung" });
+    const statute = await create({ agendaItemId: item.id });
+    expect(statute.topic).toBe("satzungsaenderung");
     const blocked = await open(statute.id);
     expect(blocked.status).toBe(422);
     expect((await json(blocked)).error.details.code).toBe("agenda_item_not_announced");
