@@ -9,7 +9,8 @@ import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { meetingMinutes, meetingMinutesAmendments } from "../db/schema/assembly.js";
 import { clubRoles } from "../db/schema/club-roles.js";
-import { meetingResolutions, meetings } from "../db/schema/meetings.js";
+import { clubMembers } from "../db/schema/club-members.js";
+import { meetingAttendance, meetingResolutions, meetings } from "../db/schema/meetings.js";
 import { toAppError } from "../lib/errors.js";
 import { meetingRoutes } from "./meetings.js";
 
@@ -259,5 +260,27 @@ describe("database guards (migration 0052)", () => {
     }
     await expect(db.insert(meetingMinutes).values({ meetingId: other, version: 1, status: "archiviert", content: "x", contentHash: sha("x") })).rejects.toThrow();
     await db.insert(meetingMinutes).values({ meetingId: other, version: 1, status: "archiviert", content: "x", contentHash: sha("x"), approvedAt: new Date() });
+  });
+});
+
+describe("attendance snapshot (review M4)", () => {
+  it("freezes the numbers when the version is submitted, later changes do not alter the export", async () => {
+    const m = await meetingRow("mitgliederversammlung", "MV Snapshot", new Date("2026-02-01T18:00:00Z"));
+    const people = await db.insert(clubMembers).values([{ clubId: club, displayName: "Anna Snap", joinedAt: "2020-01-01" }, { clubId: club, displayName: "Bert Snap", joinedAt: "2020-01-01" }]).returning({ id: clubMembers.id });
+    await db.insert(meetingAttendance).values(people.map((p) => ({ meetingId: m, clubMemberId: p.id, present: true, hasVotingRight: true })));
+    await submitted(m, "Protokoll Snapshot");
+    const [row] = await db.select().from(meetingMinutes).where(eq(meetingMinutes.meetingId, m));
+    expect(row!.attendanceSnapshot).toMatchObject({ presentTotal: 2, presentEligible: expect.any(Number) });
+    // Somebody is erased/removed afterwards: the old numbers stay.
+    await db.delete(meetingAttendance).where(eq(meetingAttendance.clubMemberId, people[0]!.id));
+    const md = await (await call(chair, `/meetings/${m}/minutes/export?format=md`)).text();
+    expect(md).toContain("Anwesend: 2,");
+    expect(md).toContain("Stand der Zahlen: bei Einreichung");
+    // The snapshot itself is part of the frozen record once approved.
+    await db.update(meetingResolutions).set({ result: "angenommen" }).where(eq(meetingResolutions.id, acceptedLater));
+    const later = await meetingRow("mitgliederversammlung", "MV nach Snapshot", new Date("2027-02-01T18:00:00Z"));
+    const res = await resolutionIn(later, "angenommen");
+    expect((await call(chair, `/meetings/${m}/minutes/approve`, { method: "POST", body: { resolutionId: res } })).status).toBe(200);
+    await expect(db.update(meetingMinutes).set({ attendanceSnapshot: { presentTotal: 99 } }).where(eq(meetingMinutes.meetingId, m))).rejects.toThrow();
   });
 });

@@ -8,7 +8,7 @@ import { clubRoles } from "../db/schema/club-roles.js";
 import { MINUTES_CONFIRM_ROLES, ballots, meetingInvitations, meetingMinutes, meetingMinutesAmendments, meetingMinutesConfirmations, type MeetingMinutesRow } from "../db/schema/assembly.js";
 import { meetingAttendance, meetingResolutions, meetings, type MeetingRow } from "../db/schema/meetings.js";
 import { writeAudit } from "./audit.js";
-import { computeQuorum } from "./assembly-attendance.js";
+import { computeQuorum, type QuorumStatus } from "./assembly-attendance.js";
 import { deliverySummary } from "./assembly-invitation.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "./errors.js";
 import { clubTimezone, formatWhen, locationName } from "./event-notify.js";
@@ -107,16 +107,28 @@ export async function confirmMinutes(args: { clubId: string; meetingId: string; 
   });
 }
 
+/**
+ * The numbers the minutes rest on (present, voting right, proxies, quorum), frozen when the version is submitted. Later changes of the
+ * statute, of the roll or the erasure of a member (attendance rows lose their person) never change what was approved. Only counts, no names.
+ */
+async function attendanceSnapshot(tx: Tx, clubId: string, meeting: MeetingRow): Promise<Record<string, unknown> | null> {
+  if (meeting.type !== "mitgliederversammlung") return null;
+  const quorum = await computeQuorum(tx, clubId, meeting);
+  const attendance = await tx.select({ present: meetingAttendance.present }).from(meetingAttendance).where(eq(meetingAttendance.meetingId, meeting.id));
+  return { takenAt: new Date().toISOString(), presentTotal: attendance.filter((a) => a.present).length, ...quorum };
+}
+
 export async function submitMinutes(args: { clubId: string; meetingId: string; userId: string }): Promise<MeetingMinutesRow> {
   return db.transaction(async (tx) => {
-    await lockMeeting(tx, args.clubId, args.meetingId);
+    const meeting = await lockMeeting(tx, args.clubId, args.meetingId);
     const latest = await latestOf(tx, args.meetingId);
     if (!latest || latest.status !== "entwurf") throw fail.conflict("Only a draft can be submitted for approval", "minutes_not_draft");
     if (latest.content.trim() === "") throw fail.invalid("The minutes are empty", "minutes_empty");
     const confirmed = await tx.select().from(meetingMinutesConfirmations).where(eq(meetingMinutesConfirmations.minutesId, latest.id));
     const missing = MINUTES_CONFIRM_ROLES.filter((role) => !confirmed.some((c) => c.role === role && c.contentHash === latest.contentHash));
     if (missing.length > 0) throw fail.conflict("The chair and the secretary have to confirm the text first", "minutes_not_confirmed", { missing });
-    const [row] = await tx.update(meetingMinutes).set({ status: "zur_genehmigung", updatedAt: new Date() }).where(eq(meetingMinutes.id, latest.id)).returning();
+    const snapshot = await attendanceSnapshot(tx, args.clubId, meeting);
+    const [row] = await tx.update(meetingMinutes).set({ status: "zur_genehmigung", attendanceSnapshot: snapshot, updatedAt: new Date() }).where(eq(meetingMinutes.id, latest.id)).returning();
     await writeAudit(tx, { eventType: "meeting_minutes.submit", subjectId: latest.id, payload: { clubId: args.clubId, meetingId: args.meetingId, version: latest.version } });
     return row!;
   });
@@ -314,12 +326,16 @@ export async function exportMinutes(args: { meeting: MeetingRow; includeDrafts: 
   const attendance = await db.select().from(meetingAttendance).where(eq(meetingAttendance.meetingId, meeting.id));
   const present = attendance.filter((a) => a.present);
   const people = args.includeNames ? await clubMembersByIds(db, meeting.clubId, present.flatMap((a) => (a.clubMemberId ? [a.clubMemberId] : []))) : new Map();
-  const quorum = await computeQuorum(db, meeting.clubId, meeting);
+  // A submitted version reports the frozen numbers; a draft the live ones.
+  const frozen = version.attendanceSnapshot as (QuorumStatus & { presentTotal: number }) | null;
+  const quorum: QuorumStatus = frozen ?? (await computeQuorum(db, meeting.clubId, meeting));
+  const presentTotal = frozen ? frozen.presentTotal : present.length;
   const resolutions = await db.select().from(meetingResolutions).where(eq(meetingResolutions.meetingId, meeting.id)).orderBy(asc(meetingResolutions.createdAt));
   const [invitation] = await db.select().from(meetingInvitations).where(eq(meetingInvitations.meetingId, meeting.id)).orderBy(asc(meetingInvitations.version)).limit(1);
   const amendments = (await readMinutes(meeting, args.includeDrafts)).amendments;
 
   const sections: ExportDoc["sections"] = [];
+  const dateChanges = meeting.scheduleExceptions.map((e) => `Termin nach der Einladung verlegt (Frist nicht eingehalten), Begründung: ${String(e.reason ?? "")}`);
   if (invitation) {
     const period = invitation.periodCheck as { ok?: boolean; requiredDays?: number | null; daysAvailable?: number | null };
     const delivery = await deliverySummary(invitation.id);
@@ -329,15 +345,17 @@ export async function exportMinutes(args: { meeting: MeetingRow; includeDrafts: 
         `Versand am ${formatWhen(invitation.sentAt, timezone)} an ${invitation.recipientCount} Empfänger`,
         period.ok ? "Einladungsfrist eingehalten" : `Einladungsfrist nicht eingehalten (verfügbar ${period.daysAvailable ?? "?"} Tage, erforderlich ${period.requiredDays ?? "?"} Tage)${invitation.exceptionReason ? `; Begründung: ${invitation.exceptionReason}` : ""}`,
         ...delivery.map((d) => `Zustellung ${d.channel}: ${d.count} ${d.status}`),
+        ...dateChanges,
       ],
     });
   }
   sections.push({
     heading: "Anwesenheit und Beschlussfähigkeit",
     lines: [
-      `Anwesend: ${present.length}, davon stimmberechtigt: ${quorum.presentEligible}, vertretene Vollmachten: ${quorum.proxiesRepresented}`,
+      `Anwesend: ${presentTotal}, davon stimmberechtigt: ${quorum.presentEligible}, vertretene Vollmachten: ${quorum.proxiesRepresented}`,
       `Stimmberechtigte insgesamt: ${quorum.eligibleTotal}`,
       `Beschlussfähigkeit: ${quorum.result.replace(/_/g, " ")}${quorum.required !== null ? ` (erforderlich ${quorum.required})` : ""}`,
+      ...(frozen ? [`Stand der Zahlen: bei Einreichung des Protokolls (${formatWhen(new Date(String((frozen as { takenAt?: string }).takenAt)), timezone)})`] : []),
       ...(args.includeNames ? present.map((a) => (a.clubMemberId ? (people.get(a.clubMemberId)?.displayName ?? "(unbekannt)") : "(pseudonymisiert)")) : []),
     ],
   });
