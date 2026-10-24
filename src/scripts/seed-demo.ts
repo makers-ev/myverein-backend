@@ -14,11 +14,14 @@ import {
   type DemoCtx,
   type DemoOptions,
 } from "./demo/context.js";
+import { seedAssembly } from "./demo/assembly.js";
 import { seedAbsences, seedAvailability, seedCalendars, seedEvents } from "./demo/calendar.js";
 import { seedCustomFields } from "./demo/fields.js";
 import { seedGuardians } from "./demo/guardians.js";
 import { seedDepartmentLeads, seedMembers } from "./demo/members.js";
 import { findClubBySlug, resetDemoClub } from "./demo/reset.js";
+import { neutralizeOutbound } from "./demo/outbound.js";
+import { seedBoardMeetings } from "./demo/meetings.js";
 import { seedInventory, seedLocations } from "./demo/places.js";
 import { seedRoles } from "./demo/roles.js";
 
@@ -66,6 +69,9 @@ const STEPS: Step[] = [
   { name: "Termine", run: seedEvents },
   { name: "Verfügbarkeiten", run: seedAvailability },
   { name: "Abwesenheiten", run: seedAbsences },
+  { name: "Vorstandssitzungen", run: seedBoardMeetings },
+  { name: "Mitgliederversammlungen", run: seedAssembly },
+  { name: "Versand abschließen", run: async (ctx) => void (await neutralizeOutbound(ctx)) },
 ];
 
 export function optionsFromEnv(argv: readonly string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): DemoOptions {
