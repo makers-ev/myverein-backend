@@ -2,7 +2,7 @@ import { eq, sql } from "drizzle-orm";
 
 import { db } from "../../db/client.js";
 import { clubMembers } from "../../db/schema/club-members.js";
-import { consentPurposes, consentTexts, dataSubjectRequests, dpaVersions, retentionPolicies, retentionRuns } from "../../db/schema/privacy.js";
+import { consentPurposes, consentTexts, dataSubjectRequests, dpaVersions, retentionRuns } from "../../db/schema/privacy.js";
 import { writeAudit } from "../../lib/audit.js";
 import { recordConsent, sha256Hex } from "../../lib/consent.js";
 import { dpaChecksum } from "../../lib/dpa.js";

@@ -19,12 +19,13 @@ export interface FoundClub {
 export async function findClubBySlug(slug: string): Promise<FoundClub | null> {
   const row = await db.query.organization.findFirst({ where: eq(organization.slug, slug) });
   if (!row) return null;
-  let isDemo = false;
-  try {
-    isDemo = (JSON.parse(row.metadata ?? "null") as Record<string, unknown> | null)?.[DEMO_MARKER] === true;
-  } catch {
-    isDemo = false;
-  }
+  const isDemo = (() => {
+    try {
+      return (JSON.parse(row.metadata ?? "null") as Record<string, unknown> | null)?.[DEMO_MARKER] === true;
+    } catch {
+      return false;
+    }
+  })();
   return { id: row.id, name: row.name, isDemo };
 }
 
@@ -47,7 +48,16 @@ export async function resetDemoClub(opts: DemoOptions, club: FoundClub | null): 
   if (club) {
     await db.delete(consentRecords).where(eq(consentRecords.clubId, club.id));
     await db.delete(formSubmissions).where(eq(formSubmissions.clubId, club.id));
-    await db.delete(jobs).where(and(inArray(jobs.status, ["queued", "failed"]), sql`${jobs.payload}::text LIKE ${"%" + club.id + "%"}`));
+    // Queued jobs of this club: they carry ids of its ballots, announcements and deliveries (never personal data).
+    await db.delete(jobs).where(
+      and(
+        inArray(jobs.status, ["queued", "failed"]),
+        sql`(${jobs.payload}::text LIKE ${"%" + club.id + "%"}
+          OR ${jobs.payload}->>'ballotId' IN (SELECT id::text FROM ballots WHERE club_id = ${club.id})
+          OR ${jobs.payload}->>'announcementId' IN (SELECT id::text FROM club_announcements WHERE club_id = ${club.id})
+          OR ${jobs.payload}->>'deliveryId' IN (SELECT id::text FROM message_deliveries WHERE club_id = ${club.id}))`,
+      ),
+    );
     await db.delete(auditLog).where(eq(auditLog.clubId, club.id));
     await db.delete(organization).where(eq(organization.id, club.id));
   }

@@ -1,7 +1,12 @@
 import "dotenv/config";
 import { pathToFileURL } from "node:url";
 
-import { closeDatabase } from "../db/client.js";
+import { and, eq } from "drizzle-orm";
+
+import { member, user } from "../auth/auth-schema.js";
+import { closeDatabase, db } from "../db/client.js";
+import { clubRoles } from "../db/schema/club-roles.js";
+import { departments } from "../db/schema/departments.js";
 import { ACCOUNT_SPECS, createUsers, joinAccounts } from "./demo/accounts.js";
 import { createClub, seedCategories, seedDefaultCalendar, seedDepartments, seedInfoPages, seedSettings } from "./demo/club.js";
 import {
@@ -15,6 +20,7 @@ import {
   type DemoOptions,
 } from "./demo/context.js";
 import { seedAssembly } from "./demo/assembly.js";
+import { demoCounts } from "./demo/counts.js";
 import { seedAnnouncements, seedNotificationPreferences } from "./demo/communication.js";
 import { seedRequests } from "./demo/forms.js";
 import { seedAbsences, seedAvailability, seedCalendars, seedEvents } from "./demo/calendar.js";
@@ -127,21 +133,49 @@ export async function seedDemoClub(opts: DemoOptions): Promise<SeedResult> {
   return { clubId: ctx.clubId, created: true, ctx };
 }
 
-/** Table of all demo logins (printed at the end). */
-export function loginTable(opts: DemoOptions): string {
-  const rows = ACCOUNT_SPECS.map((a) => ({ email: `${a.local}@${opts.emailDomain}`, name: a.name, role: a.orgRole ?? (a.platformRole === "admin" ? "Plattform-Admin" : "-"), purpose: a.purpose }));
-  const w = (key: "email" | "name" | "role") => Math.max(key.length, ...rows.map((r) => r[key].length));
-  const [we, wn, wr] = [w("email"), w("name"), w("role")];
-  const line = (e: string, n: string, r: string, p: string) => `${e.padEnd(we)}  ${n.padEnd(wn)}  ${r.padEnd(wr)}  ${p}`;
-  return [line("E-Mail", "Name", "Rolle", "Zweck"), line("-".repeat(we), "-".repeat(wn), "-".repeat(wr), "-".repeat(20)), ...rows.map((r) => line(r.email, r.name, r.role, r.purpose))].join("\n");
+/** One line per demo login: e-mail, name, account role in the club, club roles (with department), purpose. Read from the database. */
+export async function loginRows(opts: DemoOptions, clubId: string): Promise<Array<{ email: string; name: string; account: string; roles: string; purpose: string }>> {
+  const rows: Array<{ email: string; name: string; account: string; roles: string; purpose: string }> = [];
+  for (const a of ACCOUNT_SPECS) {
+    const email = `${a.local}@${opts.emailDomain}`;
+    const u = await db.query.user.findFirst({ where: eq(user.email, email) });
+    const m = u ? await db.query.member.findFirst({ where: and(eq(member.userId, u.id), eq(member.organizationId, clubId)) }) : undefined;
+    const roles = m
+      ? await db
+          .select({ roleType: clubRoles.roleType, department: departments.name })
+          .from(clubRoles)
+          .leftJoin(departments, eq(departments.id, clubRoles.departmentId))
+          .where(eq(clubRoles.memberId, m.id))
+      : [];
+    const names = [...(m && m.role !== "guest" ? ["mitglied"] : []), ...roles.map((r) => (r.department ? `${r.roleType} (${r.department})` : r.roleType))];
+    rows.push({ email, name: a.name, account: m ? m.role : u?.role === "admin" ? "Plattform-Admin" : "kein Mitglied", roles: names.join(", ") || "-", purpose: a.purpose });
+  }
+  return rows;
+}
+
+export function formatLoginTable(rows: Awaited<ReturnType<typeof loginRows>>): string {
+  const cols = [
+    ["E-Mail", "email"],
+    ["Name", "name"],
+    ["Konto", "account"],
+    ["Vereinsrollen", "roles"],
+    ["Zweck", "purpose"],
+  ] as const;
+  const width = (key: (typeof cols)[number][1], label: string) => Math.max(label.length, ...rows.map((r) => r[key].length));
+  const widths = cols.map(([label, key]) => width(key, label));
+  const line = (cells: string[]) => cells.map((c, i) => (i === cells.length - 1 ? c : c.padEnd(widths[i]!))).join("  ");
+  return [line(cols.map(([label]) => label)), line(widths.map((w) => "-".repeat(w))), ...rows.map((r) => line(cols.map(([, key]) => r[key])))].join("\n");
 }
 
 async function main() {
   const opts = optionsFromEnv();
   const result = await seedDemoClub(opts);
-  console.log(`\n[seed-demo] ${result.created ? "fertig" : "übersprungen"}. clubId=${result.clubId}, slug=${opts.slug}`);
-  console.log(`\nDemo-Logins (alle mit dem Passwort aus DEMO_PASSWORD, Standard: ${DEFAULT_DEMO_PASSWORD}; Passwort dieses Laufs: ${opts.password})\n`);
-  console.log(loginTable(opts));
+  console.log(`\n[seed-demo] ${result.created ? "fertig" : "übersprungen (Verein existiert, --reset zum Neuaufbau)"}. clubId=${result.clubId}, slug=${opts.slug}`);
+  console.log(`\nDemo-Logins, Passwort für alle: ${opts.password}\n`);
+  console.log(formatLoginTable(await loginRows(opts, result.clubId)));
+  const counts = await demoCounts(result.clubId);
+  console.log("\nAnzahl je Bereich\n");
+  console.log(Object.entries(counts).map(([k, v]) => `${k.padEnd(30)} ${v}`).join("\n"));
 }
 
 const isMain = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;

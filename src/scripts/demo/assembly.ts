@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../../db/client.js";
+import { jobs } from "../../db/schema/jobs.js";
 import { ballotVotesOpen, ballots, clubRoleTerms, elections, meetingAgendaItems, meetingInvitationDeliveries } from "../../db/schema/assembly.js";
 import { messageDeliveries } from "../../db/schema/communication.js";
 import { meetingAttendance, meetingInvitees, meetingResolutions, meetings, type MeetingRow } from "../../db/schema/meetings.js";
@@ -376,6 +377,8 @@ async function seedCircularResolutions(ctx: DemoCtx): Promise<void> {
   await closeBallot(ctx.clubId, finished.id, vorsitz.userId);
   await countBallot(ctx.clubId, finished.id, vorsitz.userId);
   await finalizeBallot(ctx.clubId, finished.id, vorsitz.userId);
+  // The "voting has started" notice of a ballot that is already decided makes no sense any more.
+  await db.delete(jobs).where(eq(jobs.dedupeKey, `ballot_opened:${finished.id}`));
 
   const open = await createBallot({
     clubId: ctx.clubId,
