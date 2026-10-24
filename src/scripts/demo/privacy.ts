@@ -184,7 +184,7 @@ export async function seedPrivacy(ctx: DemoCtx): Promise<void> {
   // Platform-level DPA (AV-Vertrag): only a DRAFT is created, nothing becomes mandatory for any club. It is not removed by --reset.
   const title = "Auftragsverarbeitungsvertrag (Demo-Entwurf)";
   const existing = await db.query.dpaVersions.findFirst({ where: eq(dpaVersions.title, title) });
-  if (!existing) {
+  if (!existing && ctx.opts.platformData) {
     const [last] = await db.select({ n: sql<number>`coalesce(max(${dpaVersions.version}), 0)::int` }).from(dpaVersions);
     const content = {
       title,

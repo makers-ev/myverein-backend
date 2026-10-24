@@ -25,6 +25,8 @@ export interface DemoOptions {
   force: boolean;
   /** Suppress the progress log (tests). */
   quiet: boolean;
+  /** Also create the one platform-level row of the seed (a draft processor agreement). Tests switch it off. */
+  platformData: boolean;
 }
 
 /** One demo account (Better Auth user) and what it stands for. */

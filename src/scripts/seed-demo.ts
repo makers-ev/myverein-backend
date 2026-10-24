@@ -99,6 +99,7 @@ export function optionsFromEnv(argv: readonly string[] = process.argv.slice(2), 
     reset: argv.includes("--reset"),
     force: argv.includes("--force"),
     quiet: false,
+    platformData: env.DEMO_PLATFORM_DATA !== "false",
   };
 }
 

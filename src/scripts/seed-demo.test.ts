@@ -25,6 +25,8 @@ const opts: DemoOptions = {
   reset: false,
   force: false,
   quiet: true,
+  // The processor agreement is platform-level: a test must not add rows other test files could see.
+  platformData: false,
 };
 const bystanderSlug = `demo-bystander-${suffix}`;
 const foreignSlug = `demo-foreign-${suffix}`;
