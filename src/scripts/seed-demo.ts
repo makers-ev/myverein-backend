@@ -14,10 +14,12 @@ import {
   type DemoCtx,
   type DemoOptions,
 } from "./demo/context.js";
+import { seedAbsences, seedAvailability, seedCalendars, seedEvents } from "./demo/calendar.js";
 import { seedCustomFields } from "./demo/fields.js";
 import { seedGuardians } from "./demo/guardians.js";
 import { seedDepartmentLeads, seedMembers } from "./demo/members.js";
 import { findClubBySlug, resetDemoClub } from "./demo/reset.js";
+import { seedInventory, seedLocations } from "./demo/places.js";
 import { seedRoles } from "./demo/roles.js";
 
 /**
@@ -58,6 +60,12 @@ const STEPS: Step[] = [
   { name: "Vereinsrollen", run: seedRoles },
   { name: "Erziehungsberechtigte", run: seedGuardians },
   { name: "Zusatzfelder und Qualifikationen", run: async (ctx) => void (await seedCustomFields(ctx)) },
+  { name: "Standorte", run: seedLocations },
+  { name: "Inventar", run: seedInventory },
+  { name: "Kalender", run: seedCalendars },
+  { name: "Termine", run: seedEvents },
+  { name: "Verfügbarkeiten", run: seedAvailability },
+  { name: "Abwesenheiten", run: seedAbsences },
 ];
 
 export function optionsFromEnv(argv: readonly string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): DemoOptions {
