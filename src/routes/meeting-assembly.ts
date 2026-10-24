@@ -343,9 +343,8 @@ meetingAssemblyRoutes.post("/:id/invitations/:invId/deliveries/mark-posted", val
 
 // --- Voting roll, proxies, quorum (B4) -------------------------------------------------------------------------------
 
-const manageRoll = (c: Context<ClubEnv>) => {
-  if (!canManage(c)) throw new ForbiddenError("Missing assembly:manage or meetings:write permission");
-};
+// The roll shows WHY somebody may not vote (age, status, manual override with reason): assembly:manage only, `meetings:write` is not enough.
+const manageRoll = (c: Context<ClubEnv>) => requireAssemblyManage(c);
 
 const rollQuerySchema = z.object({ eligible: z.enum(["true", "false"]).optional() });
 
@@ -411,7 +410,7 @@ meetingAssemblyRoutes.get("/:id/proxies", async (c) => {
   const meeting = await loadClubMeeting(c, paramId(c, "id"));
   const me = await callerClubMemberId(db, clubId, c.get("membership").id);
   const all = await db.select().from(meetingProxies).where(eq(meetingProxies.meetingId, meeting.id));
-  const rows = canManage(c) ? all : all.filter((p) => me !== null && (p.grantorClubMemberId === me || p.holderClubMemberId === me));
+  const rows = hasClubPermission(roles(c), "assembly:manage") ? all : all.filter((p) => me !== null && (p.grantorClubMemberId === me || p.holderClubMemberId === me));
   const people = await clubMembersByIds(db, clubId, rows.flatMap((p) => [p.grantorClubMemberId, p.holderClubMemberId]).filter((v): v is string => v !== null));
   return c.json({
     data: rows.map((p) => ({
