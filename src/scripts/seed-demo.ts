@@ -15,6 +15,8 @@ import {
   type DemoOptions,
 } from "./demo/context.js";
 import { seedAssembly } from "./demo/assembly.js";
+import { seedAnnouncements, seedNotificationPreferences } from "./demo/communication.js";
+import { seedRequests } from "./demo/forms.js";
 import { seedAbsences, seedAvailability, seedCalendars, seedEvents } from "./demo/calendar.js";
 import { seedCustomFields } from "./demo/fields.js";
 import { seedGuardians } from "./demo/guardians.js";
@@ -74,6 +76,9 @@ const STEPS: Step[] = [
   { name: "Mitgliederversammlungen", run: seedAssembly },
   { name: "Einwilligungen", run: seedConsents },
   { name: "Datenschutz", run: seedPrivacy },
+  { name: "Anträge, Austritte und Einladungen", run: seedRequests },
+  { name: "Benachrichtigungseinstellungen", run: seedNotificationPreferences },
+  { name: "Mitteilungen", run: seedAnnouncements },
   { name: "Versand abschließen", run: async (ctx) => void (await neutralizeOutbound(ctx)) },
 ];
 
