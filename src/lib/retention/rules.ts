@@ -40,6 +40,8 @@ export const RETENTION_RULES: readonly RetentionRule[] = [
   rule({ category: "emergency_contacts_left", scope: "club", defaultDays: 30, minDays: 0, maxDays: 365, label: "Notfallkontakte Ausgetretener", description: "Notfallkontakt ehemaliger Mitglieder, gerechnet ab dem Austritt" }),
   rule({ category: "absence_reports", scope: "club", defaultDays: 90, minDays: 30, maxDays: 365, label: "Krankmeldungen und Abwesenheiten", description: "Meldungen, gerechnet ab dem Ende der Abwesenheit" }),
   rule({ category: "consent_proofs", scope: "club", defaultDays: 1095, minDays: 365, maxDays: 3650, label: "Einwilligungsnachweise", description: "Nachweise widerrufener Einwilligungen (ab Widerruf) und Nachweise ehemaliger Mitglieder (ab Austritt)" }),
+  rule({ category: "event_attendance", scope: "club", defaultDays: 1095, minDays: 90, maxDays: 3650, label: "Anwesenheitslisten", description: "Anwesenheitslisten von Terminen (Status je Person, Aufsichtspersonen, Korrekturprotokoll), gerechnet ab dem Ende des Termins" }),
+  rule({ category: "event_guests", scope: "club", defaultDays: 90, minDays: 14, maxDays: 365, label: "Gäste-Anmeldungen", description: "Anmeldungen von Gästen ohne Konto (Name, E-Mail, Formularantworten): gelöscht zum bei der Anmeldung gesetzten Datum (Ende des Termins plus Frist des Termins), spätestens nach dieser Frist ab dem Ende des Termins" }),
 ];
 
 export function ruleOf(category: string): RetentionRule | undefined {

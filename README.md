@@ -1128,6 +1128,8 @@ Tests: `src/lib/scheduled-jobs.test.ts` (registration and intervals, switch off/
 | `emergency_contacts_left` | club | 30 (0-365) from `left_at` | emergency contact of left members |
 | `absence_reports` | club | 90 (30-365) from the end date | absence reports are deleted |
 | `consent_proofs` | club | 1095 (365-3650) | all events of a member + purpose once the latest is a revocation older than the period, and all events of members who left before the period (a `requested` purpose then reads "open" again) |
+| `event_attendance` (Wave 12) | club | 1095 (90-3650) from the end of the event | attendance lists (sheet, entries, supervisors, correction log); a list holding an entry of a member under legal hold stays complete |
+| `event_guests` (Wave 12) | club | 90 (14-365) from the end of the event | registrations of guests without account (name, e-mail, tokens) and their linked form answers: deleted at the row's `guest_delete_after` (event end + the days chosen for the event, 48 h for an unconfirmed double opt-in), at the latest by this backstop |
 
 Never deleted: meeting minutes and resolutions, attendance of assemblies, ballots with their voter rolls and votes, elections and term history (Wave 11; a person's erasure removes the reference, see `assembly_data`), anything a later billing module must keep by law (it registers its own rule). Generated exports are not stored, so no export file expires.
 
