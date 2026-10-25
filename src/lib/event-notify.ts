@@ -5,6 +5,7 @@ import { clubMembers } from "../db/schema/club-members.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import type { AnnouncementAudience } from "../db/schema/communication.js";
 import { wardEventResponses } from "../db/schema/absences.js";
+import { helperShifts, helperSignups, helperStations } from "../db/schema/event-helpers.js";
 import { eventAttendees, type EventAttendeeRow } from "../db/schema/event-attendees.js";
 import type { Promoted } from "./event-seats.js";
 import type { EventRow } from "../db/schema/events.js";
@@ -102,7 +103,14 @@ export async function eventAudience(clubId: string, eventId: string, departmentI
     .from(eventAttendees)
     .where(and(eq(eventAttendees.eventId, eventId), inArray(eventAttendees.status, ["angemeldet", "warteliste"])));
   // Account RSVPs resolve to their club member; registrations of members without account already carry the club member id.
-  const memberIds = [...new Set([...(await clubMemberIdsOf(clubId, rows.flatMap((r) => (r.memberId ? [r.memberId] : [])))), ...rows.flatMap((r) => (r.clubMemberId ? [r.clubMemberId] : []))])];
+  // The helpers of the event are told about changes as well (a cancelled event frees them).
+  const helpers = await db
+    .select({ id: helperSignups.clubMemberId })
+    .from(helperSignups)
+    .innerJoin(helperShifts, eq(helperShifts.id, helperSignups.shiftId))
+    .innerJoin(helperStations, eq(helperStations.id, helperShifts.stationId))
+    .where(eq(helperStations.eventId, eventId));
+  const memberIds = [...new Set([...(await clubMemberIdsOf(clubId, rows.flatMap((r) => (r.memberId ? [r.memberId] : [])))), ...rows.flatMap((r) => (r.clubMemberId ? [r.clubMemberId] : [])), ...helpers.map((h) => h.id)])];
   const departmentIds = cancelled && departmentId ? [departmentId] : [];
   if (memberIds.length === 0 && departmentIds.length === 0) return null;
   // Guardians are told about every change: the child's attendance is also the parent's schedule.

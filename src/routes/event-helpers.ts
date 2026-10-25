@@ -12,6 +12,7 @@ import { ConflictError, NotFoundError, ValidationError } from "../lib/errors.js"
 import { assertEventScope, loadVisibleEvent, mayManageEvent, needsPermission } from "../lib/event-access.js";
 import { resolveActingMember } from "../lib/event-actor.js";
 import { assertNoOverlap, loadPlan, lockMemberShifts, MAX_SHIFT_CAPACITY, MAX_SHIFTS_PER_EVENT, MAX_STATIONS_PER_EVENT, notifyHelpers, notifyLateCancel, lateCancelHours, overlappingShift } from "../lib/event-helpers.js";
+import { suggestHelpers } from "../lib/helper-suggestions.js";
 import { clubTimezone, formatWhen } from "../lib/event-notify.js";
 import { clubMailLanguage } from "../lib/club-settings.js";
 import { activeWardLinks } from "../lib/guardian-scope.js";
@@ -193,6 +194,15 @@ eventHelperRoutes.delete("/:id/helpers/shifts/:shiftId", needsPermission("helper
   const when = formatWhen(shift.startsAt, await clubTimezone(clubId), shift.endsAt, lang);
   await notifyHelpers({ clubId, clubMemberIds: people, eventKey: "helper.shift_removed", refId: `${shift.id}#removed`, title: `${tr(lang, "Helferschicht entfällt", "Helper shift removed")}: ${event.title}`, body: tr(lang, `Die Schicht „${stationName}“ (${when}) bei „${event.title}“ wurde gestrichen. Deine Eintragung ist damit gelöscht.`, `The shift “${stationName}” (${when}) at “${event.title}” was cancelled. Your sign-up is gone.`) });
   return c.body(null, 204);
+});
+
+/**
+ * Who could be asked for which shift: raw availability hints per person ("verfuegbar" / "nicht_verfuegbar" / "unbekannt"),
+ * sorted by name, no ranking. Needs the permission to run the plan.
+ */
+eventHelperRoutes.get("/:id/helpers/suggestions", needsPermission("helpers:write"), async (c) => {
+  const { event, calendar, clubId } = await manage(c);
+  return c.json({ data: { eventId: event.id, shifts: await suggestHelpers(clubId, event, calendar) } });
 });
 
 // --- Sign-up (self-service) ---------------------------------------------------------------------------------------------------

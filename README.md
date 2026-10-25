@@ -1273,6 +1273,10 @@ Data: `event_attendance_sheets` (one per event, closable), `event_attendance` (o
 
 `src/lib/event-helpers.ts`, `src/lib/event-actor.ts`, routes `src/routes/event-helpers.ts`. Tables `helper_stations`, `helper_shifts` (time window, `capacity`, `min_staff`), `helper_signups` (unique per shift and **club member**, so members without account take part), `helper_swap_requests` (one open request per sign-up). Acting for somebody: `resolveActingMember` -- the caller for themselves, a guardian for a ward with a live link, or an organiser with `helpers:write` inside the event scope; **minors never sign themselves up** (decision for open point E12: a guardian or the organiser enters them, so consent and responsibility stay with the adults). Concurrency: one person's sign-ups/swaps are serialised by an advisory lock (`helper:<club member id>`), then the shift row is locked `FOR UPDATE`, then (for swaps) the request row -- capacity, the overlap rule and "one winner per open swap" hold under parallel requests (tests with 8 parallel sign-ups for 3 places, overlapping shifts and 6 parallel takers). A swap moves the existing sign-up to the taker, so capacity and order never change. Helper data is exported/erased with the person (`event_participation` contributor).
 
+### Helper reminders (Wave 12 B17)
+
+`src/lib/helper-reminders.ts`, recurring job `helper_reminder_sweep` (hourly, idempotent). Class optional, category `reminders`, in-app + push: (1) everybody on a shift starting within 24 h (`helper.reminder`, ref `<shift>#remind24`, guardians of a child included); (2) a shift starting within 48 h with fewer sign-ups than `min_staff` is reported to the organisers (`helper.shift_open`, ref `<shift>#open48`; recipients: the board roles with `helpers:write` and the department roles of the calendar's department). Cancelled events are skipped; a repeated or parallel sweep sends nothing twice (unique delivery reference). Withdrawals shortly before the start (`helper.late_cancel`), plan changes (`helper.shift_changed`, `helper.shift_removed`), entering/removing by the organiser (`helper.signed_up_by_organiser`, `helper.removed_by_organiser`, also by mail for members without account) and swaps (`helper.swap_requested|accepted|declined`) are sent by the routes. Changes and cancellations of the event itself also reach the helpers (`eventAudience`).
+
 ### Migrations 0014-0054 (Wave 7 to Wave 12)
 
 Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runtime` (Docker boot) or `npm run db:migrate`.
@@ -1469,6 +1473,24 @@ Account security notices (#46-#49, G8) and "account linked" (#29) go through the
 | 52 | `POST /absences` (member) or `POST /guardian/wards/:wardId/absences` (guardian) | `absence.reported` (absence id) | actor is the only trainer; mail/push opt-out per account (in-app stays) | `Neue Abwesenheitsmeldung`: "<name> hat sich für <period> abgemeldet." |
 | 53 | `PATCH /absences/:id` or `PATCH /guardian/wards/:wardId/absences/:id` | `absence.changed` (`<id>#<updatedAt ms>`: every change is a new message) | as #52 | `Abwesenheitsmeldung geändert`: new period |
 | 54 | `DELETE /absences/:id` or the guardian route (withdrawn; a repeat sends nothing) | `absence.withdrawn` (absence id) | as #52 | `Abwesenheitsmeldung zurückgezogen` |
+
+### J. Registration, guests and helpers (Wave 12)
+
+Best effort after the commit (`notifySafely`), texts in the club's mail language; guests (no account) get **mail only** with class mandatory and no member data, the address is wiped from the delivery row by the existing retention job.
+
+| # | Trigger | Key (`ref_id`) | Recipients / channels | Text |
+|---|---|---|---|---|
+| 64 | A person moves up from the waitlist (RSVP withdrawn, smaller group, more capacity, organiser) | `event.promoted` (`<event>#<respondedAt ms>`, guests `...:<attendee>`) | the person and a child's guardians (in-app, mail, push, optional); a guest by mail only | `Du bist nachgerückt` |
+| 65 | `POST /public/events/:token/registrations` | `event.guest_confirm` | the guest, mail (double opt-in link, 48 h) | `Bitte bestätige deine Anmeldung` |
+| 66 | Guest confirms / asks for the management link again | `event.guest_registered` | the guest, mail (management link) | `Du bist angemeldet` / `Du stehst auf der Warteliste` |
+| 67 | An event with confirmed guests is changed or cancelled | `event.changed_guest` / `event.cancelled_guest` | the confirmed guests, mail | the same text as members get |
+| 68 | The organiser removes a registration (`PATCH /events/:id/registrations/:id`) | `event.registration_removed` | the person and guardians, or the guest | `Anmeldung abgesagt` |
+| 69 | A helper withdraws less than `HELPER_LATE_CANCEL_HOURS` before the shift | `helper.late_cancel` | organisers (`helpers:write`), in-app + push | `Helfer:in hat kurzfristig abgesagt` |
+| 70 | The organiser changes the time of a shift / deletes a shift or station | `helper.shift_changed` / `helper.shift_removed` | the people on it, in-app + push | `Helferschicht verschoben` / `entfällt` |
+| 71 | The organiser enters or removes somebody | `helper.signed_up_by_organiser` / `helper.removed_by_organiser` | that person (also by mail, members without account too) | `Du bist als Helfer:in eingetragen` |
+| 72 | A swap is requested / accepted / declined | `helper.swap_requested` / `helper.swap_accepted` / `helper.swap_declined` | the addressee / the giver | `Schicht übernehmen?`, `Schicht übernommen`, `Tausch abgelehnt` |
+| 73 | Sweep: shift within 24 h | `helper.reminder` (`<shift>#remind24`) | the people on the shift and their guardians, in-app + push, category reminders | `Erinnerung: Helferschicht` |
+| 74 | Sweep: shift within 48 h below its minimum staffing | `helper.shift_open` (`<shift>#open48`) | the organisers, in-app + push | `Schicht noch offen` |
 
 ### States that deliberately send nothing
 
@@ -1687,6 +1709,7 @@ Event created; event edit that changes only title, description, category or capa
 | `/events/:id/helpers/swaps/:swapId/accept` | POST | session + `clubGuard` (self-service; `clubMemberId?`) | Takes the shift over (named addressee, or anybody for an open request). One transaction: person lock, shift lock, swap lock -> the sign-up moves to the taker (capacity unchanged), the request becomes `angenommen`; `409 swap_closed` for the loser of parallel accepts, `409 swap_not_for_you`, `409 shift_overlap`, `409 already_signed_up`. The giver is told |
 | `/events/:id/helpers/swaps/:swapId/decline` | POST | session + `clubGuard` | The addressee declines (`abgelehnt`); anybody else `409 swap_not_for_you` |
 | `/events/:id/helpers/swaps/:swapId` | DELETE | session + `clubGuard` | The owner of the sign-up (or a guardian / organiser) withdraws the request (`zurueckgezogen`, `204`) |
+| `/events/:id/helpers/suggestions` | GET | session + `clubGuard` (`helpers:write`, checked first; event scope) | Wave 12 B17. `200 { data: { eventId, shifts: [{ shiftId, candidates: [{ clubMemberId, displayName, availability: "verfuegbar" \| "nicht_verfuegbar" \| "unbekannt", hasAccount, isMinor, alreadyOnShift, conflicting }] }] } }`. **Raw hints, no ranking** (sorted by name, at most 500 people): the pool is the open department members of a department calendar, else all active members. Availability (`availability_slots` / `availability_exceptions`, bound to the account) is read with `computeAvailability` on the club-local wall clock of the shift start and end; people without account and accounts that never entered anything are `unbekannt` (missing data is not "not available") |
 | `/events.ics` | GET | session + `clubGuard` | iCal feed (`text/calendar`) of events on calendars visible to the caller, with series as `RRULE` (see [iCal export](#data-model)); `Cache-Control: private, no-cache`, weak `ETag` / `304`. The token link for calendar apps is `GET /feeds/:token.ics` |
 | `/calendar-feeds` | POST | session + `clubGuard` (account members; external guests `403`) | Wave 12 B8. Creates a subscription link of the caller. Body: `calendarId?` (limit to one visible calendar, else `404`), `label?` (≤ 60). `201 { data: { id, label, calendarId, calendarName, createdAt, lastUsedAt, token, url, webcalUrl } }` -- **`token` and the URLs are returned only here and on rotation**; only the SHA-256 is stored. `url` = `BACKEND_URL` + `/feeds/<token>.ics`, `webcalUrl` the same with `webcal://`. At most 10 active links per member (`409`) |
 | `/calendar-feeds` | GET | session + `clubGuard` (external guests `403`) | The caller's own active links: `{ id, label, calendarId, calendarName, createdAt, lastUsedAt }` (no token, no hash) |
