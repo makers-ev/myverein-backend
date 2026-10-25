@@ -5,7 +5,7 @@ import { clubMembers } from "../db/schema/club-members.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import type { AnnouncementAudience } from "../db/schema/communication.js";
 import { wardEventResponses } from "../db/schema/absences.js";
-import { eventAttendees } from "../db/schema/event-attendees.js";
+import { eventAttendees, type EventAttendeeRow } from "../db/schema/event-attendees.js";
 import type { Promoted } from "./event-seats.js";
 import type { EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
@@ -300,6 +300,32 @@ async function notifyGuestsOfChange(args: { clubId: string; before: EventRow; me
     content: { title: args.message.title, body: args.message.body, template: "notice", category: "events" },
     channels: ["email"],
   });
+}
+
+/** The organiser removed a registration: tell the person (member + guardians, or the guest by mail). Never throws. */
+export async function notifyRegistrationRemoved(args: { clubId: string; event: Pick<EventRow, "id" | "title" | "startsAt" | "endsAt" | "locationId" | "cancelledAt">; row: EventAttendeeRow }): Promise<void> {
+  try {
+    const { clubId, event, row } = args;
+    if (event.cancelledAt !== null || event.startsAt.getTime() <= Date.now()) return;
+    const lang = await clubMailLanguage(db, clubId);
+    const when = formatWhen(event.startsAt, await clubTimezone(clubId), event.endsAt, lang);
+    const content = {
+      title: `${tr(lang, "Anmeldung abgesagt", "Registration cancelled")}: ${event.title}`,
+      body: tr(lang, `Deine Anmeldung für „${event.title}“ (${when}) wurde vom Veranstalter abgesagt. Bei Fragen melde dich bitte bei deinem Verein.`, `Your registration for “${event.title}” (${when}) was cancelled by the organiser. If you have questions, please contact your club.`),
+      category: "events" as const,
+    };
+    const stamp = `${event.id}#removed:${row.id}`;
+    if (row.guestEmail) {
+      await notifySafely({ clubId, class: "mandatory", eventKey: "event.registration_removed", refId: stamp, recipients: [{ email: row.guestEmail, name: row.guestName }], content: { ...content, template: "notice", lang }, channels: ["email"] });
+      return;
+    }
+    const [accountClubMemberId] = row.memberId ? await clubMemberIdsOf(clubId, [row.memberId]) : [];
+    const target = row.clubMemberId ?? accountClubMemberId;
+    if (target) await notifySafely({ clubId, class: "optional", eventKey: "event.registration_removed", refId: stamp, audience: { memberIds: [target], includeGuardians: true }, content: { ...content, template: "announcement" }, channels: ["in_app", "email", "push"] });
+  } catch (err) {
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ eventId: args.event.id, errName: e?.name, errCode: e?.code }, "[event-notify] could not announce removed registration");
+  }
 }
 
 /** Statuses of a meeting that people can still react to (Terminfindung or planned); everything else is history. */
