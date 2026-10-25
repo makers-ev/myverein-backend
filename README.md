@@ -1819,6 +1819,12 @@ The scaffold's `/accounts` and `/examples` routes (ownership-scoped example reso
 | `privacy:manage` (Wave 10: consent purposes/texts, paper proofs, privacy notice, retention overrides, export/erasure of a member) | x | x | | | | | |
 | `absences:read` (Wave 10: absence reports; trainer/abteilungsleitung only for members of their **own** departments, scope applied in the route) | x | x | | | | x | trainer: x |
 | `assembly:manage` (Wave 11: statute parameters, invitations, voting roll, attendance, ballots, minutes of the general assembly; also in `permissions` of `GET /club-members/me`) | x | x | x | | | | |
+| `attendance:write` (Wave 12 B9/B10: record, close and correct the attendance list of an event; trainer/abteilungsleitung only for events of calendars of their **own** departments, `src/lib/event-access.ts`) | x | x | | | | x | trainer: x |
+| `attendance:read` (Wave 12: read attendance lists and the attendance report, same department scope) | x | x | | | | x | trainer: x |
+| `registrations:read` (Wave 12: participant list with form answers and CSV, same department scope) | x | x | | | | x | trainer: x |
+| `helpers:write` (Wave 12: helper plan of an event, entering other people, suggestions; abteilungsleitung only for events of its **own** departments) | x | x | x | | | x | |
+| `time:write` (Wave 12 P2: confirm/reject time entries; abteilungsleitung only for members of its own departments) | x | x | | | | x | |
+| `time:read_rates` (Wave 12 P2: hourly rates and the time report with amounts, confidential) | x | x | | x | | | |
 
 `erziehungsberechtigt` holds **no** permission at all (deny-by-default): a guardian only reaches ward-bound data through the guardian scope (Wave 10 B4), never through a `ClubPermission`.
 

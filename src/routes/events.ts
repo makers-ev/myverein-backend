@@ -15,8 +15,9 @@ import { refillForRead } from "../lib/event-series-refill.js";
 import { markOverride, recordDroppedOccurrence } from "../lib/event-series.js";
 import { renderCalendarIcs } from "../lib/event-feed.js";
 import { confirmedWardSeats, promoteWaitingWard } from "../lib/ward-events.js";
-import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
+import { getVisibleCalendarIds } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
+import { loadVisibleEvent } from "../lib/event-access.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -28,21 +29,6 @@ export const eventRoutes = new Hono<ClubEnv>();
 eventRoutes.use("*", rateLimit({ windowMs: 60_000, max: 60 }));
 eventRoutes.use("*", sessionGuard);
 eventRoutes.use("*", clubGuard);
-
-/** Loads an event and 404s unless its calendar belongs to `clubId` AND is visible to the caller. Never leaks an invisible calendar's events. */
-async function loadVisibleEvent(id: string, clubId: string, memberId: string, clubRoleTypes: readonly string[]) {
-  const row = await db.query.events.findFirst({ where: eq(events.id, id) });
-  if (!row) throw new NotFoundError("Event not found");
-
-  const calendar = await db.query.calendars.findFirst({ where: and(eq(calendars.id, row.calendarId), eq(calendars.clubId, clubId)) });
-  if (!calendar) throw new NotFoundError("Event not found");
-
-  if (!(await isCalendarVisible(calendar.id, memberId, clubRoleTypes))) {
-    throw new NotFoundError("Event not found");
-  }
-
-  return { event: row, calendar };
-}
 
 /** Loads a calendar scoped to `clubId` only -- used by the calendars:write-gated write handlers below (board scope, not the visibility algorithm). */
 async function loadClubCalendar(calendarId: string, clubId: string) {
