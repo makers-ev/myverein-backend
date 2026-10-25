@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq, gte, inArray, isNull, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
@@ -7,6 +7,7 @@ import { db } from "../db/client.js";
 import { clubMailLanguage } from "../lib/club-settings.js";
 import { calendars } from "../db/schema/calendars.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
+import { wardEventResponses } from "../db/schema/absences.js";
 import { events, type EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
 import { AudienceLimitError, resolveClubAudience, summarizeAudience } from "../lib/audience.js";
@@ -51,8 +52,55 @@ async function loadClubCalendar(calendarId: string, clubId: string) {
 }
 
 /** Read shape: the row plus a `cancelled` flag (`cancelledAt`/`cancelReason` are part of the row; old clients ignore them). */
-function shapeEvent(row: EventRow) {
-  return { ...row, cancelled: row.cancelledAt !== null };
+function shapeEvent(row: EventRow, extra?: EventParticipation) {
+  return { ...row, cancelled: row.cancelledAt !== null, ...(extra ?? {}) };
+}
+
+/** Participation figures added to the read shape (Wave 12 B3): the caller's own RSVP and the head counts. */
+interface EventParticipation {
+  myRsvp: "angemeldet" | "warteliste" | null;
+  attendeeCount: number;
+  waitlistCount: number;
+}
+
+/**
+ * Participation of the given events in two grouped queries (no N+1): the caller's own RSVP status and the number of
+ * confirmed / waiting entries. Guardian responses for wards without account (`ward_event_responses`) take seats and wait
+ * like account RSVPs, so they count too. `abgesagt` rows are not counted.
+ */
+async function loadParticipation(eventIds: string[], memberId: string): Promise<Map<string, EventParticipation>> {
+  const result = new Map<string, EventParticipation>();
+  for (const id of eventIds) result.set(id, { myRsvp: null, attendeeCount: 0, waitlistCount: 0 });
+  if (eventIds.length === 0) return result;
+
+  const counted = (status: "angemeldet" | "warteliste", column: typeof eventAttendees.status | typeof wardEventResponses.status) => sql<number>`count(*) filter (where ${column} = ${status})::int`;
+  const [accountRows, wardRows, ownRows] = await Promise.all([
+    db
+      .select({ eventId: eventAttendees.eventId, confirmed: counted("angemeldet", eventAttendees.status), waiting: counted("warteliste", eventAttendees.status) })
+      .from(eventAttendees)
+      .where(inArray(eventAttendees.eventId, eventIds))
+      .groupBy(eventAttendees.eventId),
+    db
+      .select({ eventId: wardEventResponses.eventId, confirmed: counted("angemeldet", wardEventResponses.status), waiting: counted("warteliste", wardEventResponses.status) })
+      .from(wardEventResponses)
+      .where(inArray(wardEventResponses.eventId, eventIds))
+      .groupBy(wardEventResponses.eventId),
+    db.select({ eventId: eventAttendees.eventId, status: eventAttendees.status }).from(eventAttendees).where(and(inArray(eventAttendees.eventId, eventIds), eq(eventAttendees.memberId, memberId))),
+  ]);
+  for (const row of [...accountRows, ...wardRows]) {
+    const entry = result.get(row.eventId)!;
+    entry.attendeeCount += row.confirmed;
+    entry.waitlistCount += row.waiting;
+  }
+  for (const row of ownRows) {
+    if (row.status === "angemeldet" || row.status === "warteliste") result.get(row.eventId)!.myRsvp = row.status;
+  }
+  return result;
+}
+
+/** `endsAt` must not lie before `startsAt` (422). */
+function assertTimeOrder(startsAt: Date, endsAt: Date | null | undefined): void {
+  if (endsAt && endsAt.getTime() < startsAt.getTime()) throw new ValidationError("endsAt must not be before startsAt");
 }
 
 /** A location must belong to the caller's club (404 otherwise, indistinguishable from unknown). */
@@ -120,13 +168,13 @@ eventRoutes.get("/", async (c) => {
   if (calendarIds.length === 0) return c.json({ data: [] });
 
   const conditions = [inArray(events.calendarId, calendarIds)];
-  if (from) conditions.push(gte(events.startsAt, from));
+  // Overlap, not start: a multi-day event that began before `from` and is still running at `from` belongs to the range.
+  if (from) conditions.push(gte(sql`coalesce(${events.endsAt}, ${events.startsAt})`, from));
   if (to) conditions.push(lte(events.startsAt, to));
 
-  // ponytail: no attendee count/caller-status inline -- plain event list,
-  // add when a client actually needs it without a follow-up request.
   const rows = await db.query.events.findMany({ where: and(...conditions), orderBy: (e, { asc }) => [asc(e.startsAt)] });
-  return c.json({ data: rows.map(shapeEvent) });
+  const participation = await loadParticipation(rows.map((r) => r.id), membership.id);
+  return c.json({ data: rows.map((r) => shapeEvent(r, participation.get(r.id))) });
 });
 
 eventRoutes.get("/:id", async (c) => {
@@ -136,7 +184,8 @@ eventRoutes.get("/:id", async (c) => {
   const id = c.req.param("id");
 
   const { event } = await loadVisibleEvent(id, clubId, membership.id, roleTypes);
-  return c.json({ data: shapeEvent(event) });
+  const participation = await loadParticipation([event.id], membership.id);
+  return c.json({ data: shapeEvent(event, participation.get(event.id)) });
 });
 
 const createEventSchema = z.object({
@@ -147,6 +196,7 @@ const createEventSchema = z.object({
   endsAt: z.string().datetime({ offset: true }).optional(),
   category: z.string().max(100).optional(),
   capacity: z.number().int().positive().optional(),
+  allDay: z.boolean().optional(),
   locationId: z.string().uuid().optional(),
 });
 
@@ -165,6 +215,7 @@ eventRoutes.post(
     const body = c.req.valid("json");
     await loadClubCalendar(body.calendarId, clubId);
     if (body.locationId) await assertClubLocation(body.locationId, clubId);
+    assertTimeOrder(new Date(body.startsAt), body.endsAt ? new Date(body.endsAt) : null);
 
     const [row] = await db
       .insert(events)
@@ -176,6 +227,7 @@ eventRoutes.post(
         endsAt: body.endsAt ? new Date(body.endsAt) : undefined,
         category: body.category,
         capacity: body.capacity,
+        allDay: body.allDay,
         locationId: body.locationId,
         createdBy: currentUser.id,
       })
@@ -195,6 +247,7 @@ const updateEventSchema = z.object({
   endsAt: z.string().datetime({ offset: true }).nullable().optional(),
   category: z.string().max(100).nullable().optional(),
   capacity: z.number().int().positive().nullable().optional(),
+  allDay: z.boolean().optional(),
   locationId: z.string().uuid().nullable().optional(),
   /** `false` saves the change without telling the attendees (audited). Default: essential changes are announced. */
   notify: z.boolean().optional(),
@@ -219,6 +272,7 @@ eventRoutes.patch(
     const calendar = await loadClubCalendar(existing.calendarId, clubId);
     if (body.calendarId) await loadClubCalendar(body.calendarId, clubId);
     if (body.locationId) await assertClubLocation(body.locationId, clubId);
+    assertTimeOrder(body.startsAt ? new Date(body.startsAt) : existing.startsAt, body.endsAt === undefined ? existing.endsAt : body.endsAt === null ? null : new Date(body.endsAt));
 
     const [row] = await db
       .update(events)

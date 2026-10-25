@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, uuid, integer, index } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, uuid, integer, index, boolean } from "drizzle-orm/pg-core";
 
 import { user } from "../../auth/auth-schema.js";
 import { calendars } from "./calendars.js";
@@ -24,6 +24,8 @@ export const events = pgTable(
     // "Fest" | "Wartung".
     category: text("category"),
     capacity: integer("capacity"),
+    // All-day entry (Wave 12): clients show no time of day; `starts_at`/`ends_at` stay the instants of the club-local day boundaries.
+    allDay: boolean("all_day").notNull().default(false),
     locationId: uuid("location_id").references(() => locations.id, { onDelete: "set null" }),
     // NULL once the creating account was deleted (the calendar / event stays, it belongs to the club).
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
@@ -36,6 +38,7 @@ export const events = pgTable(
   (table) => [
     index("events_calendar_id_idx").on(table.calendarId),
     index("events_starts_at_idx").on(table.startsAt),
+    index("events_ends_at_idx").on(table.endsAt),
   ],
 );
 
