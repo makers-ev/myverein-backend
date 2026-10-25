@@ -379,6 +379,13 @@
       "when": 1792941780503,
       "tag": "0053_events-all-day",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1792942064349,
+      "tag": "0054_events-series-attendance-helpers",
+      "breakpoints": true
     }
   ]
 }

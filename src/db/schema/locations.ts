@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, uuid, numeric, index, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, pgTable, text, timestamp, uuid, numeric, index, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { member, organization } from "../../auth/auth-schema.js";
 
@@ -26,6 +26,8 @@ export const locations = pgTable(
     // Storage key of a `media_files` row, never a URL (B18).
     photoKey: text("photo_key"),
     contactPerson: text("contact_person"),
+    // Bookable room / pitch (Wave 12, P2): occupancy plan and collision check.
+    bookable: boolean("bookable").notNull().default(false),
     accessNote: text("access_note"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

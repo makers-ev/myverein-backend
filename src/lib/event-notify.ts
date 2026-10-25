@@ -96,10 +96,11 @@ export async function clubMemberIdsOf(clubId: string, accountMemberIds: string[]
  */
 export async function eventAudience(clubId: string, eventId: string, departmentId: string | null, cancelled: boolean): Promise<AnnouncementAudience | null> {
   const rows = await db
-    .select({ memberId: eventAttendees.memberId })
+    .select({ memberId: eventAttendees.memberId, clubMemberId: eventAttendees.clubMemberId })
     .from(eventAttendees)
     .where(and(eq(eventAttendees.eventId, eventId), inArray(eventAttendees.status, ["angemeldet", "warteliste"])));
-  const memberIds = await clubMemberIdsOf(clubId, rows.map((r) => r.memberId));
+  // Account RSVPs resolve to their club member; registrations of members without account already carry the club member id.
+  const memberIds = [...new Set([...(await clubMemberIdsOf(clubId, rows.flatMap((r) => (r.memberId ? [r.memberId] : [])))), ...rows.flatMap((r) => (r.clubMemberId ? [r.clubMemberId] : []))])];
   const departmentIds = cancelled && departmentId ? [departmentId] : [];
   if (memberIds.length === 0 && departmentIds.length === 0) return null;
   // Guardians are told about every change: the child's attendance is also the parent's schedule.

@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
@@ -272,14 +272,18 @@ eventRoutes.patch(
     const calendar = await loadClubCalendar(existing.calendarId, clubId);
     if (body.calendarId) await loadClubCalendar(body.calendarId, clubId);
     if (body.locationId) await assertClubLocation(body.locationId, clubId);
-    assertTimeOrder(body.startsAt ? new Date(body.startsAt) : existing.startsAt, body.endsAt === undefined ? existing.endsAt : body.endsAt === null ? null : new Date(body.endsAt));
+    const newStart = body.startsAt ? new Date(body.startsAt) : existing.startsAt;
+    let newEnd = body.endsAt === undefined ? existing.endsAt : body.endsAt === null ? null : new Date(body.endsAt);
+    // Moving only the start past the stored end keeps the duration (the end moves along) instead of leaving an inverted event.
+    if (body.endsAt === undefined && newEnd && newEnd.getTime() < newStart.getTime()) newEnd = new Date(newStart.getTime() + (existing.endsAt!.getTime() - existing.startsAt.getTime()));
+    assertTimeOrder(newStart, newEnd);
 
     const [row] = await db
       .update(events)
       .set({
         ...body,
         startsAt: body.startsAt ? new Date(body.startsAt) : undefined,
-        endsAt: body.endsAt === undefined ? undefined : body.endsAt === null ? null : new Date(body.endsAt),
+        endsAt: body.endsAt === undefined ? (newEnd === existing.endsAt ? undefined : newEnd) : newEnd,
         updatedAt: new Date(),
       })
       .where(eq(events.id, id))
@@ -474,7 +478,7 @@ eventRoutes.delete("/:id/rsvp", async (c) => {
     // earliest-responded waitlist row up, if there is one.
     if (existing.status === "angemeldet" && event.capacity !== null) {
       const nextInLine = await tx.query.eventAttendees.findFirst({
-        where: and(eq(eventAttendees.eventId, id), eq(eventAttendees.status, "warteliste")),
+        where: and(eq(eventAttendees.eventId, id), eq(eventAttendees.status, "warteliste"), isNotNull(eventAttendees.memberId)),
         orderBy: (ea, { asc }) => [asc(ea.respondedAt)],
       });
       if (nextInLine) {
@@ -484,7 +488,7 @@ eventRoutes.delete("/:id/rsvp", async (c) => {
           subjectId: id,
           payload: { clubId, memberId: nextInLine.memberId },
         });
-        return { memberId: nextInLine.memberId, respondedAt: nextInLine.respondedAt };
+        return { memberId: nextInLine.memberId!, respondedAt: nextInLine.respondedAt };
       }
       // Nobody waits with an account: a waiting ward (response of a guardian) moves up.
       await promoteWaitingWard(tx, id);

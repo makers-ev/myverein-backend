@@ -168,14 +168,14 @@ export async function collectEventReminders(clubs: Map<string, ReminderClub>, no
   });
   if (due.length === 0) return [];
   const attendees = await db
-    .select({ eventId: eventAttendees.eventId, memberId: eventAttendees.memberId })
+    .select({ eventId: eventAttendees.eventId, memberId: eventAttendees.memberId, clubMemberId: eventAttendees.clubMemberId })
     .from(eventAttendees)
     .where(and(inArray(eventAttendees.eventId, due.map((r) => r.id)), eq(eventAttendees.status, "angemeldet")));
-  const index = await clubMemberIndex(attendees.map((a) => a.memberId));
+  const index = await clubMemberIndex(attendees.flatMap((a) => (a.memberId ? [a.memberId] : [])));
   const out: DueReminder[] = [];
   for (const ev of due) {
     const club = clubs.get(ev.clubId)!;
-    const memberIds = [...new Set(attendees.filter((a) => a.eventId === ev.id).flatMap((a) => index.get(`${ev.clubId}:${a.memberId}`) ?? []))];
+    const memberIds = [...new Set(attendees.filter((a) => a.eventId === ev.id).flatMap((a) => (a.clubMemberId ? [a.clubMemberId] : a.memberId ? (index.get(`${ev.clubId}:${a.memberId}`) ?? []) : [])))];
     if (memberIds.length === 0) continue;
     out.push({
       kind: "event",

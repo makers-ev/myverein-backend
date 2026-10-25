@@ -30,6 +30,8 @@ export const clubSettings = pgTable("club_settings", {
   textBlocks: jsonb("text_blocks").$type<ClubTextBlock[]>(),
   // IANA zone the club's time-based logic (reminders, sweeps) is computed in; instants are stored as UTC.
   timezone: text("timezone").notNull().default("Europe/Berlin"),
+  // German federal state (ISO 3166-2:DE code without prefix, e.g. "BY") for the public holidays of series; NULL = nationwide holidays only.
+  state: text("state"),
   reminderEventEnabled: boolean("reminder_event_enabled").notNull().default(true),
   reminderEventLeadHours: integer("reminder_event_lead_hours").notNull().default(24),
   reminderLoanEnabled: boolean("reminder_loan_enabled").notNull().default(true),
