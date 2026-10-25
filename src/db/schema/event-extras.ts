@@ -128,3 +128,10 @@ export const rateCards = pgTable(
     check("rate_cards_rate_chk", sql`${table.hourlyRateCents} >= 0`),
   ],
 );
+
+export type EventRegistrationSettingsRow = typeof eventRegistrationSettings.$inferSelect;
+export type EventRideRow = typeof eventRides.$inferSelect;
+export type EventRideRequestRow = typeof eventRideRequests.$inferSelect;
+export type LocationBookingRow = typeof locationBookings.$inferSelect;
+export type TimeEntryRow = typeof timeEntries.$inferSelect;
+export type RateCardRow = typeof rateCards.$inferSelect;

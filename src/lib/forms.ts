@@ -210,9 +210,9 @@ export interface PublishProblem {
   fieldKey?: string;
 }
 
-/** Exit forms (`austritt`) cannot take uploads (`POST /club-exit-requests` accepts plain answers only). */
+/** Exit forms (`austritt`) and event registration forms (`veranstaltungsanmeldung`, also filled in by guests without account) cannot take uploads. */
 export function fileFieldProblems(purpose: string, fields: readonly FormField[]): PublishProblem[] {
-  if (purpose !== "austritt") return [];
+  if (purpose !== "austritt" && purpose !== "veranstaltungsanmeldung") return [];
   return fields.filter((f) => f.type === "file" || f.type === "image").map((f) => ({ code: "file_not_supported", fieldKey: f.key }));
 }
 

@@ -86,3 +86,13 @@ export const needsPermission = (permission: ClubPermission) =>
     requirePermission(c.get("clubRoleTypes"), permission);
     await next();
   });
+
+/** Event of the caller's club regardless of calendar visibility (board-scoped write routes, like the event write routes); 404 otherwise. */
+export async function loadClubEvent(id: string, clubId: string): Promise<{ event: EventRow; calendar: CalendarRow }> {
+  if (!isUuid(id)) throw new NotFoundError("Event not found");
+  const row = await db.query.events.findFirst({ where: eq(events.id, id) });
+  if (!row) throw new NotFoundError("Event not found");
+  const calendar = await db.query.calendars.findFirst({ where: and(eq(calendars.id, row.calendarId), eq(calendars.clubId, clubId)) });
+  if (!calendar) throw new NotFoundError("Event not found");
+  return { event: row, calendar };
+}

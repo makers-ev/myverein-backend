@@ -1,12 +1,9 @@
-import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import { calendars } from "../db/schema/calendars.js";
 import { calendarVisibility } from "../db/schema/calendar-visibility.js";
 import type { ClubMemberRow } from "../db/schema/club-members.js";
-import { eventAttendees } from "../db/schema/event-attendees.js";
-import { wardEventResponses } from "../db/schema/absences.js";
-import type { DbExecutor } from "./club-members.js";
 import { departmentIdsOf } from "./absences.js";
 
 /**
@@ -22,29 +19,4 @@ export async function wardCalendarIds(ward: ClubMemberRow): Promise<string[]> {
   const viaGrant = conditions.length === 0 ? [] : await db.select({ id: calendarVisibility.calendarId }).from(calendarVisibility).innerJoin(calendars, eq(calendars.id, calendarVisibility.calendarId)).where(and(eq(calendars.clubId, ward.clubId), or(...conditions)));
   const own = departments.length > 0 ? await db.select({ id: calendars.id }).from(calendars).where(and(eq(calendars.clubId, ward.clubId), inArray(calendars.departmentId, departments))) : [];
   return [...new Set([...viaGrant, ...own].map((r) => r.id))];
-}
-
-/** Confirmed responses of guardians for wards without account (they take seats like account RSVPs). */
-export async function confirmedWardSeats(tx: DbExecutor, eventId: string, excludeWardId?: string): Promise<number> {
-  const rows = await tx.select({ ward: wardEventResponses.wardClubMemberId }).from(wardEventResponses).where(and(eq(wardEventResponses.eventId, eventId), eq(wardEventResponses.status, "angemeldet")));
-  return rows.filter((w) => w.ward !== excludeWardId).length;
-}
-
-/** Confirmed account RSVPs of an event. */
-export async function confirmedAccountSeats(tx: DbExecutor, eventId: string): Promise<number> {
-  const rows = await tx.select({ id: eventAttendees.id }).from(eventAttendees).where(and(eq(eventAttendees.eventId, eventId), eq(eventAttendees.status, "angemeldet")));
-  return rows.length;
-}
-
-/** Moves the earliest waiting ward response up (a seat became free); account waitlists keep their own promotion. */
-export async function promoteWaitingWard(tx: DbExecutor, eventId: string): Promise<string | null> {
-  const [next] = await tx
-    .select()
-    .from(wardEventResponses)
-    .where(and(eq(wardEventResponses.eventId, eventId), eq(wardEventResponses.status, "warteliste")))
-    .orderBy(asc(wardEventResponses.respondedAt))
-    .limit(1);
-  if (!next) return null;
-  await tx.update(wardEventResponses).set({ status: "angemeldet" }).where(eq(wardEventResponses.id, next.id));
-  return next.wardClubMemberId;
 }

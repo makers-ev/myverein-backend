@@ -24,7 +24,10 @@ import { todayBerlin } from "../lib/member-lifecycle.js";
 import { openRequest } from "../lib/privacy/requests.js";
 import { respondWithExport } from "../lib/privacy/respond.js";
 import { dbRateLimit, envInt, HOUR_MS } from "../lib/rate-limits.js";
-import { confirmedAccountSeats, confirmedWardSeats, promoteWaitingWard, wardCalendarIds } from "../lib/ward-events.js";
+import { notifyPromoted } from "../lib/event-notify.js";
+import { cancelRegistration, saveRegistration } from "../lib/event-registration.js";
+import { promoteWaitlist, takenSeats } from "../lib/event-seats.js";
+import { wardCalendarIds } from "../lib/ward-events.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard, type SessionEnv } from "../middleware/session-guard.js";
@@ -129,6 +132,11 @@ guardianRoutes.get("/wards/:wardId/events", zValidator("query", eventsQuery, val
       ? await db.select({ eventId: eventAttendees.eventId, status: eventAttendees.status }).from(eventAttendees).where(and(inArray(eventAttendees.eventId, ids), eq(eventAttendees.memberId, ward.memberId)))
       : await db.select({ eventId: wardEventResponses.eventId, status: wardEventResponses.status }).from(wardEventResponses).where(and(inArray(wardEventResponses.eventId, ids), eq(wardEventResponses.wardClubMemberId, ward.id)));
     for (const r of rsvps) status.set(r.eventId, r.status);
+    // Registrations of the ward made through POST /events/:id/rsvp?forClubMemberId= (with party size / form) live in event_attendees.
+    if (!ward.memberId) {
+      const registered = await db.select({ eventId: eventAttendees.eventId, status: eventAttendees.status }).from(eventAttendees).where(and(inArray(eventAttendees.eventId, ids), eq(eventAttendees.clubMemberId, ward.id)));
+      for (const r of registered) status.set(r.eventId, r.status);
+    }
   }
   return c.json({
     data: rows.map(({ event, calendarName, locationName }) => ({
@@ -169,13 +177,29 @@ guardianRoutes.put("/wards/:wardId/events/:eventId/response", zValidator("json",
   if (event.cancelledAt !== null) throw new ConflictError("Event is cancelled");
   const wanted = c.req.valid("json").status;
 
+  // A ward already registered through the registration route (party size, form answers) keeps that registration.
+  const [registered] = await db.select({ id: eventAttendees.id }).from(eventAttendees).where(and(eq(eventAttendees.eventId, event.id), eq(eventAttendees.clubMemberId, ward.id)));
+  if (registered) {
+    const identity = { kind: "member" as const, clubMemberId: ward.id };
+    if (wanted === "abgesagt") {
+      const promoted = await cancelRegistration({ clubId: ward.clubId, eventId: event.id, identity });
+      await notifyPromoted({ clubId: ward.clubId, event, promoted });
+      return c.json({ data: { eventId: event.id, status: "abgesagt" } });
+    }
+    const current = await db.select({ size: eventAttendees.partySize }).from(eventAttendees).where(eq(eventAttendees.id, registered.id));
+    const saved = await saveRegistration({ clubId: ward.clubId, eventId: event.id, identity, partySize: current[0]?.size ?? 1, answers: undefined, actorUserId: c.get("user").id, registeredByMemberId: c.get("membership").id, onBehalfOf: "guardian" });
+    await notifyPromoted({ clubId: ward.clubId, event, promoted: saved.promoted });
+    return c.json({ data: { eventId: event.id, status: saved.status } });
+  }
+
+  const promotedBox: Awaited<ReturnType<typeof promoteWaitlist>>[] = [];
   const outcome = await db.transaction(async (tx) => {
     // Same lock as the account RSVP: capacity cannot be overbooked by parallel responses.
     await tx.select({ id: events.id }).from(events).where(eq(events.id, event.id)).for("update");
     const [before] = await tx.select().from(wardEventResponses).where(and(eq(wardEventResponses.eventId, event.id), eq(wardEventResponses.wardClubMemberId, ward.id)));
     let status: "angemeldet" | "abgesagt" | "warteliste" = wanted;
     if (wanted === "angemeldet" && event.capacity !== null) {
-      const taken = (await confirmedAccountSeats(tx, event.id)) + (await confirmedWardSeats(tx, event.id, ward.id));
+      const taken = await takenSeats(tx, event.id, { wardClubMemberId: ward.id });
       status = taken < event.capacity ? "angemeldet" : "warteliste";
     }
     await tx
@@ -183,22 +207,30 @@ guardianRoutes.put("/wards/:wardId/events/:eventId/response", zValidator("json",
       .values({ eventId: event.id, wardClubMemberId: ward.id, status, respondedByUserId: c.get("user").id })
       .onConflictDoUpdate({ target: [wardEventResponses.eventId, wardEventResponses.wardClubMemberId], set: { status, respondedByUserId: c.get("user").id, respondedAt: new Date() } });
     // A confirmed seat that is given up frees a place for somebody waiting.
-    if (before?.status === "angemeldet" && status !== "angemeldet" && event.capacity !== null) await promoteWaitingWard(tx, event.id);
+    if (before?.status === "angemeldet" && status !== "angemeldet" && event.capacity !== null) promotedBox.push(await promoteWaitlist(tx, event, ward.clubId));
     await writeAudit(tx, { eventType: "ward_event_response.set", subjectId: event.id, payload: { clubId: ward.clubId, eventId: event.id, wardClubMemberId: ward.id, status } });
     return status;
   });
+  await notifyPromoted({ clubId: ward.clubId, event, promoted: promotedBox.flat() });
   return c.json({ data: { eventId: event.id, status: outcome } });
 });
 
 guardianRoutes.delete("/wards/:wardId/events/:eventId/response", async (c) => {
   const { ward } = await wardOf(c);
   const event = await visibleEventOf(ward, c.req.param("eventId"));
-  await db.transaction(async (tx) => {
+  const promoted = await db.transaction(async (tx) => {
     await tx.select({ id: events.id }).from(events).where(eq(events.id, event.id)).for("update");
     const [removed] = await tx.delete(wardEventResponses).where(and(eq(wardEventResponses.eventId, event.id), eq(wardEventResponses.wardClubMemberId, ward.id))).returning();
-    if (!removed) throw new NotFoundError("Response not found");
-    if (removed.status === "angemeldet" && event.capacity !== null) await promoteWaitingWard(tx, event.id);
+    if (!removed) return null;
+    return removed.status === "angemeldet" && event.capacity !== null ? promoteWaitlist(tx, event, ward.clubId) : [];
   });
+  if (promoted === null) {
+    // No legacy answer: the ward may be registered through the registration route.
+    const done = await cancelRegistration({ clubId: ward.clubId, eventId: event.id, identity: { kind: "member", clubMemberId: ward.id } });
+    await notifyPromoted({ clubId: ward.clubId, event, promoted: done });
+    return c.body(null, 204);
+  }
+  await notifyPromoted({ clubId: ward.clubId, event, promoted });
   return c.body(null, 204);
 });
 

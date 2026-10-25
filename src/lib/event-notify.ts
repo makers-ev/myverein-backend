@@ -4,7 +4,9 @@ import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import type { AnnouncementAudience } from "../db/schema/communication.js";
+import { wardEventResponses } from "../db/schema/absences.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
+import type { Promoted } from "./event-seats.js";
 import type { EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
 import { meetingInvitees, type MeetingInviteeRow, type MeetingRow } from "../db/schema/meetings.js";
@@ -216,6 +218,57 @@ export async function notifyWaitlistPromoted(args: { clubId: string; event: Pick
       },
       channels: ["in_app", "email", "push"],
     });
+  } catch (err) {
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ eventId: args.event.id, errName: e?.name, errCode: e?.code }, "[event-notify] could not announce waitlist promotion");
+  }
+}
+
+/**
+ * Tells everybody who moved up from the waitlist (`promote*` of `lib/event-seats.ts`), whatever their identity: an account, a
+ * member without account (the guardians are told as well) or a guest without any membership (mail only, no member data kept).
+ * Called after the transaction committed; never throws. Nothing is sent for a cancelled or already started event.
+ */
+export async function notifyPromoted(args: { clubId: string; event: Pick<EventRow, "id" | "title" | "startsAt" | "endsAt" | "locationId" | "cancelledAt">; promoted: Promoted[] }): Promise<void> {
+  try {
+    const { clubId, event, promoted } = args;
+    if (promoted.length === 0 || event.cancelledAt !== null || event.startsAt.getTime() <= Date.now()) return;
+    const timezone = await clubTimezone(clubId);
+    const lang = await clubMailLanguage(db, clubId);
+    const place = await locationName(clubId, event.locationId);
+    const when = formatWhen(event.startsAt, timezone, event.endsAt, lang);
+    const content = {
+      title: `${tr(lang, "Du bist nachgerückt", "You moved up")}: ${event.title}`,
+      body: tr(
+        lang,
+        `Für „${event.title}“ ist ein Platz frei geworden. Du stehst jetzt nicht mehr auf der Warteliste, sondern bist angemeldet.\nWann: ${when}${place ? `\nOrt: ${place}` : ""}\nWenn du nicht kommen kannst, sag bitte ab, damit der Platz weitergegeben wird.`,
+        `A spot opened up for “${event.title}”. You are no longer on the waitlist, you are registered.\nWhen: ${when}${place ? `\nLocation: ${place}` : ""}\nIf you cannot come, please cancel so the spot can be passed on.`,
+      ),
+      category: "events" as const,
+    };
+    const attendeeIds = promoted.filter((p) => p.kind === "attendee").map((p) => p.id);
+    const wardIds = promoted.filter((p) => p.kind === "ward").map((p) => p.id);
+    const rows = attendeeIds.length ? await db.select().from(eventAttendees).where(inArray(eventAttendees.id, attendeeIds)) : [];
+    const wards = wardIds.length ? await db.select({ id: wardEventResponses.id, wardClubMemberId: wardEventResponses.wardClubMemberId }).from(wardEventResponses).where(inArray(wardEventResponses.id, wardIds)) : [];
+    for (const p of promoted) {
+      const stamp = `${event.id}#${p.respondedAt.getTime()}`;
+      if (p.kind === "ward") {
+        const ward = wards.find((w) => w.id === p.id);
+        if (ward) await notifySafely({ clubId, class: "optional", eventKey: "event.promoted", refId: stamp, audience: { memberIds: [ward.wardClubMemberId], includeGuardians: true }, content: { ...content, template: "announcement" }, channels: ["in_app", "email", "push"] });
+        continue;
+      }
+      const row = rows.find((r) => r.id === p.id);
+      if (!row) continue;
+      if (row.guestEmail) {
+        // A guest without account: mail only, the delivery address is wiped by the retention job.
+        await notifySafely({ clubId, class: "mandatory", eventKey: "event.promoted", refId: `${stamp}:${p.id}`, recipients: [{ email: row.guestEmail, name: row.guestName }], content: { ...content, template: "notice", lang }, channels: ["email"] });
+        continue;
+      }
+      const [accountClubMemberId] = row.memberId ? await clubMemberIdsOf(clubId, [row.memberId]) : [];
+      const target = row.clubMemberId ?? accountClubMemberId;
+      if (!target) continue;
+      await notifySafely({ clubId, class: "optional", eventKey: "event.promoted", refId: stamp, audience: { memberIds: [target], includeGuardians: true }, content: { ...content, template: "announcement" }, channels: ["in_app", "email", "push"] });
+    }
   } catch (err) {
     const e = err as { name?: string; code?: unknown } | undefined;
     logger.error({ eventId: args.event.id, errName: e?.name, errCode: e?.code }, "[event-notify] could not announce waitlist promotion");
