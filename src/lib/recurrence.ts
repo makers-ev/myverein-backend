@@ -115,7 +115,7 @@ export function validateRule(rule: SeriesRule): string[] {
 const offsetFormatters = new Map<string, Intl.DateTimeFormat>();
 
 /** Offset of `timezone` from UTC at the instant `utcMs`, in ms (positive east of Greenwich). */
-function offsetAt(utcMs: number, timezone: string): number {
+export function offsetAt(utcMs: number, timezone: string): number {
   let f = offsetFormatters.get(timezone);
   if (!f) {
     f = new Intl.DateTimeFormat("en-US", { timeZone: timezone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });

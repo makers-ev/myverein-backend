@@ -13,7 +13,7 @@ import { AudienceLimitError, resolveClubAudience, summarizeAudience } from "../l
 import { announceEventChange, essentialDiff, eventAudience, notifyWaitlistPromoted } from "../lib/event-notify.js";
 import { refillForRead } from "../lib/event-series-refill.js";
 import { markOverride, recordDroppedOccurrence } from "../lib/event-series.js";
-import { buildIcs } from "../lib/ics.js";
+import { renderCalendarIcs } from "../lib/event-feed.js";
 import { confirmedWardSeats, promoteWaitingWard } from "../lib/ward-events.js";
 import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
@@ -481,23 +481,17 @@ icsRoutes.use("*", sessionGuard);
 icsRoutes.use("*", clubGuard);
 
 /**
- * Session-gated iCal feed only. A static/token-based public link (so a
- * calendar app can subscribe without a login) is a real, still-open
- * question this repo's Wave 2 plan explicitly flags and defers -- not an
- * oversight -- so it isn't built here.
+ * Session-gated iCal feed of the calendars visible to the caller: event series as RRULE (+ EXDATE, RECURRENCE-ID), place, status
+ * and all-day events (`src/lib/ics.ts`, `src/lib/event-feed.ts`). The subscribable token link is `GET /feeds/:token.ics`.
  */
 icsRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
-  const membership = c.get("membership");
-  const roleTypes = c.get("clubRoleTypes");
-
-  const calendarIds = await getVisibleCalendarIds(clubId, membership.id, roleTypes);
-  const rows = calendarIds.length
-    ? await db.query.events.findMany({ where: inArray(events.calendarId, calendarIds), orderBy: (e, { asc }) => [asc(e.startsAt)] })
-    : [];
-
-  const ics = buildIcs(rows.map((r) => ({ id: r.id, title: r.title, description: r.description, startsAt: r.startsAt, endsAt: r.endsAt, cancelled: r.cancelledAt !== null })));
+  const calendarIds = await getVisibleCalendarIds(clubId, c.get("membership").id, c.get("clubRoleTypes"));
+  const { ics, etag } = await renderCalendarIcs(clubId, calendarIds);
 
   c.header("Content-Type", "text/calendar; charset=utf-8");
+  c.header("Cache-Control", "private, no-cache");
+  c.header("ETag", etag);
+  if (c.req.header("if-none-match") === etag) return c.body(null, 304);
   return c.body(ics);
 });

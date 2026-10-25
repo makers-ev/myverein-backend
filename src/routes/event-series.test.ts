@@ -15,7 +15,7 @@ import { events } from "../db/schema/events.js";
 import { toAppError } from "../lib/errors.js";
 import { calendarRoutes } from "./calendars.js";
 import { eventSeriesRoutes } from "./event-series.js";
-import { eventRoutes } from "./events.js";
+import { eventRoutes, icsRoutes } from "./events.js";
 
 /** Integration test (real Postgres): series creation, DST-stable occurrences, the three edit/delete scopes, RSVP survival, parallel edits, IDOR. */
 
@@ -23,6 +23,7 @@ const app = new Hono();
 app.route("/calendars", calendarRoutes);
 app.route("/event-series", eventSeriesRoutes);
 app.route("/events", eventRoutes);
+app.route("/events.ics", icsRoutes);
 app.onError((err, c) => {
   const appError = toAppError(err);
   return c.json(appError.toJSON(), appError.status as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 503);
@@ -301,6 +302,28 @@ describe("event series", () => {
       await call(board, `/event-series/${series.id}?scope=this&eventId=${rows[1]!.id}&reason=Halle`, { method: "DELETE" });
       expect(await queued(rows[1]!.id)).toBe(1);
     });
+  });
+
+  it("GET /events.ics writes a series as one RRULE master with overrides, drops and an ETag", async () => {
+    const { series } = await create(weekly("2036-03-03", { title: "Feed-Training", count: 5 }));
+    const rows = await occurrences(series.id);
+    await call(board, `/event-series/${series.id}`, { method: "PATCH", body: { scope: "this", eventId: rows[1]!.id, title: "Feed-Sonder" } });
+    await call(board, `/events/${rows[2]!.id}`, { method: "DELETE" });
+    const res = await call(member, "/events.ics");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toContain("private");
+    const text = (await res.text()).replace(/\r\n /g, "");
+    expect(text).toContain(`UID:series-${series.id}@myverein`);
+    expect(text).toContain("DTSTART;TZID=Europe/Berlin:20360303T180000");
+    expect(text).toContain("RRULE:FREQ=WEEKLY;BYDAY=MO;WKST=MO;COUNT=5");
+    expect(text).toContain("EXDATE;TZID=Europe/Berlin:20360317T180000");
+    expect(text).toContain("RECURRENCE-ID;TZID=Europe/Berlin:20360310T180000");
+    expect(text).toContain("SUMMARY:Feed-Sonder");
+    expect(text).toContain("BEGIN:VTIMEZONE");
+    expect(text.match(/Feed-Training/g)).toHaveLength(1);
+    const etag = res.headers.get("etag")!;
+    const again = await app.request(`/events.ics?clubId=${clubA}`, { headers: { cookie: member, "if-none-match": etag } });
+    expect(again.status).toBe(304);
   });
 
   it("GET /event-series lists the visible series with upcoming counts", async () => {
