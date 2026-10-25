@@ -65,9 +65,70 @@ curl http://localhost:3000/health
 | `npm run db:verify-counts` | Read-only count/integrity report against `DATABASE_URL` (Wave 7 B12, see [Verifying the Wave 7 migrations](#verifying-the-wave-7-migrations-b12)); prints table names and numbers only, exit code 1 if a check fails |
 | `npm run seed:admin` | Create or promote the admin user from `ADMIN_EMAIL`/`ADMIN_PASSWORD` |
 | `npm run seed:club` | Bootstrap a demo club and make `ADMIN_EMAIL` its "vorsitz" — needed for local dev. Also creates the club's standard calendar ("Vereinskalender"). Real users create clubs through the Wave 6 registration + review flow (`/club-registrations`, [Club registration](#club-registration)); `organization/create` is closed for end users, `seed:club` and the approval call `auth.api.createOrganization` server-side, which is still allowed. See `src/scripts/seed-club.ts` |
+| `npm run seed:demo` | Build ONE fully populated demo club ("Demo Sportverein Wiesbach e.V.") with 17 demo logins, 47 members, calendar, material, assemblies, privacy and communication data — see [Demo club](#demo-club-npm-run-seeddemo). Idempotent, `--reset` rebuilds only that club, refuses `NODE_ENV=production` without `--force`. See `src/scripts/seed-demo.ts` |
 | `npm run auth:generate` | Regenerate `src/auth/auth-schema.ts` from the Better Auth config |
 | `npm run lint` | ESLint |
 | `npm test` | Vitest (unit + integration) |
+
+### Demo club (`npm run seed:demo`)
+
+`src/scripts/seed-demo.ts` (modules in `src/scripts/demo/`) creates **one club in which every feature area of MyVerein can be viewed, tested and demonstrated** — for sales demos, manual QA and client development. It uses the real service functions wherever they exist (Better Auth `createUser` / `createOrganization` / `addMember`, `ensureClubMember`, `ensureGuardianAccount`, `sendInvitation`, `freezeVotingRoll`, `grantProxy`, the ballot / election / minutes functions, `recordConsent`, `publishNotice`, `sendAnnouncement`, `createAbsence`, `writeAudit`), so hashes, snapshots, delivery proof, audit entries and invariants are real, not hand-written rows. Only master data without a service function (members, events, inventory, locations, ...) is inserted directly.
+
+```bash
+npm run seed:demo                  # create the demo club; if it exists, change nothing (exit 0)
+npm run seed:demo -- --reset       # delete THIS club and its demo accounts, then build it again
+npm run seed:demo -- --force       # allow NODE_ENV=production (never use on a real installation)
+```
+
+**Safety rules.**
+
+- *Idempotent:* the club is found by slug (`DEMO_CLUB_SLUG`, default `demo-sportverein-wiesbach`). Existing demo club without `--reset` -> nothing happens, the login table is printed again.
+- *Only its own club:* the club carries `organization.metadata = {"demoSeed": true}`. A club with that slug **without** the marker (e.g. the `seed:club` club `demo-sportverein`) is never touched; the seed stops with an error. `--reset` deletes that club (cascade, plus the audit entries and queued jobs that have no foreign key) and the users of the e-mail domain `DEMO_EMAIL_DOMAIN` — a demo account that also belongs to another club is kept. No other club, user, or table row is touched.
+- *No production:* `NODE_ENV=production` is refused unless `--force`.
+- *No mail goes out:* invitations, announcements and absence notices go through the real notification pipeline (so delivery proof exists), but the demo addresses (`*.local`) are undeliverable by design; at the end of the run the queued e-mail/push deliveries of the demo club are closed as sent and their jobs removed, so a running worker never tries to mail anybody. Two jobs stay on purpose: the "voting has started" notice of the open circular resolution and the scheduled announcement (both create in-app entries when the worker runs).
+
+**Logins.** All demo accounts have verified e-mail and the same password (`DEMO_PASSWORD`, default `Demo-Verein-2026!`, printed at the end of every run together with a table of roles). E-mails are `<name>@demo.myverein.local`.
+
+| Login | Account | Club role(s) | What it demonstrates |
+|---|---|---|---|
+| `admin@` | platform `admin` | - | Platform admin views: open club registration (`gruender@`), jobs, mail log, DPA draft |
+| `vorsitz@` | owner | `vorsitz` | Everything the board may do; chairs the assemblies |
+| `stellv.vorsitz@` | admin | `stellv_vorsitz` | Same rights as the chair |
+| `kassenwart@` | member | `kassenwart` | Sensitive member data and KPIs only; **term ends in 21 days** |
+| `schriftfuehrer@` | member | `schriftfuehrer` | Meetings, minutes, forms, announcements, assembly management |
+| `beisitzer@` | member | `beisitzer`, `abteilungsleitung` Turnen | Re-elected in the demo assembly (24 month term), leads Turnen |
+| `trainer@` | member | `trainer` Fußball | Department announcements, absences of the own department, qualifications |
+| `trainer2@` | member | `trainer` Tennis | **Term expired 12 days ago** (the statute suspends the role's rights) |
+| `abteilungsleitung@` | member | `abteilungsleitung` Fußball | Calendars, locations, material |
+| `abteilungsleitung2@` | member | `abteilungsleitung` Tennis | **Term ends in 45 days** |
+| `mitglied@` | member | (implicit `mitglied`) | Plain member, read rights only; has **not yet voted** in the open circular resolution; father of Finn |
+| `jugend@` | member | (implicit `mitglied`) | 16-year-old youth member with an account, no voting right (category `jugend`) |
+| `erziehungsberechtigt@` | guest | `erziehungsberechtigt` | External guardian: wards Noah and Mia (valid), Lina (**not confirmed**, grants nothing), Tim (**expired**, turned 18) |
+| `gast@` | guest | - | External guest (association referee): sees only guest-level content |
+| `bewerber@` / `eltern.bewerber@` | no membership | - | Applicants with an open admission application (the second one for a child) |
+| `gruender@` | no membership | - | Wants to found a club: open registration for the platform review |
+
+**What each area demonstrates.**
+
+| Area | Content |
+|---|---|
+| Club | Verified club (approved registration), 6 info pages (statute, vision, history, fee schedule, house rules, external link), settings: reminders, mail template + text blocks, consent age limit 16, privacy contact/controller, **complete statute parameters of the general assembly** (14 + 3 days notice, quorum 25 %, majorities per topic, proxies, hybrid, circular resolutions, digital secret ballots, voting age 16, term warnings) |
+| Members | 47 members (13 with account): categories Aktiv, Passiv, Fördernd, Ehrenmitglied, Jugend, Kinder, Studierende (with and without voting right, age rules for the age transition); statuses interessent, probe, aktiv, ruhend, **scheduled exit** (aktiv + future `left_at`), ausgetreten, ausgeschlossen (with legal hold), verstorben; entry/exit dates, status and category history, contact data, emergency contacts, organisations as sponsors, siblings sharing one e-mail address, members without any address (post list) |
+| Structure | 4 departments (Schwimmen without a lead), leads, department assignments (one ended), club roles with terms (expiring soon, expired), term history |
+| Guardians | Links in every state: valid, second guardian without custody (cannot consent), unconfirmed, expired; minors Leon, Hannah, Sophie, Jonas **without** a guardian |
+| Member data | 7 custom fields (select, textarea, checkbox, multiselect, sensitive, 2 credentials), 34 values, qualifications valid / expiring (25–38 days) / expired, per-member visibility of phone, e-mail, address, photo |
+| Calendar | Club, 3 department calendars (visible to department members) and a board calendar; 36 events (past and future), a weekly football series, **2 cancelled events**, capacity 4 events with waiting list and declines, kids' trial class with RSVPs of guardians for wards, availability windows and exceptions, 5 absence reports (krank/abwesend, by self and by guardian, one withdrawn) |
+| Places and material | 5 locations with opening hours, access note, 4 wifi networks (open/WPA/WPA3, visibility gast/mitglied/vorstand), links, key holders and key history; 10 inventory items with maintenance (due soon / overdue), loans (open, due tomorrow, overdue, returned), damage reports (gemeldet / in Bearbeitung / behoben) |
+| Meetings | Board meeting held (minutes, hand-counted resolutions), planned board meeting with RSVPs, a meeting in date finding |
+| General assembly | **Vorjahr:** held, voting roll frozen, check-in, minutes confirmed by chair and secretary, **approved** by the next assembly, archived, with a Berichtigungsvermerk. **Jahreshauptversammlung (9 days ago, hybrid):** invitation 30 days ahead with delivery proof, 2 proxies (one recorded by the board with proof), frozen roll, check-in by clerk / online / proxy holder, quorum, 4 digital ballots (open accepted, **secret** discharge, rejected motion, **secret election** of the Beisitz with an accepted candidate), a hand-counted resolution, minutes submitted for approval. **Außerordentliche MV (in 35 days):** invitation + supplement (Nachtrag) with delivery proof incl. post fallback, 2 proxies, frozen roll, RSVPs, planned Kassenwart election with candidates (proposed / willing / declined). **Circular resolutions:** a finished board resolution and an **open** one for all voting members |
+| Privacy (Wave 10) | 6 consent purposes (one with a changed text version, one without a published text, one custom), 49 consent events (grants, revocations, guardian consents for minors, paper proofs), privacy notice in 2 versions, Art. 14 handover to members without account, 5 data subject requests (open, in progress, done, **overdue**, rejected), retention override and runs, AV-contract **draft** (platform-level, created once, not removed by `--reset`) |
+| Forms and requests (Wave 8) | Application form v1 archived / v2 published (names, address, interest, custom-field mapping, photo-consent field) / v3 draft; 2 pending applications (one for a child), 1 approved, 1 rejected with message, 1 draft; 8 exit requests in all statuses (cancellation, exclusion, withdrawn, rejected); 3 member invitations (open, expired, accepted) |
+| Communication (Wave 9) | 9 announcements (pinned, urgent, department, category + guardians, scheduled, draft, expired, cancelled) with delivery rows incl. read marks and `skipped_optout`; notification preferences (global, per club, for a member without account) |
+| Audit | One entry per seeded member, role, field, calendar and every service call (ballots, elections, minutes, invitations, consents) |
+
+**Skipped on purpose.** File uploads: profile photos, location and damage photos, documents, registration proofs and form attachments need real files in the media layer (`media_files`); the seed creates no media rows and no URLs. Billing is out of scope of MyVerein. The ballots of the Jahreshauptversammlung are dated to the evening of the meeting (their timestamps and result hash are re-sealed); the audit entries of the service calls carry the seed time.
+
+**Tests.** `src/scripts/seed-demo.test.ts` runs the seed against the test database with its own slug and e-mail domain, asserts the counts per area (`src/scripts/demo/counts.ts`), idempotency (second run changes nothing, `--reset` rebuilds identical counts), that another club is untouched, that a foreign club with the same slug is refused, and the production guard.
 
 ## Architecture
 
@@ -1923,6 +1984,7 @@ All variables live in `.env.example`. Wave 10 B1/B2 (privacy foundation, audit l
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASSWORD` | no | Alternative e-mail path via your own SMTP server (`src/lib/email.ts`, `nodemailer`). Takes priority over `RESEND_API_KEY` when both are set — precedence is SMTP → Resend → dev log fallback |
 | `DB_POOL_MAX` / `DB_POOL_MIN` / `DB_POOL_IDLE_TIMEOUT_MS` / `DB_POOL_CONNECTION_TIMEOUT_MS` | no | Explicit `pg` pool bounds — an unbounded pool was a documented weakness of a previous version of this stack |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` / `ADMIN_NAME` | no | Consumed only by `npm run seed:admin`, never read by the running server |
+| `DEMO_PASSWORD` / `DEMO_CLUB_SLUG` / `DEMO_CLUB_NAME` / `DEMO_EMAIL_DOMAIN` / `DEMO_PLATFORM_DATA` | no | Consumed only by `npm run seed:demo` ([Demo club](#demo-club-npm-run-seeddemo)): shared password of all demo logins (default `Demo-Verein-2026!`, at least 8 characters), slug (default `demo-sportverein-wiesbach`), club name and e-mail domain of the demo accounts (default `demo.myverein.local`), `DEMO_PLATFORM_DATA=false` skips the one platform-level row (the AV-contract draft). Never read by the running server |
 | `INTERNAL_STATS_TOKEN` | no | Bearer token for `GET /internal/stats`. Unset means the endpoint always responds 503, not a silent 401 — fails closed by default. Generate any long random value, e.g. `openssl rand -hex 32` |
 | `CLUB_REVIEW_NOTIFY_EMAIL` | no | Recipient(s) of the "new club registration to review" mail sent on `POST /club-registrations/:id/submit` — comma-separated for several. Unset: a warning is logged and every platform admin (role `admin`, not banned) gets a bell entry instead (de + en, once per registration and submit), so a new registration is never silent; nothing fails. Mails around registrations (receipt, review notice, info request, rejection, approval with slug) go through the notification dispatcher since Wave 9 B11 (platform context, `club_id` NULL, `mandatory`) and stay best effort: a failure is logged and never blocks or rolls back a status change |
 | `MEMBER_INVITE_TTL_DAYS` | no | Validity of a member invitation link in days (default `14`, clamped to 1–60; `src/lib/member-invites.ts`) |
