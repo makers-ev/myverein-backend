@@ -1,4 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
+import { createMiddleware } from "hono/factory";
 
 import { db } from "../db/client.js";
 import { calendars, type CalendarRow } from "../db/schema/calendars.js";
@@ -9,6 +10,7 @@ import { isCalendarVisible } from "./calendar-visibility.js";
 import { hasClubPermission, type ClubPermission } from "./club-permissions.js";
 import { ForbiddenError, NotFoundError } from "./errors.js";
 import { isUuid } from "./club-members.js";
+import type { ClubEnv } from "../middleware/club-guard.js";
 
 /**
  * Access to the events of a club (Wave 12). Reading follows the calendar visibility; the management permissions of
@@ -77,3 +79,10 @@ export async function ownClubMemberRow(clubId: string, accountMemberId: string):
   const [row] = await db.select().from(clubMembers).where(and(eq(clubMembers.clubId, clubId), eq(clubMembers.memberId, accountMemberId)));
   return row ?? null;
 }
+
+/** Route middleware: 403 for callers whose roles do not grant `permission`, BEFORE the body is validated or any id is looked up. */
+export const needsPermission = (permission: ClubPermission) =>
+  createMiddleware<ClubEnv>(async (c, next) => {
+    requirePermission(c.get("clubRoleTypes"), permission);
+    await next();
+  });

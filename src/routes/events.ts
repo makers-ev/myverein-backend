@@ -18,6 +18,7 @@ import { confirmedWardSeats, promoteWaitingWard } from "../lib/ward-events.js";
 import { getVisibleCalendarIds } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { loadVisibleEvent } from "../lib/event-access.js";
+import { eventAttendanceRoutes } from "./event-attendance.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -481,3 +482,7 @@ icsRoutes.get("/", async (c) => {
   if (c.req.header("if-none-match") === etag) return c.body(null, 304);
   return c.body(ics);
 });
+
+// --- Wave 12: attendance, registration, helpers (session + club guard come from this router) ----------
+
+eventRoutes.route("/", eventAttendanceRoutes);
