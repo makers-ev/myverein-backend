@@ -15,6 +15,7 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from ".
 import { loadClubEvent, loadVisibleEvent, needsPermission } from "../lib/event-access.js";
 import { notifyPromoted } from "../lib/event-notify.js";
 import { cancelRegistration, describeRegistration, effectiveSettings, loadRegistration, loadSettings, saveRegistration, MAX_PARTY_SIZE, type Identity } from "../lib/event-registration.js";
+import { hashToken, newToken, publicEventUrl } from "../lib/event-guests.js";
 import { liveLinkOf } from "../lib/guardian-scope.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "../lib/member-lifecycle.js";
 import { wardCalendarIds } from "../lib/ward-events.js";
@@ -194,4 +195,31 @@ eventRegistrationRoutes.put("/:id/registration", needsPermission("calendars:writ
   });
   const view = await describeRegistration(clubId, event);
   return c.json({ data: { eventId: event.id, ...view } });
+});
+
+// --- Public registration link for guests (B14) ---------------------------------------------------------------------
+
+/**
+ * Creates (or replaces) the public link of the event. The plain token is returned ONCE; only its SHA-256 is stored. Guests
+ * must be allowed in the registration settings. Replacing the link kills the old one at once.
+ */
+eventRegistrationRoutes.post("/:id/public-link", needsPermission("calendars:write"), async (c) => {
+  const clubId = c.get("clubId");
+  const { event } = await loadClubEvent(c.req.param("id"), clubId);
+  const settings = effectiveSettings(await loadSettings(event.id));
+  if (!settings.enabled || !settings.allowGuests) throw new ConflictError("Enable the registration and allow guests first", { details: { code: "guests_not_allowed" } });
+  if (event.cancelledAt !== null) throw new ConflictError("Event is cancelled");
+  const token = newToken();
+  await db.update(events).set({ publicRegistrationTokenHash: hashToken(token), updatedAt: new Date() }).where(eq(events.id, event.id));
+  await writeAudit(db, { eventType: "event_registration.public_link", subjectId: event.id, payload: { clubId, eventId: event.id, action: event.publicRegistrationTokenHash ? "rotate" : "create" } });
+  return c.json({ data: { token, url: publicEventUrl(token), active: true } }, 201);
+});
+
+/** Revokes the public link (the URL stops working at once; existing guest registrations stay). */
+eventRegistrationRoutes.delete("/:id/public-link", needsPermission("calendars:write"), async (c) => {
+  const clubId = c.get("clubId");
+  const { event } = await loadClubEvent(c.req.param("id"), clubId);
+  await db.update(events).set({ publicRegistrationTokenHash: null, updatedAt: new Date() }).where(eq(events.id, event.id));
+  await writeAudit(db, { eventType: "event_registration.public_link", subjectId: event.id, payload: { clubId, eventId: event.id, action: "revoke" } });
+  return c.body(null, 204);
 });

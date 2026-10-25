@@ -10,7 +10,7 @@ import { wardEventResponses } from "../db/schema/absences.js";
 import { events, type EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
 import { AudienceLimitError, resolveClubAudience, summarizeAudience } from "../lib/audience.js";
-import { announceEventChange, essentialDiff, eventAudience, notifyPromoted } from "../lib/event-notify.js";
+import { announceEventChange, essentialDiff, eventAudience, eventGuests, notifyPromoted } from "../lib/event-notify.js";
 import { lockEvent } from "../lib/event-registration.js";
 import { promoteWaitlist } from "../lib/event-seats.js";
 import { refillForRead } from "../lib/event-series-refill.js";
@@ -292,7 +292,8 @@ eventRoutes.delete("/:id", async (c) => {
   // Deleting an event that people signed up for is a cancellation for them (B10): resolve the audience before the RSVPs vanish.
   const notifyFlag = c.req.query("notify");
   const audienceBefore = existing.cancelledAt === null ? await eventAudience(clubId, id, calendar.departmentId, true) : null;
-  const hadRsvps = audienceBefore !== null && (await db.query.eventAttendees.findFirst({ where: eq(eventAttendees.eventId, id) })) !== undefined;
+  const guestsBefore = existing.cancelledAt === null ? await eventGuests(id) : [];
+  const hadRsvps = (audienceBefore !== null || guestsBefore.length > 0) && (await db.query.eventAttendees.findFirst({ where: eq(eventAttendees.eventId, id) })) !== undefined;
 
   await db.transaction(async (tx) => {
     // A deleted occurrence stays deleted when the horizon is refilled.
@@ -301,7 +302,7 @@ eventRoutes.delete("/:id", async (c) => {
   });
   await writeAudit(db, { eventType: "event.delete", subjectId: id, payload: { clubId, ...(notifyFlag === "false" ? { notify: false } : {}) } });
   if (hadRsvps) {
-    await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: { ...existing, updatedAt: new Date() }, departmentId: calendar.departmentId, cancelled: true, suppress: notifyFlag === "false", audience: audienceBefore });
+    await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: { ...existing, updatedAt: new Date() }, departmentId: calendar.departmentId, cancelled: true, suppress: notifyFlag === "false", audience: audienceBefore, guests: guestsBefore });
   }
 
   return c.body(null, 204);

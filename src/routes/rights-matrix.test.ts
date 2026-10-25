@@ -55,6 +55,7 @@ import { departmentRoutes } from "./departments.js";
 import { calendarFeedRoutes, feedRoutes } from "./calendar-feeds.js";
 import { eventSeriesRoutes } from "./event-series.js";
 import { eventRoutes, icsRoutes } from "./events.js";
+import { publicEventRoutes } from "./public-events.js";
 import { healthRoutes } from "./health.js";
 import { internalStatsRoutes } from "./internal-stats.js";
 import { inventoryItemRoutes } from "./inventory-items.js";
@@ -131,6 +132,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/event-series", "eventSeriesRoutes", eventSeriesRoutes],
   ["/events", "eventRoutes", eventRoutes],
   ["/events.ics", "icsRoutes", icsRoutes],
+  ["/public", "publicEventRoutes", publicEventRoutes],
   ["/availability", "availabilityRoutes", availabilityRoutes],
   ["/meetings", "meetingRoutes", meetingRoutes],
   ["/ballots", "ballotRoutes", ballotRoutes],
@@ -163,6 +165,10 @@ const SELF_SERVICE: Record<string, string> = {
   "DELETE /notifications/:id": "own notifications",
   "POST /events/:id/rsvp": "own RSVP",
   "DELETE /events/:id/rsvp": "own RSVP",
+  "POST /public/events/:token/registrations": "public guest registration: no session, the secret event link is the credential (unknown tokens are 404, rate limited per IP / token / address, honeypot)",
+  "POST /public/registrations/confirm": "public double opt-in: no session, the confirmation code from the mail is the credential (unknown codes are 404)",
+  "PATCH /public/registrations/:guestToken": "public: a guest changes the own registration with the management link (hash lookup; unknown tokens are 404)",
+  "DELETE /public/registrations/:guestToken": "public: a guest cancels the own registration with the management link (unknown tokens are 404)",
   "POST /calendar-feeds": "own subscription link (bound to the caller's membership; external guests get 403)",
   "DELETE /calendar-feeds/:id": "revoking the own subscription link (foreign ids are 404)",
   "POST /calendar-feeds/:id/rotate": "rotating the own subscription link (foreign ids are 404)",

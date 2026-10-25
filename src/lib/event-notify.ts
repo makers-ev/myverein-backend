@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
@@ -275,6 +275,33 @@ export async function notifyPromoted(args: { clubId: string; event: Pick<EventRo
   }
 }
 
+export interface GuestRecipient {
+  email: string;
+  name: string | null;
+}
+
+/** Guests without account with a confirmed registration (seat or waitlist): they are told about changes by mail only. */
+export async function eventGuests(eventId: string): Promise<GuestRecipient[]> {
+  const rows = await db
+    .select({ email: eventAttendees.guestEmail, name: eventAttendees.guestName })
+    .from(eventAttendees)
+    .where(and(eq(eventAttendees.eventId, eventId), isNotNull(eventAttendees.guestEmail), isNotNull(eventAttendees.guestConfirmedAt), inArray(eventAttendees.status, ["angemeldet", "warteliste"])));
+  return rows.flatMap((r) => (r.email ? [{ email: r.email, name: r.name }] : []));
+}
+
+async function notifyGuestsOfChange(args: { clubId: string; before: EventRow; message: { title: string; body: string }; guests: GuestRecipient[]; version: number; cancelled: boolean }): Promise<void> {
+  if (args.guests.length === 0) return;
+  await notifySafely({
+    clubId: args.clubId,
+    class: "mandatory",
+    eventKey: args.cancelled ? "event.cancelled_guest" : "event.changed_guest",
+    refId: `${args.before.id}#${args.version}`,
+    recipients: args.guests,
+    content: { title: args.message.title, body: args.message.body, template: "notice", category: "events" },
+    channels: ["email"],
+  });
+}
+
 /** Statuses of a meeting that people can still react to (Terminfindung or planned); everything else is history. */
 const OPEN_MEETING_STATUSES = ["terminfindung", "geplant"];
 
@@ -345,6 +372,8 @@ export async function announceEventChange(args: {
   suppress: boolean;
   /** Audience captured earlier (a deleted event no longer has its RSVPs). */
   audience?: Awaited<ReturnType<typeof eventAudience>>;
+  /** Confirmed guests captured earlier (see `eventGuests`). */
+  guests?: GuestRecipient[];
 }): Promise<void> {
   try {
     const { clubId, before, after } = args;
@@ -362,6 +391,7 @@ export async function announceEventChange(args: {
       reason: args.reason ?? null,
     });
     const payload = { clubId, kind: "event" as const, refId: before.id, version: after.updatedAt.getTime(), cancelled: args.cancelled, ...message, audience: audience ?? { memberIds: [], includeGuardians: false } };
+    if (!args.suppress) await notifyGuestsOfChange({ clubId, before, message, guests: args.guests ?? (await eventGuests(before.id)), version: after.updatedAt.getTime(), cancelled: args.cancelled });
     if (!args.suppress && audience === null) return;
     await scheduleEventChanged(payload, { suppressed: args.suppress, actor: args.actor });
   } catch (err) {
