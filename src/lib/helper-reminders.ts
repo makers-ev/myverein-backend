@@ -57,6 +57,7 @@ export async function sweepHelperReminders(now: Date = new Date()): Promise<{ re
             category: "reminders",
             template: "reminder",
             lang,
+            eventId: event.id,
           },
           channels: ["in_app", "push"],
         });
@@ -77,6 +78,7 @@ export async function sweepHelperReminders(now: Date = new Date()): Promise<{ re
               category: "reminders",
               template: "reminder",
               lang,
+              eventId: event.id,
             },
             channels: ["in_app", "push"],
           });

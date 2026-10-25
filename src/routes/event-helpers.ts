@@ -118,7 +118,7 @@ eventHelperRoutes.delete("/:id/helpers/stations/:stationId", needsPermission("he
   await db.delete(helperStations).where(eq(helperStations.id, station.id));
   await writeAudit(db, { eventType: "helper.station_delete", subjectId: event.id, payload: { clubId, eventId: event.id, stationId: station.id } });
   const lang = await clubMailLanguage(db, clubId);
-  await notifyHelpers({ clubId, clubMemberIds: people, eventKey: "helper.shift_removed", refId: `${station.id}#removed`, title: `${tr(lang, "Helferschicht entfällt", "Helper shift removed")}: ${event.title}`, body: tr(lang, `Die Station „${station.name}“ bei „${event.title}“ wurde aus dem Helferplan genommen. Deine Eintragung dort ist damit gelöscht.`, `The station “${station.name}” of “${event.title}” was removed from the helper plan. Your sign-up there is gone.`) });
+  await notifyHelpers({ clubId, eventId: event.id, clubMemberIds: people, eventKey: "helper.shift_removed", refId: `${station.id}#removed`, title: `${tr(lang, "Helferschicht entfällt", "Helper shift removed")}: ${event.title}`, body: tr(lang, `Die Station „${station.name}“ bei „${event.title}“ wurde aus dem Helferplan genommen. Deine Eintragung dort ist damit gelöscht.`, `The station “${station.name}” of “${event.title}” was removed from the helper plan. Your sign-up there is gone.`) });
   return c.body(null, 204);
 });
 
@@ -179,7 +179,7 @@ eventHelperRoutes.patch("/:id/helpers/shifts/:shiftId", needsPermission("helpers
   if (result.timeChanged) {
     const lang = await clubMailLanguage(db, clubId);
     const when = formatWhen(result.row.startsAt, await clubTimezone(clubId), result.row.endsAt, lang);
-    await notifyHelpers({ clubId, clubMemberIds: result.people, eventKey: "helper.shift_changed", refId: `${result.row.id}#${result.row.startsAt.getTime()}`, title: `${tr(lang, "Helferschicht verschoben", "Helper shift moved")}: ${event.title}`, body: tr(lang, `Deine Schicht bei „${event.title}“ liegt jetzt: ${when}.`, `Your shift at “${event.title}” is now: ${when}.`) });
+    await notifyHelpers({ clubId, eventId: event.id, clubMemberIds: result.people, eventKey: "helper.shift_changed", refId: `${result.row.id}#${result.row.startsAt.getTime()}`, title: `${tr(lang, "Helferschicht verschoben", "Helper shift moved")}: ${event.title}`, body: tr(lang, `Deine Schicht bei „${event.title}“ liegt jetzt: ${when}.`, `Your shift at “${event.title}” is now: ${when}.`) });
   }
   return c.json({ data: result.row });
 });
@@ -192,7 +192,7 @@ eventHelperRoutes.delete("/:id/helpers/shifts/:shiftId", needsPermission("helper
   await writeAudit(db, { eventType: "helper.shift_delete", subjectId: event.id, payload: { clubId, eventId: event.id, shiftId: shift.id } });
   const lang = await clubMailLanguage(db, clubId);
   const when = formatWhen(shift.startsAt, await clubTimezone(clubId), shift.endsAt, lang);
-  await notifyHelpers({ clubId, clubMemberIds: people, eventKey: "helper.shift_removed", refId: `${shift.id}#removed`, title: `${tr(lang, "Helferschicht entfällt", "Helper shift removed")}: ${event.title}`, body: tr(lang, `Die Schicht „${stationName}“ (${when}) bei „${event.title}“ wurde gestrichen. Deine Eintragung ist damit gelöscht.`, `The shift “${stationName}” (${when}) at “${event.title}” was cancelled. Your sign-up is gone.`) });
+  await notifyHelpers({ clubId, eventId: event.id, clubMemberIds: people, eventKey: "helper.shift_removed", refId: `${shift.id}#removed`, title: `${tr(lang, "Helferschicht entfällt", "Helper shift removed")}: ${event.title}`, body: tr(lang, `Die Schicht „${stationName}“ (${when}) bei „${event.title}“ wurde gestrichen. Deine Eintragung ist damit gelöscht.`, `The shift “${stationName}” (${when}) at “${event.title}” was cancelled. Your sign-up is gone.`) });
   return c.body(null, 204);
 });
 
@@ -243,7 +243,7 @@ eventHelperRoutes.post("/:id/helpers/shifts/:shiftId/signup", async (c) => {
   if (outcome.created && acting.via === "manager" && outcome.startsAt) {
     const lang = await clubMailLanguage(db, clubId);
     const when = formatWhen(outcome.startsAt, await clubTimezone(clubId), outcome.endsAt, lang);
-    await notifyHelpers({ clubId, clubMemberIds: [acting.target.id], eventKey: "helper.signed_up_by_organiser", email: true, refId: `${outcome.signupId}#added`, title: `${tr(lang, "Du bist als Helfer:in eingetragen", "You were signed up as a helper")}: ${acting.event.title}`, body: tr(lang, `Du wurdest für eine Schicht bei „${acting.event.title}“ eingetragen: ${when}. Wenn du nicht kannst, melde dich bitte ab.`, `You were signed up for a shift at “${acting.event.title}”: ${when}. If you cannot make it, please withdraw.`) });
+    await notifyHelpers({ clubId, eventId: acting.event.id, clubMemberIds: [acting.target.id], eventKey: "helper.signed_up_by_organiser", email: true, refId: `${outcome.signupId}#added`, title: `${tr(lang, "Du bist als Helfer:in eingetragen", "You were signed up as a helper")}: ${acting.event.title}`, body: tr(lang, `Du wurdest für eine Schicht bei „${acting.event.title}“ eingetragen: ${when}. Wenn du nicht kannst, melde dich bitte ab.`, `You were signed up for a shift at “${acting.event.title}”: ${when}. If you cannot make it, please withdraw.`) });
   }
   return c.json({ data: { signupId: outcome.signupId, shiftId: outcome.shiftId, clubMemberId: acting.target.id, created: outcome.created } }, outcome.created ? 201 : 200);
 });
@@ -270,7 +270,7 @@ eventHelperRoutes.delete("/:id/helpers/shifts/:shiftId/signup", async (c) => {
   if (acting.via === "manager") {
     const lang = await clubMailLanguage(db, clubId);
     const when = formatWhen(shift.startsAt, await clubTimezone(clubId), shift.endsAt, lang);
-    await notifyHelpers({ clubId, clubMemberIds: [acting.target.id], eventKey: "helper.removed_by_organiser", email: true, refId: `${shift.id}#${acting.target.id}:${Date.now()}`, title: `${tr(lang, "Du wurdest aus einer Schicht ausgetragen", "You were removed from a shift")}: ${acting.event.title}`, body: tr(lang, `Die Organisation hat dich aus der Schicht „${stationName}“ (${when}) bei „${acting.event.title}“ ausgetragen.`, `The organisers removed you from the shift “${stationName}” (${when}) at “${acting.event.title}”.`) });
+    await notifyHelpers({ clubId, eventId: acting.event.id, clubMemberIds: [acting.target.id], eventKey: "helper.removed_by_organiser", email: true, refId: `${shift.id}#${acting.target.id}:${Date.now()}`, title: `${tr(lang, "Du wurdest aus einer Schicht ausgetragen", "You were removed from a shift")}: ${acting.event.title}`, body: tr(lang, `Die Organisation hat dich aus der Schicht „${stationName}“ (${when}) bei „${acting.event.title}“ ausgetragen.`, `The organisers removed you from the shift “${stationName}” (${when}) at “${acting.event.title}”.`) });
   }
   return c.body(null, 204);
 });
@@ -312,7 +312,7 @@ eventHelperRoutes.post("/:id/helpers/shifts/:shiftId/swaps", async (c) => {
   if (toId) {
     const lang = await clubMailLanguage(db, clubId);
     const when = formatWhen(created.shift.startsAt, await clubTimezone(clubId), created.shift.endsAt, lang);
-    await notifyHelpers({ clubId, clubMemberIds: [toId], eventKey: "helper.swap_requested", refId: `${created.swap.id}#requested`, title: `${tr(lang, "Schicht übernehmen?", "Take over a shift?")} ${acting.event.title}`, body: tr(lang, `${acting.target.displayName} bittet dich, die Schicht „${created.stationName}“ (${when}) bei „${acting.event.title}“ zu übernehmen. Du kannst im Helferplan zusagen oder ablehnen.`, `${acting.target.displayName} asks you to take over the shift “${created.stationName}” (${when}) at “${acting.event.title}”. You can accept or decline in the helper plan.`) });
+    await notifyHelpers({ clubId, eventId: acting.event.id, clubMemberIds: [toId], eventKey: "helper.swap_requested", refId: `${created.swap.id}#requested`, title: `${tr(lang, "Schicht übernehmen?", "Take over a shift?")} ${acting.event.title}`, body: tr(lang, `${acting.target.displayName} bittet dich, die Schicht „${created.stationName}“ (${when}) bei „${acting.event.title}“ zu übernehmen. Du kannst im Helferplan zusagen oder ablehnen.`, `${acting.target.displayName} asks you to take over the shift “${created.stationName}” (${when}) at “${acting.event.title}”. You can accept or decline in the helper plan.`) });
   }
   return c.json({ data: { id: created.swap.id, signupId: created.swap.signupId, shiftId: created.shift.id, toClubMemberId: toId, status: "offen" } }, 201);
 });
@@ -361,7 +361,7 @@ eventHelperRoutes.post("/:id/helpers/swaps/:swapId/accept", async (c) => {
 
   const lang = await clubMailLanguage(db, clubId);
   const when = formatWhen(done.shift.startsAt, await clubTimezone(clubId), done.shift.endsAt, lang);
-  await notifyHelpers({ clubId, clubMemberIds: [done.giverId], eventKey: "helper.swap_accepted", refId: `${done.swapId}#accepted`, title: `${tr(lang, "Schicht übernommen", "Shift taken over")}: ${acting.event.title}`, body: tr(lang, `${acting.target.displayName} hat deine Schicht „${done.stationName}“ (${when}) übernommen. Du bist dort nicht mehr eingetragen.`, `${acting.target.displayName} took over your shift “${done.stationName}” (${when}). You are no longer signed up there.`) });
+  await notifyHelpers({ clubId, eventId: acting.event.id, clubMemberIds: [done.giverId], eventKey: "helper.swap_accepted", refId: `${done.swapId}#accepted`, title: `${tr(lang, "Schicht übernommen", "Shift taken over")}: ${acting.event.title}`, body: tr(lang, `${acting.target.displayName} hat deine Schicht „${done.stationName}“ (${when}) übernommen. Du bist dort nicht mehr eingetragen.`, `${acting.target.displayName} took over your shift “${done.stationName}” (${when}). You are no longer signed up there.`) });
   return c.json({ data: { swapId: done.swapId, shiftId: done.shift.id, clubMemberId: acting.target.id, status: "angenommen" } });
 });
 
@@ -380,7 +380,7 @@ eventHelperRoutes.post("/:id/helpers/swaps/:swapId/decline", async (c) => {
     return { giverId: first.signup.clubMemberId, stationName: first.stationName, swapId: swap.id };
   });
   const lang = await clubMailLanguage(db, clubId);
-  await notifyHelpers({ clubId, clubMemberIds: [done.giverId], eventKey: "helper.swap_declined", refId: `${done.swapId}#declined`, title: `${tr(lang, "Tausch abgelehnt", "Swap declined")}: ${acting.event.title}`, body: tr(lang, `${acting.target.displayName} kann deine Schicht „${done.stationName}“ nicht übernehmen. Du bleibst eingetragen.`, `${acting.target.displayName} cannot take over your shift “${done.stationName}”. You stay signed up.`) });
+  await notifyHelpers({ clubId, eventId: acting.event.id, clubMemberIds: [done.giverId], eventKey: "helper.swap_declined", refId: `${done.swapId}#declined`, title: `${tr(lang, "Tausch abgelehnt", "Swap declined")}: ${acting.event.title}`, body: tr(lang, `${acting.target.displayName} kann deine Schicht „${done.stationName}“ nicht übernehmen. Du bleibst eingetragen.`, `${acting.target.displayName} cannot take over your shift “${done.stationName}”. You stay signed up.`) });
   return c.json({ data: { swapId: done.swapId, status: "abgelehnt" } });
 });
 

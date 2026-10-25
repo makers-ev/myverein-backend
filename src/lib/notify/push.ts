@@ -74,7 +74,7 @@ interface ExpoTicket {
 }
 
 /** Deep-link data (ids only) derived from the delivery's event key. */
-export function pushDataFor(eventKey: string | null, refId: string | null, announcementId: string | null, clubId: string | null, urgent: boolean, resolvedMeetingId?: string | null): Record<string, string | boolean> {
+export function pushDataFor(eventKey: string | null, refId: string | null, announcementId: string | null, clubId: string | null, urgent: boolean, resolvedMeetingId?: string | null, contentEventId?: string | null): Record<string, string | boolean> {
   const key = eventKey ?? "";
   // `refId` may carry a `#discriminator` suffix (idempotency, see dispatcher); the deep link only wants the id.
   refId = refId ? refId.split("#")[0]! : refId;
@@ -95,6 +95,12 @@ export function pushDataFor(eventKey: string | null, refId: string | null, annou
   } else if (key.startsWith("event.") || key === "reminder.event") {
     data.type = "event";
     if (refId) data.eventId = refId;
+  } else if (key.startsWith("helper.") || key.startsWith("ride.")) {
+    // `refId` is a shift/station/swap/ride id here; the event id travels in the delivery content (no id: inbox).
+    if (contentEventId) {
+      data.type = "event";
+      data.eventId = contentEventId;
+    }
   } else if (key.startsWith("meeting.") || key === "reminder.rsvp") {
     data.type = "meeting";
     if (refId) data.meetingId = refId;
@@ -225,7 +231,7 @@ export async function handlePushDelivery(job: JobContext): Promise<void> {
           to: t.token,
           title: (row.clubId ? clubName.get(row.clubId) : null) ?? "MyVerein",
           body: genericPushText(row.eventKey, template, content.lang ?? "de"),
-          data: pushDataFor(row.eventKey, row.refId, row.announcementId, row.clubId, urgent, row.eventKey === "meeting.invitation" && row.refId ? (invitationMeeting.get(row.refId.split("#")[0]!) ?? null) : null),
+          data: pushDataFor(row.eventKey, row.refId, row.announcementId, row.clubId, urgent, row.eventKey === "meeting.invitation" && row.refId ? (invitationMeeting.get(row.refId.split("#")[0]!) ?? null) : null, content.eventId ?? null),
           priority: urgent ? "high" : "default",
           channelId: urgent ? "urgent" : "default",
           sound: "default",

@@ -177,7 +177,7 @@ eventRideRoutes.delete("/:id/rides/:rideId", async (c) => {
   await db.delete(eventRides).where(eq(eventRides.id, ride.id));
   await writeAudit(db, { eventType: "event_ride.delete", subjectId: ride.driverClubMemberId, payload: { clubId, eventId: acting.event.id, rideId: ride.id, clubMemberId: ride.driverClubMemberId } });
   const lang = await clubMailLanguage(db, clubId);
-  await notifyHelpers({ clubId, clubMemberIds: passengers.map((p) => p.id), eventKey: "ride.cancelled", refId: `${ride.id}#cancelled`, title: `${tr(lang, "Fahrgemeinschaft abgesagt", "Ride cancelled")}: ${acting.event.title}`, body: tr(lang, `Die Fahrt, bei der du mitfahren wolltest, wurde vom Fahrer abgesagt. Bitte such dir eine andere Mitfahrgelegenheit.`, `The driver cancelled the ride you wanted to join. Please look for another ride.`) });
+  await notifyHelpers({ clubId, eventId: acting.event.id, clubMemberIds: passengers.map((p) => p.id), eventKey: "ride.cancelled", refId: `${ride.id}#cancelled`, title: `${tr(lang, "Fahrgemeinschaft abgesagt", "Ride cancelled")}: ${acting.event.title}`, body: tr(lang, `Die Fahrt, bei der du mitfahren wolltest, wurde vom Fahrer abgesagt. Bitte such dir eine andere Mitfahrgelegenheit.`, `The driver cancelled the ride you wanted to join. Please look for another ride.`) });
   return c.body(null, 204);
 });
 
@@ -197,7 +197,7 @@ eventRideRoutes.post("/:id/rides/:rideId/requests", async (c) => {
     await writeAudit(db, { eventType: "event_ride.request", subjectId: acting.target.id, payload: { clubId, eventId: acting.event.id, rideId: ride.id, clubMemberId: acting.target.id } });
     const lang = await clubMailLanguage(db, clubId);
     const when = ride.departureAt ? formatWhen(ride.departureAt, await clubTimezone(clubId), null, lang) : null;
-    await notifyHelpers({ clubId, clubMemberIds: [ride.driverClubMemberId], eventKey: "ride.requested", refId: `${created!.id}#requested`, title: `${tr(lang, "Mitfahranfrage", "Ride request")}: ${acting.event.title}`, body: tr(lang, `${acting.target.displayName} möchte bei dir mitfahren${when ? ` (${when})` : ""}. Du kannst in der Fahrgemeinschaft zusagen oder ablehnen.`, `${acting.target.displayName} would like to ride with you${when ? ` (${when})` : ""}. You can accept or decline in the ride list.`) });
+    await notifyHelpers({ clubId, eventId: acting.event.id, clubMemberIds: [ride.driverClubMemberId], eventKey: "ride.requested", refId: `${created!.id}#requested`, title: `${tr(lang, "Mitfahranfrage", "Ride request")}: ${acting.event.title}`, body: tr(lang, `${acting.target.displayName} möchte bei dir mitfahren${when ? ` (${when})` : ""}. Du kannst in der Fahrgemeinschaft zusagen oder ablehnen.`, `${acting.target.displayName} would like to ride with you${when ? ` (${when})` : ""}. You can accept or decline in the ride list.`) });
     return c.json({ data: { requestId: created!.id, rideId: ride.id, clubMemberId: acting.target.id, status: "angefragt" } }, 201);
   } catch (err) {
     if ((err as { code?: string; cause?: { code?: string } })?.code === "23505" || (err as { cause?: { code?: string } })?.cause?.code === "23505") throw new ConflictError("There is already a request for this ride", { details: { code: "request_exists" } });
@@ -227,7 +227,7 @@ eventRideRoutes.patch("/:id/rides/:rideId/requests/:requestId", zValidator("json
     return request;
   });
   const lang = await clubMailLanguage(db, clubId);
-  await notifyHelpers({ clubId, clubMemberIds: [done.passengerClubMemberId], eventKey: "ride.decided", refId: `${done.id}#${status}`, title: `${status === "zugesagt" ? tr(lang, "Mitfahrt zugesagt", "Ride confirmed") : tr(lang, "Mitfahrt abgelehnt", "Ride declined")}: ${acting.event.title}`, body: status === "zugesagt" ? tr(lang, "Du fährst mit. Abfahrtsort und Zeit findest du in der Fahrgemeinschaft.", "You have a seat. Departure place and time are in the ride list.") : tr(lang, "Leider ist in diesem Auto kein Platz für dich. Bitte frag bei einer anderen Fahrt an.", "Sorry, there is no seat for you in this car. Please ask for another ride.") });
+  await notifyHelpers({ clubId, eventId: acting.event.id, clubMemberIds: [done.passengerClubMemberId], eventKey: "ride.decided", refId: `${done.id}#${status}`, title: `${status === "zugesagt" ? tr(lang, "Mitfahrt zugesagt", "Ride confirmed") : tr(lang, "Mitfahrt abgelehnt", "Ride declined")}: ${acting.event.title}`, body: status === "zugesagt" ? tr(lang, "Du fährst mit. Abfahrtsort und Zeit findest du in der Fahrgemeinschaft.", "You have a seat. Departure place and time are in the ride list.") : tr(lang, "Leider ist in diesem Auto kein Platz für dich. Bitte frag bei einer anderen Fahrt an.", "Sorry, there is no seat for you in this car. Please ask for another ride.") });
   return c.json({ data: { requestId: done.id, status } });
 });
 

@@ -155,6 +155,7 @@ export async function notifyLateCancel(args: { clubId: string; event: EventRow; 
         category: "events",
         template: "reminder",
         lang,
+        eventId: args.event.id,
       },
       channels: ["in_app", "push"],
     });
@@ -164,7 +165,7 @@ export async function notifyLateCancel(args: { clubId: string; event: EventRow; 
 }
 
 /** Tells club members (and their guardians) something about a shift; used for removals, swaps. Best effort. */
-export async function notifyHelpers(args: { clubId: string; clubMemberIds: string[]; eventKey: string; refId: string; title: string; body: string; /** Also by e-mail: for people the organiser entered (they may have no account). */ email?: boolean }): Promise<void> {
+export async function notifyHelpers(args: { clubId: string; /** The event the shift/ride belongs to: the push deep link opens it. */ eventId: string; clubMemberIds: string[]; eventKey: string; refId: string; title: string; body: string; /** Also by e-mail: for people the organiser entered (they may have no account). */ email?: boolean }): Promise<void> {
   if (args.clubMemberIds.length === 0) return;
   try {
     const lang = await clubMailLanguage(db, args.clubId);
@@ -174,7 +175,7 @@ export async function notifyHelpers(args: { clubId: string; clubMemberIds: strin
       eventKey: args.eventKey,
       refId: args.refId,
       audience: { memberIds: [...new Set(args.clubMemberIds)], includeGuardians: true },
-      content: { title: args.title, body: args.body, category: "events", template: "announcement", lang },
+      content: { title: args.title, body: args.body, category: "events", template: "announcement", lang, eventId: args.eventId },
       channels: args.email ? ["in_app", "email", "push"] : ["in_app", "push"],
     });
   } catch (err) {
