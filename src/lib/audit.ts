@@ -38,6 +38,8 @@ export const AUDIT_EVENTS = {
   "calendar.default_create": spec(["calendarId", "clubId", "promoted", "source"]),
   "calendar.delete": spec(["clubId"]),
   "calendar.update": spec(["changedFields", "clubId"]),
+  "calendar_feed.create": spec(["calendarId", "clubId", "feedId", "rotated"]),
+  "calendar_feed.revoke": spec(["clubId", "feedId", "rotated"]),
   "calendar_visibility.create": spec(["clubId", "departmentId", "memberId", "roleType"]),
   "calendar_visibility.delete": spec(["clubId", "visibilityId"]),
   "club_announcement.cancel": spec(["actor", "clubId"]),

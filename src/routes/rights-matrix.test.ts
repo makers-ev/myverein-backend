@@ -52,6 +52,7 @@ import { formSubmissionRoutes } from "./form-submissions.js";
 import { clubMemberRoutes } from "./club-members.js";
 import { clubRegistrationRoutes } from "./club-registrations.js";
 import { departmentRoutes } from "./departments.js";
+import { calendarFeedRoutes, feedRoutes } from "./calendar-feeds.js";
 import { eventSeriesRoutes } from "./event-series.js";
 import { eventRoutes, icsRoutes } from "./events.js";
 import { healthRoutes } from "./health.js";
@@ -125,6 +126,8 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/club-info", "clubInfoRoutes", clubInfoRoutes],
   ["/club-roles", "clubRoleRoutes", clubRoleRoutes],
   ["/calendars", "calendarRoutes", calendarRoutes],
+  ["/calendar-feeds", "calendarFeedRoutes", calendarFeedRoutes],
+  ["/feeds", "feedRoutes", feedRoutes],
   ["/event-series", "eventSeriesRoutes", eventSeriesRoutes],
   ["/events", "eventRoutes", eventRoutes],
   ["/events.ics", "icsRoutes", icsRoutes],
@@ -160,6 +163,9 @@ const SELF_SERVICE: Record<string, string> = {
   "DELETE /notifications/:id": "own notifications",
   "POST /events/:id/rsvp": "own RSVP",
   "DELETE /events/:id/rsvp": "own RSVP",
+  "POST /calendar-feeds": "own subscription link (bound to the caller's membership; external guests get 403)",
+  "DELETE /calendar-feeds/:id": "revoking the own subscription link (foreign ids are 404)",
+  "POST /calendar-feeds/:id/rotate": "rotating the own subscription link (foreign ids are 404)",
   "POST /availability/slots": "own availability",
   "PATCH /availability/slots/:id": "own availability (ownership checked)",
   "DELETE /availability/slots/:id": "own availability (ownership checked)",

@@ -11,7 +11,6 @@ import { clubMemberships } from "../../db/schema/club-memberships.js";
 import { clubRoles } from "../../db/schema/club-roles.js";
 import { clubAnnouncements, messageDeliveries, notificationPreferences } from "../../db/schema/communication.js";
 import { departments } from "../../db/schema/departments.js";
-import { eventAttendees } from "../../db/schema/event-attendees.js";
 import { events } from "../../db/schema/events.js";
 import { formSubmissions, memberFieldDefinitions, memberFieldValues } from "../../db/schema/forms.js";
 import { guardianLinks } from "../../db/schema/guardian-links.js";
@@ -25,6 +24,7 @@ import type { DbExecutor } from "../club-members.js";
 import { eraseFormDataOfMember } from "../form-retention.js";
 import { markMediaDeleted } from "../media.js";
 import { todayBerlin } from "../member-lifecycle.js";
+import { eventParticipation } from "./contributors-events.js";
 import type { PrivacyContributor, PrivacySubject } from "./registry.js";
 
 /** Text that replaces the name of an erased person wherever a name snapshot has to stay readable. */
@@ -313,7 +313,6 @@ const accountData: PrivacyContributor = {
     "calendar_visibility",
     "club_memberships",
     "club_roles",
-    "event_attendees",
     "inventory_loans",
     "inventory_damage_reports",
     "location_key_holders",
@@ -325,12 +324,6 @@ const accountData: PrivacyContributor = {
     const roles = await ex.select({ roleType: clubRoles.roleType, termEndsAt: clubRoles.termEndsAt }).from(clubRoles).where(eq(clubRoles.memberId, m));
     const slots = await ex.select({ weekday: availabilitySlots.weekday, startTime: availabilitySlots.startTime, endTime: availabilitySlots.endTime, note: availabilitySlots.note }).from(availabilitySlots).where(eq(availabilitySlots.memberId, m));
     const exceptions = await ex.select({ date: availabilityExceptions.date, isAvailable: availabilityExceptions.isAvailable, note: availabilityExceptions.note }).from(availabilityExceptions).where(eq(availabilityExceptions.memberId, m));
-    const rsvps = await ex
-      .select({ event: events.title, startsAt: events.startsAt, status: eventAttendees.status, respondedAt: eventAttendees.respondedAt })
-      .from(eventAttendees)
-      .innerJoin(events, eq(events.id, eventAttendees.eventId))
-      .where(eq(eventAttendees.memberId, m))
-      .orderBy(asc(events.startsAt));
     const loans = await ex
       .select({ item: inventoryItems.name, borrowedAt: inventoryLoans.borrowedAt, dueAt: inventoryLoans.dueAt, returnedAt: inventoryLoans.returnedAt, status: inventoryLoans.status })
       .from(inventoryLoans)
@@ -348,7 +341,6 @@ const accountData: PrivacyContributor = {
       account: {
         roles,
         availability: { slots, exceptions },
-        eventResponses: rsvps.map((r) => ({ ...r, startsAt: iso(r.startsAt), respondedAt: iso(r.respondedAt) })),
         loans: loans.map((l) => ({ ...l, borrowedAt: iso(l.borrowedAt), dueAt: iso(l.dueAt), returnedAt: iso(l.returnedAt) })),
         damageReports: damage.map((d) => ({ ...d, createdAt: iso(d.createdAt) })),
         keysHeld: keys,
@@ -369,7 +361,6 @@ const accountData: PrivacyContributor = {
       tx.delete(availabilitySlots).where(eq(availabilitySlots.memberId, m)),
       tx.delete(availabilityExceptions).where(eq(availabilityExceptions.memberId, m)),
       tx.delete(calendarVisibility).where(eq(calendarVisibility.memberId, m)),
-      tx.delete(eventAttendees).where(eq(eventAttendees.memberId, m)),
       tx.delete(inventoryLoans).where(eq(inventoryLoans.memberId, m)),
       tx.delete(inventoryDamageReports).where(eq(inventoryDamageReports.reportedBy, m)),
       tx.delete(locationKeyHolders).where(eq(locationKeyHolders.memberId, m)),
@@ -498,4 +489,4 @@ export async function listFilesOf(ex: DbExecutor, s: PrivacySubject): Promise<Ar
 }
 
 /** Registration order = erasure order: form data first (lock order submission -> member row), master data last of the member rows. */
-export const BUILT_IN_CONTRIBUTORS: PrivacyContributor[] = [formsAndApplications, exitRequests, absences, guardianship, consents, communication, accountData, assemblyData, memberCore];
+export const BUILT_IN_CONTRIBUTORS: PrivacyContributor[] = [formsAndApplications, exitRequests, absences, guardianship, consents, communication, accountData, assemblyData, eventParticipation, memberCore];

@@ -41,6 +41,7 @@ import { consentOverviewRoutes, consentPurposeRoutes } from "./routes/consent-pu
 import { clubSettingsRoutes } from "./routes/club-settings.js";
 import { clubStatsRoutes } from "./routes/club-stats.js";
 import { departmentRoutes } from "./routes/departments.js";
+import { calendarFeedRoutes, feedRoutes } from "./routes/calendar-feeds.js";
 import { eventSeriesRoutes } from "./routes/event-series.js";
 import { eventRoutes, icsRoutes } from "./routes/events.js";
 import { formRoutes } from "./routes/forms.js";
@@ -150,6 +151,8 @@ app.route("/departments", departmentRoutes);
 app.route("/club-info", clubInfoRoutes);
 app.route("/club-roles", clubRoleRoutes);
 app.route("/calendars", calendarRoutes);
+app.route("/calendar-feeds", calendarFeedRoutes);
+app.route("/feeds", feedRoutes);
 app.route("/event-series", eventSeriesRoutes);
 app.route("/events", eventRoutes);
 app.route("/events.ics", icsRoutes);
