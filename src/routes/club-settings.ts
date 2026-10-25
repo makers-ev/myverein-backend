@@ -15,9 +15,10 @@ import { MAIL_LANGUAGES } from "../lib/notify/i18n.js";
 import { cleanText } from "../lib/text-policy.js";
 import { isValidTimezone } from "../lib/club-time.js";
 import { loadClubSettings } from "../lib/club-settings.js";
+import { MAJORITY_TOPICS, assemblyRulesPatchSchema, assemblyRulesSchema, loadAssemblyRules, mergeAssemblyRules, missingAssemblyRules, parseStoredAssemblyRules, type AssemblyRules } from "../lib/assembly-rules.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, ValidationError } from "../lib/errors.js";
-import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
+import { clubGuard, denyExternalGuests, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
 import { writeAudit } from "../lib/audit.js";
@@ -146,6 +147,55 @@ clubSettingsRoutes.patch(
     return c.json({ data: await loadClubSettings(db, clubId) });
   },
 );
+
+// --- Statute parameters of the general assembly (Wave 11 B1) -------------------------------------------------------
+// Every member reads them (voting screens explain the rules); only `assembly:manage` changes them. No defaults for the
+// legal parameters: `missing` lists what the club still has to state before the first invitation.
+
+clubSettingsRoutes.get("/assembly", async (c) => {
+  denyExternalGuests(c);
+  const rules = await loadAssemblyRules(db, c.get("clubId"));
+  const missing = missingAssemblyRules(rules);
+  return c.json({ data: { rules, missing, complete: missing.length === 0 } });
+});
+
+clubSettingsRoutes.patch(
+  "/assembly",
+  zValidator("json", assemblyRulesPatchSchema, (result) => {
+    if (!result.success) throw new ValidationError("Invalid request body", { details: result.error.issues });
+  }),
+  async (c) => {
+    if (!hasClubPermission(c.get("clubRoleTypes"), "assembly:manage")) throw new ForbiddenError("Missing assembly:manage permission");
+    const clubId = c.get("clubId");
+    const patch = c.req.valid("json");
+
+    const rules = await db.transaction(async (tx) => {
+      // Lock the row (or create it) so two parallel patches merge one after the other instead of overwriting each other.
+      await tx.insert(clubSettings).values({ clubId }).onConflictDoNothing();
+      const [locked] = await tx.select({ assemblyRules: clubSettings.assemblyRules }).from(clubSettings).where(eq(clubSettings.clubId, clubId)).for("update");
+      const current = parseStoredAssemblyRules(locked?.assemblyRules);
+      const merged = assemblyRulesSchema.safeParse(mergeAssemblyRules(current, patch));
+      if (!merged.success) throw new ValidationError("Invalid assembly rules", { details: merged.error.issues });
+      await tx.update(clubSettings).set({ assemblyRules: merged.data, updatedAt: new Date() }).where(eq(clubSettings.clubId, clubId));
+      await writeAudit(tx, { eventType: "club_settings.assembly_update", subjectId: clubId, payload: { clubId, changedFields: changedRuleFields(current, merged.data), changedBy: c.get("membership").id } });
+      return merged.data;
+    });
+
+    const missing = missingAssemblyRules(rules);
+    return c.json({ data: { rules, missing, complete: missing.length === 0 } });
+  },
+);
+
+/** Keys (topics as `majorityByTopic.<topic>`) whose value differs; names only, the values are club content. */
+function changedRuleFields(before: AssemblyRules, after: AssemblyRules): string[] {
+  const out: string[] = [];
+  for (const key of Object.keys(after) as Array<keyof AssemblyRules>) {
+    if (key === "majorityByTopic") {
+      for (const topic of MAJORITY_TOPICS) if (before.majorityByTopic[topic] !== after.majorityByTopic[topic]) out.push(`majorityByTopic.${topic}`);
+    } else if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) out.push(key);
+  }
+  return out;
+}
 
 // --- Mail preview (B15) ---------------------------------------------------------------------------------------------
 

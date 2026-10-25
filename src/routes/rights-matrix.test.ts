@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
+import { ballotOptions, ballotVotesOpen, ballots } from "../db/schema/assembly.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubSettings } from "../db/schema/club-settings.js";
@@ -45,6 +46,7 @@ import { calendarRoutes } from "./calendars.js";
 import { clubApplicationRoutes } from "./club-applications.js";
 import { clubFormRoutes } from "./club-forms.js";
 import { clubInfoRoutes } from "./club-info.js";
+import { clubRoleRoutes } from "./club-roles.js";
 import { formRoutes } from "./forms.js";
 import { formSubmissionRoutes } from "./form-submissions.js";
 import { clubMemberRoutes } from "./club-members.js";
@@ -57,6 +59,8 @@ import { inventoryItemRoutes } from "./inventory-items.js";
 import { locationRoutes } from "./locations.js";
 import { mediaRoutes } from "./media.js";
 import { memberFieldRoutes } from "./member-fields.js";
+import { ballotRoutes } from "./ballots.js";
+import { electionRoutes } from "./elections.js";
 import { meetingRoutes } from "./meetings.js";
 import { myClubRoutes } from "./my-clubs.js";
 import { notificationRoutes } from "./notifications.js";
@@ -118,11 +122,14 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/form-submissions", "formSubmissionRoutes", formSubmissionRoutes],
   ["/departments", "departmentRoutes", departmentRoutes],
   ["/club-info", "clubInfoRoutes", clubInfoRoutes],
+  ["/club-roles", "clubRoleRoutes", clubRoleRoutes],
   ["/calendars", "calendarRoutes", calendarRoutes],
   ["/events", "eventRoutes", eventRoutes],
   ["/events.ics", "icsRoutes", icsRoutes],
   ["/availability", "availabilityRoutes", availabilityRoutes],
   ["/meetings", "meetingRoutes", meetingRoutes],
+  ["/ballots", "ballotRoutes", ballotRoutes],
+  ["/elections", "electionRoutes", electionRoutes],
   ["/locations", "locationRoutes", locationRoutes],
   ["/inventory-items", "inventoryItemRoutes", inventoryItemRoutes],
   ["/media", "mediaRoutes", mediaRoutes],
@@ -158,6 +165,13 @@ const SELF_SERVICE: Record<string, string> = {
   "PATCH /availability/exceptions/:id": "own availability (ownership checked)",
   "DELETE /availability/exceptions/:id": "own availability (ownership checked)",
   "PATCH /meetings/:id/invitees/me": "own accept/decline of an invitation",
+  "POST /meetings/:id/proxies": "a member gives their own proxy (a proxy for somebody else needs assembly:manage; the statute rules decide, unknown meetings and members are 404)",
+  "DELETE /meetings/:id/proxies/:grantorClubMemberId": "a member withdraws their own proxy (somebody else's needs assembly:manage)",
+  "POST /meetings/:id/online/join": "an invited account joins the online part by itself: decided in the route by the invitation, the mode and the check-in window; strangers get 404",
+  "POST /meetings/:id/online/leave": "an invited account leaves the online part by itself (only its own self_online check-in)",
+  "POST /ballots/:id/vote": "a member votes (own ballot or, as a proxy holder, for the grantor): decided in the route by the voter roll, check-in and the window; unknown ballots are 404, a non-voter 403 not_eligible",
+  "PATCH /elections/:id/candidates/:candidateId": "the candidate declares willingness or withdraws (own candidacy only: another member is 403, unknown ids 404)",
+  "POST /elections/:id/candidates/:candidateId/accept": "the elected person accepts or declines the office (own candidacy only; the board records it for others with assembly:manage)",
   "POST /inventory-items/:id/loans": "self-service borrowing (switchable via club_settings.allow_self_loans)",
   "PATCH /inventory-items/:id/loans/:loanId": "return of the own loan (borrower or inventory:write); WITHOUT a body only -- an extension ({ dueAt }) needs inventory:write even for the borrower, asserted in the allow_self_loans block",
   "POST /inventory-items/:id/damage-reports": "self-service damage report",
@@ -203,6 +217,15 @@ const MAY_BE_404: Record<string, string> = {};
 const GUEST_DENIED_READS: Array<[string, string]> = [
   ["GET", "/meetings"],
   ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}`],
+  ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}/quorum`],
+  ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}/voting-roll/me`],
+  ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}/invitations/latest`],
+  ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}/agenda-items`],
+  ["GET", `/meetings/${"00000000-0000-4000-8000-000000000001"}/proxies`],
+  ["GET", "/ballots"],
+  ["GET", "/elections"],
+  ["GET", `/elections/${"00000000-0000-4000-8000-000000000001"}`],
+  ["GET", `/ballots/${"00000000-0000-4000-8000-000000000001"}`],
   ["GET", "/club-members"],
   ["GET", "/club-members?status=aktiv"],
   ["GET", "/inventory-items"],
@@ -218,6 +241,18 @@ const SOME_ID = "00000000-0000-4000-8000-000000000001";
 const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /club-members": { displayName: "Nobody", categoryKey: "aktiv" },
   "POST /club-members/:id/departments": { departmentId: SOME_ID },
+  "POST /meetings/:id/agenda-items": { title: "Begrüßung" },
+  "PATCH /meetings/:id/voting-roll/:clubMemberId": { eligible: true, reason: "Beschluss des Vorstands" },
+  "POST /meetings/:id/proxies": { holderClubMemberId: SOME_ID },
+  "PUT /meetings/:id/minutes": { content: "Protokoll" },
+  "POST /meetings/:id/minutes/confirm": { role: "leitung" },
+  "POST /meetings/:id/minutes/approve": { resolutionId: SOME_ID },
+  "POST /meetings/:id/minutes/amendments": { note: "Berichtigung" },
+  "POST /ballots": { title: "Abstimmung" },
+  "PATCH /ballots/:id": { title: "Neuer Titel" },
+  "POST /elections": { roleType: "kassenwart", seats: 1 },
+  "PATCH /elections/:id": { seats: 1 },
+  "POST /elections/:id/candidates": { clubMemberId: SOME_ID },
   "POST /club-members/categories": { name: "Neue Kategorie" },
   "POST /club-members/transition-suggestions/apply": { memberIds: [SOME_ID] },
   "POST /club-members/:id/transition": { toStatus: "aktiv" },
@@ -393,6 +428,28 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     expect((await req("/meetings", cookiePlain)).status).toBe(200);
     expect((await req("/club-members", cookiePlain)).status).toBe(200);
     expect((await req("/club-members/me", cookieGuest)).status).toBe(200);
+  });
+
+  it("answers an external guest 404 on the assembly self-service routes, and a member who is not on the voter roll 403 on a vote (review)", async () => {
+    const some = randomUUID();
+    for (const [method, path, body] of [
+      ["POST", `/meetings/${some}/proxies`, { holderClubMemberId: some }],
+      ["POST", `/meetings/${some}/online/join`, undefined],
+      ["POST", `/meetings/${some}/online/leave`, undefined],
+      ["PATCH", `/meetings/${some}/invitees/me`, { response: "zugesagt" }],
+      ["POST", `/ballots/${some}/vote`, { optionIds: [some] }],
+    ] as const) {
+      const res = await req(path, cookieGuest, { method, body });
+      expect(res.status, `${method} ${path}`).toBe(404);
+    }
+    // A running ballot whose voter roll does not contain the caller: 403 not_eligible, nothing is counted.
+    const [ballot] = await db.insert(ballots).values({ clubId, title: "Matrix", status: "open", mode: "circular", kind: "resolution", audience: "board", topic: "allgemein", maxChoices: 1, opensAt: new Date(Date.now() - 60_000), closesAt: new Date(Date.now() + 3_600_000), createdBy: founderId }).returning({ id: ballots.id });
+    const [option] = await db.insert(ballotOptions).values({ ballotId: ballot!.id, position: 1, label: "Ja", kind: "yes" }).returning({ id: ballotOptions.id });
+    const vote = await req(`/ballots/${ballot!.id}/vote`, cookiePlain, { method: "POST", body: { optionIds: [option!.id] } });
+    expect(vote.status).toBe(403);
+    expect((await vote.json()).error.details.code).toBe("not_eligible");
+    const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(ballotVotesOpen).where(eq(ballotVotesOpen.ballotId, ballot!.id));
+    expect(n).toBe(0);
   });
 
   it("hides calendars and events without a grant from an external guest (no club-wide rule 1), shows granted ones", async () => {

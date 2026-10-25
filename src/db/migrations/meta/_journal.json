@@ -330,6 +330,48 @@
       "when": 1792588154703,
       "tag": "0046_creator-references-survive-account",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1792785932784,
+      "tag": "0047_assembly-rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1792786118010,
+      "tag": "0048_assembly-schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1792786149710,
+      "tag": "0049_meetings-club-member-cutover",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1792788177094,
+      "tag": "0050_ballots-lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1792789978592,
+      "tag": "0051_minutes-approval",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1792846159527,
+      "tag": "0052_assembly-review-fixes",
+      "breakpoints": true
     }
   ]
 }

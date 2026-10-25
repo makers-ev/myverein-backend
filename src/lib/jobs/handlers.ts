@@ -1,3 +1,5 @@
+import { BALLOT_SWEEP_INTERVAL_MS, BALLOT_SWEEP_JOB_TYPE, handleBallotNotify, handleBallotSweep } from "../ballot-jobs.js";
+import { BALLOT_NOTIFY_JOB } from "../ballots.js";
 import { handlePublishAnnouncement, PUBLISH_JOB_TYPE } from "../announcements.js";
 import { EVENT_CHANGED_JOB_TYPE, handleEventChanged } from "../event-notify.js";
 import { AGE_TRANSITION_INTERVAL_MS, AGE_TRANSITION_JOB_TYPE, AGE_TRANSITION_MEMBER_JOB_TYPE, handleAgeTransitionMemberNotify, handleAgeTransitionSweep } from "../age-transition.js";
@@ -6,6 +8,7 @@ import { handleMajorityNotify, handleMajoritySweep, MAJORITY_NOTIFY_JOB_TYPE, MA
 import { DPA_NOTIFY_JOB_TYPE, handleDpaVersionNotify } from "../dpa.js";
 import { runFormCleanup } from "../form-sweeper.js";
 import { handleRetentionSweep, registerRetentionTasks, RETENTION_SWEEP_INTERVAL_MS, RETENTION_SWEEP_JOB_TYPE } from "../retention.js";
+import { handleTermNotify, handleTermSweep, TERM_NOTIFY_JOB_TYPE, TERM_SWEEP_INTERVAL_MS, TERM_SWEEP_JOB_TYPE } from "../term-jobs.js";
 import { registerNotifyJobs } from "../notify/index.js";
 import { installUnsubscribeProvider } from "../notify/unsubscribe-token.js";
 import { handleReminder, handleReminderSweep, REMINDER_JOB_TYPE, REMINDER_SWEEP_INTERVAL_MS, REMINDER_SWEEP_JOB_TYPE } from "../reminders.js";
@@ -39,6 +42,10 @@ export function registerAllJobs(): void {
     await runFormCleanup();
   });
   registerJob(DPA_NOTIFY_JOB_TYPE, handleDpaVersionNotify);
+  registerRecurringJob({ type: BALLOT_SWEEP_JOB_TYPE, intervalMs: BALLOT_SWEEP_INTERVAL_MS }, handleBallotSweep);
+  registerJob(BALLOT_NOTIFY_JOB, handleBallotNotify);
+  registerRecurringJob({ type: TERM_SWEEP_JOB_TYPE, intervalMs: TERM_SWEEP_INTERVAL_MS }, handleTermSweep);
+  registerJob(TERM_NOTIFY_JOB_TYPE, handleTermNotify);
   registerRetentionTasks();
   registerRecurringJob({ type: RETENTION_SWEEP_JOB_TYPE, intervalMs: RETENTION_SWEEP_INTERVAL_MS }, handleRetentionSweep);
 }

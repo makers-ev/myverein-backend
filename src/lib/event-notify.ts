@@ -107,8 +107,12 @@ export async function eventAudience(clubId: string, eventId: string, departmentI
 }
 
 export async function meetingAudience(clubId: string, meetingId: string): Promise<AnnouncementAudience | null> {
-  const rows = await db.select({ memberId: meetingInvitees.memberId }).from(meetingInvitees).where(eq(meetingInvitees.meetingId, meetingId));
-  const memberIds = await clubMemberIdsOf(clubId, rows.map((r) => r.memberId));
+  const rows = await db
+    .select({ id: meetingInvitees.clubMemberId })
+    .from(meetingInvitees)
+    .innerJoin(clubMembers, eq(clubMembers.id, meetingInvitees.clubMemberId))
+    .where(and(eq(meetingInvitees.meetingId, meetingId), eq(clubMembers.clubId, clubId)));
+  const memberIds = rows.map((r) => r.id);
   return memberIds.length === 0 ? null : { memberIds, includeGuardians: false };
 }
 
@@ -228,7 +232,7 @@ export function isOpenMeeting(meeting: Pick<MeetingRow, "status" | "scheduledAt"
 /**
  * Tells one newly invited member about the meeting (event key `meeting.invited`, optional, category events). Covers the
  * start of a Terminfindung too: that is the moment the first invitees are added. Skipped for meetings that are over or
- * cancelled, for people without a club_members row and when the club switched `notify_meeting_invites` off; `suppress`
+ * cancelled, and when the club switched `notify_meeting_invites` off; `suppress`
  * (body `notify:false`) skips it and audits that. Job key per invitee row, so a repeated request never sends twice
  * while removing and re-adding the person is a new invitation. Never throws.
  */
@@ -236,8 +240,7 @@ export async function announceMeetingInvitation(args: { clubId: string; actor: s
   try {
     const { clubId, meeting, invitee } = args;
     if (!isOpenMeeting(meeting) || !(await loadClubSettings(db, clubId)).notifyMeetingInvites) return "skipped";
-    const [clubMemberId] = await clubMemberIdsOf(clubId, [invitee.memberId]);
-    if (!clubMemberId) return "skipped";
+    const clubMemberId = invitee.clubMemberId;
     const timezone = await clubTimezone(clubId);
     const lang = await clubMailLanguage(db, clubId);
     const place = await locationName(clubId, meeting.locationId);

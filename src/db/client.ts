@@ -5,6 +5,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import * as authSchema from "../auth/auth-schema.js";
 import { logger } from "../lib/logger.js";
 import * as absencesSchema from "./schema/absences.js";
+import * as assemblySchema from "./schema/assembly.js";
 import * as auditLogSchema from "./schema/audit-log.js";
 import * as availabilitySchema from "./schema/availability.js";
 import * as calendarVisibilitySchema from "./schema/calendar-visibility.js";
@@ -94,6 +95,7 @@ export const schema = {
   ...rateLimitsSchema,
   ...communicationSchema,
   ...absencesSchema,
+  ...assemblySchema,
   ...clubPrivacyNoticesSchema,
   ...privacySchema,
 };

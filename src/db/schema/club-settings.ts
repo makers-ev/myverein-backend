@@ -63,6 +63,9 @@ export const clubSettings = pgTable("club_settings", {
   consentBothGuardians: boolean("consent_both_guardians").notNull().default(false),
   privacyContact: text("privacy_contact"),
   privacyController: text("privacy_controller"),
+  // Statute parameters of the general assembly (Wave 11): validated `AssemblyRules` (lib/assembly-rules.ts). NULL = nothing set yet;
+  // the legal parameters have no defaults on purpose (the club has to state them before the first invitation).
+  assemblyRules: jsonb("assembly_rules").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

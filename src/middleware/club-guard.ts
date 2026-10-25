@@ -7,6 +7,7 @@ import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { auditContext } from "../lib/audit.js";
+import { suspendedRoleTypes } from "../lib/term-status.js";
 import { IMPLICIT_ROLE_TYPE } from "../lib/club-permissions.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../lib/errors.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "../lib/member-lifecycle.js";
@@ -74,6 +75,8 @@ export const clubGuard = createMiddleware<ClubEnv>(async (c: Context, next: Next
   // external guests (guardians etc.); it is never stored in club_roles.
   const roleTypes = new Set(roleRows.map((row) => row.roleType));
   roleTypes.delete(IMPLICIT_ROLE_TYPE);
+  // Wave 11 B8: with `term_expiry_effect = suspend_permissions` a role whose term has run out grants nothing any more.
+  for (const suspended of await suspendedRoleTypes(clubId, roleRows, todayBerlin())) roleTypes.delete(suspended);
   const effective = [...roleTypes];
   if (membership.role !== "guest") effective.unshift(IMPLICIT_ROLE_TYPE);
   c.set("clubRoleTypes", effective);

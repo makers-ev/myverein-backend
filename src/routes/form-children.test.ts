@@ -379,7 +379,8 @@ describe("child application by a parent (B8)", () => {
     expect(row).toMatchObject({ status: "aktiv", displayName: "Eltern Teil" });
     expect(row.memberNumber).toMatch(/-\d{4}$/);
     const history = await db.select().from(clubMemberStatusHistory).where(eq(clubMemberStatusHistory.clubMemberId, row.id));
-    expect(history.map((h) => `${h.fromStatus}>${h.toStatus}`)).toEqual(["null>interessent", "interessent>aktiv"]);
+    // Both rows are written in one transaction (identical created_at), so the read order is not defined: compare as a set.
+    expect(history.map((h) => `${h.fromStatus}>${h.toStatus}`).sort()).toEqual(["interessent>aktiv", "null>interessent"]);
     // The guardian role and the link stay; the person now has the implicit member role.
     expect((await db.select().from(clubRoles).where(eq(clubRoles.memberId, guest.id))).map((r) => r.roleType)).toEqual(["erziehungsberechtigt"]);
     expect(await db.select().from(guardianLinks).where(eq(guardianLinks.guardianMemberId, guest.id))).toHaveLength(1);

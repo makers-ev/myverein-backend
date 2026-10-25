@@ -18,6 +18,7 @@ import { guardianLinks } from "../../db/schema/guardian-links.js";
 import { inventoryDamageReports, inventoryItems, inventoryLoans } from "../../db/schema/inventory.js";
 import { locationKeyHistory, locationKeyHolders } from "../../db/schema/locations.js";
 import { mediaFiles } from "../../db/schema/media-files.js";
+import { ballotOptions, ballotVoters, ballotVotesOpen, clubRoleTerms, electionCandidates, elections, meetingInvitationDeliveries, meetingProxies, meetingVotingRoll } from "../../db/schema/assembly.js";
 import { meetingAttendance, meetingInvitees } from "../../db/schema/meetings.js";
 import { consentPurposes, consentRecords, consentTexts, memberFieldVisibility } from "../../db/schema/privacy.js";
 import type { DbExecutor } from "../club-members.js";
@@ -317,8 +318,6 @@ const accountData: PrivacyContributor = {
     "inventory_damage_reports",
     "location_key_holders",
     "location_key_history",
-    "meeting_invitees",
-    "meeting_attendance",
   ],
   async exportSubject(ex, s) {
     const m = s.accountMemberId;
@@ -343,8 +342,6 @@ const accountData: PrivacyContributor = {
       .innerJoin(inventoryItems, eq(inventoryItems.id, inventoryDamageReports.itemId))
       .where(eq(inventoryDamageReports.reportedBy, m));
     const keys = await ex.select({ keyLabel: locationKeyHolders.keyLabel }).from(locationKeyHolders).where(eq(locationKeyHolders.memberId, m));
-    const invitees = await ex.select({ meetingId: meetingInvitees.meetingId, response: meetingInvitees.response }).from(meetingInvitees).where(eq(meetingInvitees.memberId, m));
-    const attendance = await ex.select({ meetingId: meetingAttendance.meetingId, present: meetingAttendance.present, hasVotingRight: meetingAttendance.hasVotingRight }).from(meetingAttendance).where(eq(meetingAttendance.memberId, m));
     const [legacy] = await ex.select({ category: clubMemberships.category, joinedAt: clubMemberships.joinedAt, leftAt: clubMemberships.leftAt }).from(clubMemberships).where(eq(clubMemberships.memberId, m));
     const visibleTo = await ex.select({ calendarId: calendarVisibility.calendarId }).from(calendarVisibility).where(eq(calendarVisibility.memberId, m));
     return {
@@ -355,8 +352,6 @@ const accountData: PrivacyContributor = {
         loans: loans.map((l) => ({ ...l, borrowedAt: iso(l.borrowedAt), dueAt: iso(l.dueAt), returnedAt: iso(l.returnedAt) })),
         damageReports: damage.map((d) => ({ ...d, createdAt: iso(d.createdAt) })),
         keysHeld: keys,
-        meetingInvitations: invitees,
-        meetingAttendance: attendance,
         calendarGrants: visibleTo.length,
         legacyMembership: legacy ?? null,
       },
@@ -378,22 +373,109 @@ const accountData: PrivacyContributor = {
       tx.delete(inventoryLoans).where(eq(inventoryLoans.memberId, m)),
       tx.delete(inventoryDamageReports).where(eq(inventoryDamageReports.reportedBy, m)),
       tx.delete(locationKeyHolders).where(eq(locationKeyHolders.memberId, m)),
-      tx.delete(meetingInvitees).where(eq(meetingInvitees.memberId, m)),
       tx.delete(clubMemberships).where(eq(clubMemberships.memberId, m)),
     ]) {
       deleted += await rowCount(t);
     }
-    // Attendance and voting rights belong to the minutes: the row stays, the reference to the person is removed (FK `set null`).
-    const attendance = await rowCount(tx.update(meetingAttendance).set({ memberId: null }).where(eq(meetingAttendance.memberId, m)));
     // The key log keeps who-held-what for the club's records, but not the name.
     const keyLog = await rowCount(tx.update(locationKeyHistory).set({ memberName: ERASED_NAME, memberId: null }).where(eq(locationKeyHistory.memberId, m)));
     const keyLogRecorded = await rowCount(tx.update(locationKeyHistory).set({ recordedByName: ERASED_NAME, recordedBy: null }).where(eq(locationKeyHistory.recordedBy, m)));
     return {
       deleted,
-      anonymized: attendance + keyLog + keyLogRecorded,
-      kept: attendance,
-      keptReason: "Meeting attendance and voting rights stay pseudonymised in the minutes (the reference to the person is removed)",
+      anonymized: keyLog + keyLogRecorded,
+      kept: 0,
       purge,
+    };
+  },
+};
+
+/**
+ * General assembly (Wave 11): invitations, attendance, proxies, the voting roll, ballots and elections. The club has to keep
+ * the records (attendance and voting rights belong to the minutes, voter rolls and votes to the result of a ballot), so the
+ * reference to the person is removed and the counts stay: no hard cascade. Secret votes carry no reference at all.
+ */
+const assemblyData: PrivacyContributor = {
+  key: "assembly_data",
+  tables: [
+    "meeting_invitees",
+    "meeting_attendance",
+    "meeting_proxies",
+    "meeting_voting_roll",
+    "meeting_invitation_deliveries",
+    "ballot_voters",
+    "ballot_votes_open",
+    "ballot_options",
+    // Minutes and secret votes carry no reference to a club member (accounts only as creator/confirmer, set null on erasure).
+    "ballot_votes_secret",
+    "meeting_minutes",
+    "meeting_minutes_amendments",
+    "meeting_minutes_confirmations",
+    "elections",
+    "election_candidates",
+    "club_role_terms",
+  ],
+  async exportSubject(ex, s) {
+    const c = s.clubMemberId;
+    const invitees = await ex.select({ meetingId: meetingInvitees.meetingId, response: meetingInvitees.response }).from(meetingInvitees).where(eq(meetingInvitees.clubMemberId, c));
+    const attendance = await ex
+      .select({ meetingId: meetingAttendance.meetingId, present: meetingAttendance.present, hasVotingRight: meetingAttendance.hasVotingRight, checkedInAt: meetingAttendance.checkedInAt, leftAt: meetingAttendance.leftAt })
+      .from(meetingAttendance)
+      .where(eq(meetingAttendance.clubMemberId, c));
+    const proxies = await ex
+      .select({ meetingId: meetingProxies.meetingId, grantor: eq(meetingProxies.grantorClubMemberId, c), createdAt: meetingProxies.createdAt })
+      .from(meetingProxies)
+      .where(or(eq(meetingProxies.grantorClubMemberId, c), eq(meetingProxies.holderClubMemberId, c)));
+    const roll = await ex.select({ meetingId: meetingVotingRoll.meetingId, eligible: meetingVotingRoll.eligible, basis: meetingVotingRoll.basis }).from(meetingVotingRoll).where(eq(meetingVotingRoll.clubMemberId, c));
+    const deliveries = await ex
+      .select({ invitationId: meetingInvitationDeliveries.invitationId, channel: meetingInvitationDeliveries.channel, status: meetingInvitationDeliveries.status, statusAt: meetingInvitationDeliveries.statusAt })
+      .from(meetingInvitationDeliveries)
+      .where(eq(meetingInvitationDeliveries.clubMemberId, c));
+    // Only whether the person took part, never how they voted in a secret ballot (and that is not stored anyway).
+    const voted = await ex.select({ ballotId: ballotVoters.ballotId, eligible: ballotVoters.eligible, hasVoted: ballotVoters.hasVoted }).from(ballotVoters).where(eq(ballotVoters.clubMemberId, c));
+    const openVotes = await ex.select({ ballotId: ballotVotesOpen.ballotId, createdAt: ballotVotesOpen.createdAt }).from(ballotVotesOpen).where(eq(ballotVotesOpen.clubMemberId, c));
+    const candidacies = await ex.select({ electionId: electionCandidates.electionId, status: electionCandidates.status }).from(electionCandidates).where(eq(electionCandidates.clubMemberId, c));
+    const terms = await ex.select({ roleType: clubRoleTerms.roleType, startsOn: clubRoleTerms.startsOn, endsOn: clubRoleTerms.endsOn }).from(clubRoleTerms).where(eq(clubRoleTerms.clubMemberId, c));
+    return {
+      assembly: {
+        meetingInvitations: invitees,
+        meetingAttendance: attendance.map((a) => ({ ...a, checkedInAt: iso(a.checkedInAt), leftAt: iso(a.leftAt) })),
+        proxies: proxies.map((p) => ({ meetingId: p.meetingId, role: p.grantor ? "grantor" : "holder", createdAt: p.createdAt.toISOString() })),
+        votingRoll: roll,
+        invitationDeliveries: deliveries.map((d) => ({ ...d, statusAt: d.statusAt.toISOString() })),
+        ballotParticipation: voted,
+        openVotes: openVotes.map((v) => ({ ballotId: v.ballotId, createdAt: v.createdAt.toISOString() })),
+        candidacies,
+        terms,
+      },
+    };
+  },
+  async eraseSubject(tx, s) {
+    const c = s.clubMemberId;
+    const deleted = await rowCount(tx.delete(meetingInvitees).where(eq(meetingInvitees.clubMemberId, c)));
+    // A candidate's name is part of the option label; the label of an erased person reads as the erased name.
+    const labels = await rowCount(tx.update(ballotOptions).set({ label: ERASED_NAME, candidateClubMemberId: null }).where(eq(ballotOptions.candidateClubMemberId, c)));
+    let anonymized = labels;
+    for (const t of [
+      tx.update(meetingAttendance).set({ clubMemberId: null }).where(eq(meetingAttendance.clubMemberId, c)),
+      tx.update(meetingProxies).set({ grantorClubMemberId: null }).where(eq(meetingProxies.grantorClubMemberId, c)),
+      tx.update(meetingProxies).set({ holderClubMemberId: null }).where(eq(meetingProxies.holderClubMemberId, c)),
+      tx.update(meetingVotingRoll).set({ clubMemberId: null }).where(eq(meetingVotingRoll.clubMemberId, c)),
+      tx.update(meetingInvitationDeliveries).set({ clubMemberId: null }).where(eq(meetingInvitationDeliveries.clubMemberId, c)),
+      tx.update(ballotVoters).set({ clubMemberId: null }).where(eq(ballotVoters.clubMemberId, c)),
+      tx.update(ballotVoters).set({ castByClubMemberId: null }).where(eq(ballotVoters.castByClubMemberId, c)),
+      tx.update(ballotVotesOpen).set({ clubMemberId: null }).where(eq(ballotVotesOpen.clubMemberId, c)),
+      tx.update(electionCandidates).set({ clubMemberId: null }).where(eq(electionCandidates.clubMemberId, c)),
+      tx.update(electionCandidates).set({ proposedBy: null }).where(eq(electionCandidates.proposedBy, c)),
+      tx.update(elections).set({ electionLeadClubMemberId: null }).where(eq(elections.electionLeadClubMemberId, c)),
+      tx.update(clubRoleTerms).set({ clubMemberId: null }).where(eq(clubRoleTerms.clubMemberId, c)),
+    ]) {
+      anonymized += await rowCount(t);
+    }
+    return {
+      deleted,
+      anonymized,
+      kept: anonymized,
+      keptReason: "Attendance, voting roll, proxies, ballots and elections stay as records of the assembly; the reference to the person is removed, counts and results are unchanged",
     };
   },
 };
@@ -416,4 +498,4 @@ export async function listFilesOf(ex: DbExecutor, s: PrivacySubject): Promise<Ar
 }
 
 /** Registration order = erasure order: form data first (lock order submission -> member row), master data last of the member rows. */
-export const BUILT_IN_CONTRIBUTORS: PrivacyContributor[] = [formsAndApplications, exitRequests, absences, guardianship, consents, communication, accountData, memberCore];
+export const BUILT_IN_CONTRIBUTORS: PrivacyContributor[] = [formsAndApplications, exitRequests, absences, guardianship, consents, communication, accountData, assemblyData, memberCore];

@@ -1,5 +1,6 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 
+import { meetingInvitations } from "../../db/schema/assembly.js";
 import { organization } from "../../auth/auth-schema.js";
 import { db } from "../../db/client.js";
 import { messageDeliveries, pushTokens } from "../../db/schema/communication.js";
@@ -73,7 +74,7 @@ interface ExpoTicket {
 }
 
 /** Deep-link data (ids only) derived from the delivery's event key. */
-export function pushDataFor(eventKey: string | null, refId: string | null, announcementId: string | null, clubId: string | null, urgent: boolean): Record<string, string | boolean> {
+export function pushDataFor(eventKey: string | null, refId: string | null, announcementId: string | null, clubId: string | null, urgent: boolean, resolvedMeetingId?: string | null): Record<string, string | boolean> {
   const key = eventKey ?? "";
   // `refId` may carry a `#discriminator` suffix (idempotency, see dispatcher); the deep link only wants the id.
   refId = refId ? refId.split("#")[0]! : refId;
@@ -83,6 +84,14 @@ export function pushDataFor(eventKey: string | null, refId: string | null, annou
   if (announcementId || key === "announcement") {
     data.type = "announcement";
     if (announcementId) data.announcementId = announcementId;
+  } else if (key.startsWith("ballot.")) {
+    // Votes and elections of the general assembly: only the id, never the title or the choices.
+    data.type = "ballot";
+    if (refId) data.ballotId = refId;
+  } else if (key === "meeting.invitation") {
+    // `refId` is the INVITATION id; the app needs the meeting, resolved by the sender (omitted if it cannot be).
+    data.type = "assembly";
+    if (resolvedMeetingId) data.meetingId = resolvedMeetingId;
   } else if (key.startsWith("event.") || key === "reminder.event") {
     data.type = "event";
     if (refId) data.eventId = refId;
@@ -111,6 +120,9 @@ const GENERIC_TEXT_BY_KEY: Record<string, string> = {
   "meeting.changed": "Treffen verschoben",
   "meeting.cancelled": "Treffen abgesagt",
   "meeting.invited": "Einladung zu einem Treffen",
+  "meeting.invitation": "Einladung zur Versammlung",
+  "ballot.opened": "Neue Abstimmung",
+  "ballot.reminder": "Erinnerung: Abstimmung",
   "reminder.event": "Erinnerung an einen Termin",
   "reminder.rsvp": "Bitte antworten",
   "reminder.loan_due": "Rückgabe fällig",
@@ -188,6 +200,12 @@ export async function handlePushDelivery(job: JobContext): Promise<void> {
   const clubs = clubIds.length ? await db.select({ id: organization.id, name: organization.name }).from(organization).where(inArray(organization.id, clubIds)) : [];
   const clubName = new Map(clubs.map((c) => [c.id, c.name]));
 
+  // The invitation's ref is the invitation id: resolve the meeting for the deep link (one query for the whole batch).
+  const invitationIds = [...new Set(rows.filter((r) => r.eventKey === "meeting.invitation" && r.refId).map((r) => r.refId!.split("#")[0]!))];
+  const invitationMeeting = new Map(
+    invitationIds.length ? (await db.select({ id: meetingInvitations.id, meetingId: meetingInvitations.meetingId }).from(meetingInvitations).where(inArray(meetingInvitations.id, invitationIds))).map((r) => [r.id, r.meetingId]) : [],
+  );
+
   const pending: PendingDelivery[] = [];
   const noToken: string[] = [];
   for (const row of rows) {
@@ -207,7 +225,7 @@ export async function handlePushDelivery(job: JobContext): Promise<void> {
           to: t.token,
           title: (row.clubId ? clubName.get(row.clubId) : null) ?? "MyVerein",
           body: genericPushText(row.eventKey, template, content.lang ?? "de"),
-          data: pushDataFor(row.eventKey, row.refId, row.announcementId, row.clubId, urgent),
+          data: pushDataFor(row.eventKey, row.refId, row.announcementId, row.clubId, urgent, row.eventKey === "meeting.invitation" && row.refId ? (invitationMeeting.get(row.refId.split("#")[0]!) ?? null) : null),
           priority: urgent ? "high" : "default",
           channelId: urgent ? "urgent" : "default",
           sound: "default",

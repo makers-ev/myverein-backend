@@ -109,8 +109,8 @@ describe("member data export and erasure (B7/B8)", () => {
     const [meeting] = await db.insert(meetings).values({ clubId, type: "mitgliederversammlung", title: "MV", status: "abgehalten", createdBy: board.userId }).returning();
     meetingId = meeting!.id;
     await db.insert(meetingAttendance).values([
-      { meetingId, memberId: alice.memberId, present: true, hasVotingRight: true },
-      { meetingId, memberId: bob.memberId, present: true, hasVotingRight: false },
+      { meetingId, clubMemberId: alice.clubMemberId, present: true, hasVotingRight: true },
+      { meetingId, clubMemberId: bob.clubMemberId, present: true, hasVotingRight: false },
     ]);
     await db.insert(absenceReports).values({ clubId, clubMemberId: alice.clubMemberId, kind: "krank", startsOn: "2030-01-01", endsOn: "2030-01-03", note: "Grippe", reportedByUserId: alice.userId });
     const list = await json(await call(board, "/consent-purposes"));
@@ -136,11 +136,11 @@ describe("member data export and erasure (B7/B8)", () => {
       expect(res.headers.get("cache-control")).toBe("private, no-store");
       expect(res.headers.get("content-disposition")).toContain("attachment");
       const body = (await json(res)).data;
-      expect(Object.keys(body.sections)).toEqual(expect.arrayContaining(["member_core", "consents", "absences", "guardianship", "forms_and_applications", "exit_requests", "communication", "account_data"]));
+      expect(Object.keys(body.sections)).toEqual(expect.arrayContaining(["member_core", "consents", "absences", "guardianship", "forms_and_applications", "exit_requests", "communication", "account_data", "assembly_data"]));
       expect(body.sections.member_core.masterData).toMatchObject({ firstName: "alice", phone: "0151 1234", street: "Hauptstr. 1", emergencyContactName: "Mama", hasAccount: true });
       expect(body.sections.absences.absences).toEqual([expect.objectContaining({ kind: "krank", note: "Grippe" })]);
       expect(body.sections.consents.events).toEqual([expect.objectContaining({ action: "granted", givenBy: "self" })]);
-      expect(body.sections.account_data.account.meetingAttendance).toEqual([expect.objectContaining({ present: true })]);
+      expect(body.sections.assembly_data.assembly.meetingAttendance).toEqual([expect.objectContaining({ present: true })]);
       const audits = await db.select().from(auditLog).where(and(eq(auditLog.eventType, "member_data.export"), eq(auditLog.subjectMemberId, alice.clubMemberId)));
       expect(audits).toHaveLength(1);
       expect(audits[0]!.payload).toMatchObject({ via: "self", format: "json" });
@@ -281,7 +281,8 @@ describe("member data export and erasure (B7/B8)", () => {
       expect(byKey.absences.deleted).toBe(1);
       expect(byKey.consents).toMatchObject({ kept: 1 });
       expect(byKey.consents.keptReason).toBeTruthy();
-      expect(byKey.account_data.kept).toBe(1);
+      expect(byKey.assembly_data.kept).toBe(1);
+      expect(byKey.assembly_data.keptReason).toBeTruthy();
       expect(byKey.member_core.anonymized).toBeGreaterThanOrEqual(1);
       const [row] = await db.select().from(clubMembers).where(eq(clubMembers.id, alice.clubMemberId));
       expect(row).toMatchObject({ firstName: "alice", phone: "0151 1234" });
@@ -320,7 +321,7 @@ describe("member data export and erasure (B7/B8)", () => {
       // The attendance stays for the minutes, without the reference to the person.
       const attendance = await db.select().from(meetingAttendance).where(eq(meetingAttendance.meetingId, meetingId));
       expect(attendance).toHaveLength(2);
-      expect(attendance.find((a) => a.memberId === null)).toMatchObject({ present: true, hasVotingRight: true });
+      expect(attendance.find((a) => a.clubMemberId === null)).toMatchObject({ present: true, hasVotingRight: true });
       // The account itself survives (the user decides separately), but it is no longer a member of the club.
       expect(await db.query.user.findFirst({ where: eq(user.id, alice.userId) })).toBeTruthy();
       expect((await call(alice, "/club-members/me")).status).toBe(404);
@@ -366,7 +367,7 @@ describe("member data export and erasure (B7/B8)", () => {
       expect(row).toMatchObject({ displayName: "Gelöschtes Mitglied", phone: null, firstName: null, memberId: null });
       const attendance = await db.select().from(meetingAttendance).where(eq(meetingAttendance.meetingId, meetingId));
       expect(attendance).toHaveLength(2);
-      expect(attendance.every((a) => a.memberId === null)).toBe(true);
+      expect(attendance.every((a) => a.clubMemberId === null)).toBe(true);
       expect(attendance.map((a) => a.hasVotingRight).sort()).toEqual([false, true]);
     });
   });

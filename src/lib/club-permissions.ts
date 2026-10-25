@@ -57,6 +57,7 @@ export type ClubPermission =
   | "announcements:write_department" // Wave 9: announcements to the OWN departments only (scope = club_roles.department_id)
   | "privacy:read" // Wave 10: audit log (who saw/changed what), consent overview, data subject requests, retention runs of the club
   | "privacy:manage" // Wave 10: consent purposes/texts, paper proofs, privacy notice, retention overrides, export/erasure of a member
+  | "assembly:manage" // Wave 11: general assembly -- statute parameters, invitations, voting roll, attendance, ballots, minutes
   | "absences:read"; // Wave 10: absence reports; trainer/abteilungsleitung only for the members of their OWN departments (scope in the route)
 
 /**
@@ -91,6 +92,7 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "privacy:read",
     "privacy:manage",
     "absences:read",
+    "assembly:manage",
   ],
   stellv_vorsitz: [
     "members:write",
@@ -110,11 +112,12 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "privacy:read",
     "privacy:manage",
     "absences:read",
+    "assembly:manage",
   ],
   kassenwart: ["members:read_sensitive", "club_stats:read"],
   // A schriftfuehrer's real-world job in a German Verein is literally running
   // meeting agendas/Protokolle, so meetings:write is a natural fit here.
-  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write", "announcements:write"],
+  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write", "announcements:write", "assembly:manage"],
   // Beisitzer sit on the board, so they may read Vorstandssitzungen and the club KPIs (but write nothing).
   beisitzer: ["meetings:read_board", "club_stats:read"],
   // Also calendars:write/locations:write/inventory:write, on top of

@@ -83,7 +83,7 @@ describe("guardians and reminders", () => {
     const [item] = await db.insert(inventoryItems).values({ clubId, name: "Ball", condition: "gut" }).returning();
     const [loan] = await db.insert(inventoryLoans).values({ itemId: item!.id, memberId: accountOf.child!, dueAt: new Date("2026-10-22T16:00:00Z") }).returning();
     const [meeting] = await db.insert(meetings).values({ clubId, type: "sonstige", title: "Elternabend", status: "geplant", scheduledAt: new Date("2026-10-22T17:00:00Z"), createdBy: userOf.owner! }).returning();
-    await db.insert(meetingInvitees).values({ meetingId: meeting!.id, memberId: accountOf.child!, response: "ausstehend" });
+    await db.insert(meetingInvitees).values({ meetingId: meeting!.id, clubMemberId: clubMemberOf.child!, response: "ausstehend" });
 
     await runReminderSweep(new Date("2026-10-18T08:15:00Z"), { clubId });
     await runReminderSweep(new Date("2026-10-21T06:00:00Z"), { clubId });

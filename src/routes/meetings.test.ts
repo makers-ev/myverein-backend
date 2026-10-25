@@ -8,7 +8,10 @@ import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
+import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { clubSettings } from "../db/schema/club-settings.js";
+import { emptyAssemblyRules } from "../lib/assembly-rules.js";
 import { toAppError } from "../lib/errors.js";
 import { meetingRoutes } from "./meetings.js";
 
@@ -97,6 +100,9 @@ describe("meetings routes", () => {
     // Grants memberA meetings:write, so cookieA acts as the "board" caller
     // throughout; cookieSecond stays a plain member for 403 checks.
     await db.insert(clubRoles).values({ memberId: memberAId, roleType: "schriftfuehrer" });
+    // Statute parameters (Wave 11): the voting right and proxies are derived from them.
+    const rules = { ...emptyAssemblyRules(), votingStatuses: ["aktiv" as const], votingMinAge: 0, proxyAllowed: true, maxProxiesPerPerson: 2 };
+    await db.insert(clubSettings).values({ clubId: clubAId, assemblyRules: rules }).onConflictDoUpdate({ target: clubSettings.clubId, set: { assemblyRules: rules } });
   }, 30_000);
 
   afterAll(async () => {
@@ -378,7 +384,7 @@ describe("meetings routes", () => {
         headers: { cookie: cookieA, "content-type": "application/json" },
         body: JSON.stringify([
           { memberId: memberAId, present: false },
-          { memberId: memberSecondId, present: true, hasVotingRight: true, proxyForMemberId: memberAId },
+          { memberId: memberSecondId, present: true, hasVotingRight: true, proxyForMemberId: memberAId, proxyProofSource: "Vollmacht" },
         ]),
       });
       expect(res.status).toBe(200);
@@ -594,7 +600,7 @@ describe("meetings routes", () => {
     });
 
     it("keeps an existing proxy when it is omitted, sets it, and clears it with null", async () => {
-      expect((await att([{ memberId: memberAId, proxyForMemberId: memberSecondId }])).status).toBe(200);
+      expect((await att([{ memberId: memberAId, proxyForMemberId: memberSecondId, proxyProofSource: "Vollmacht" }])).status).toBe(200);
       expect((await load()).find((r) => r.memberId === memberAId)).toMatchObject({ present: true, proxyForMemberId: memberSecondId });
 
       expect((await att([{ memberId: memberAId, present: true }])).status).toBe(200);
@@ -605,7 +611,7 @@ describe("meetings routes", () => {
     });
 
     it("rejects a self-proxy (422), a proxy from another club (404) and non-writers (403)", async () => {
-      expect((await att([{ memberId: memberAId, proxyForMemberId: memberAId }])).status).toBe(422);
+      expect((await att([{ memberId: memberAId, proxyForMemberId: memberAId, proxyProofSource: "Vollmacht" }])).status).toBe(422);
       expect((await att([{ memberId: memberAId, proxyForMemberId: memberBId }])).status).toBe(404);
       expect((await att([{ memberId: memberAId, present: true }], cookieSecond)).status).toBe(403);
     });
@@ -712,6 +718,70 @@ describe("meetings routes", () => {
 
       const getRes = await app.request(`/meetings/${deleteMeetingId}?clubId=${clubAId}`, { headers: { cookie: cookieA } });
       expect(getRes.status).toBe(404);
+    });
+  });
+  describe("members without an account (Wave 11 B2)", () => {
+    let meetingIdLocal: string;
+    let guestlessId: string;
+    const req = (cookie: string, path: string, init: { method?: string; body?: object } = {}) =>
+      app.request(`${path}?clubId=${clubAId}`, { method: init.method ?? "GET", headers: { cookie, "content-type": "application/json" }, body: init.body ? JSON.stringify(init.body) : undefined });
+
+    beforeAll(async () => {
+      const category = await db.query.memberCategories.findFirst({ where: (cat, { and: a, eq: e }) => a(e(cat.clubId, clubAId), e(cat.key, "aktiv")) });
+      const [row] = await db.insert(clubMembers).values({ clubId: clubAId, displayName: "Kind Ohne Konto", categoryId: category!.id, joinedAt: "2020-01-01" }).returning();
+      guestlessId = row!.id;
+      const res = await req(cookieA, "/meetings", { method: "POST", body: { type: "vorstandssitzung", title: "Ohne Konto" } });
+      meetingIdLocal = ((await res.json()) as { data: { id: string } }).data.id;
+    });
+
+    it("invites a member without account by club member id, shows the name only to meeting managers", async () => {
+      const res = await req(cookieA, `/meetings/${meetingIdLocal}/invitees`, { method: "POST", body: { clubMemberId: guestlessId, notify: false } });
+      expect(res.status).toBe(201);
+      expect(((await res.json()) as { data: Record<string, unknown> }).data).toMatchObject({ clubMemberId: guestlessId, memberId: null, displayName: "Kind Ohne Konto", response: "ausstehend" });
+      const duplicate = await req(cookieA, `/meetings/${meetingIdLocal}/invitees`, { method: "POST", body: { clubMemberId: guestlessId } });
+      expect(duplicate.status).toBe(409);
+      // The second account is a plain member and not invited to this board meeting: 404, not 403.
+      expect((await req(cookieSecond, `/meetings/${meetingIdLocal}/invitees`)).status).toBe(404);
+    });
+
+    it("still accepts the account membership id as an alias and rejects other clubs", async () => {
+      const alias = await req(cookieA, `/meetings/${meetingIdLocal}/invitees`, { method: "POST", body: { memberId: memberSecondId, notify: false } });
+      expect(alias.status).toBe(201);
+      const aliasBody = ((await alias.json()) as { data: Record<string, unknown> }).data;
+      expect(aliasBody).toMatchObject({ memberId: memberSecondId });
+      // Now invited: the member reads the invitee list but without names.
+      const list = ((await (await req(cookieSecond, `/meetings/${meetingIdLocal}/invitees`)).json()) as { data: Array<Record<string, unknown>> }).data;
+      expect(list).toHaveLength(2);
+      expect(list.every((i) => !("displayName" in i))).toBe(true);
+      const foreign = await req(cookieA, `/meetings/${meetingIdLocal}/invitees`, { method: "POST", body: { memberId: memberBId } });
+      expect(foreign.status).toBe(404);
+    });
+
+    it("removes an invitee by club member id", async () => {
+      expect((await req(cookieA, `/meetings/${meetingIdLocal}/invitees/${guestlessId}`, { method: "DELETE" })).status).toBe(204);
+      expect((await req(cookieA, `/meetings/${meetingIdLocal}/invitees/${guestlessId}`, { method: "DELETE" })).status).toBe(404);
+    });
+
+    it("records attendance for a member without account and exposes proxies as a list", async () => {
+      const res = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ clubMemberId: guestlessId, present: true }, { memberId: memberSecondId, present: true }] });
+      expect(res.status).toBe(200);
+      const rows = ((await res.json()) as { data: Array<Record<string, unknown>> }).data;
+      expect(rows.find((r) => r.clubMemberId === guestlessId)).toMatchObject({ present: true, memberId: null, proxyFor: [], checkInMethod: "schriftfuehrer", hasVotingRight: true });
+      expect(rows.find((r) => r.clubMemberId === guestlessId)!.checkedInAt).toBeTruthy();
+      // Somebody who is present cannot give a proxy; once they left, the clerk can record it for them.
+      const blocked = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ memberId: memberSecondId, proxyProofSource: "Vollmacht", proxyForClubMemberId: guestlessId }] });
+      expect(blocked.status).toBe(409);
+      expect(((await blocked.json()) as { error: { details: { code: string } } }).error.details.code).toBe("grantor_present");
+      const left = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ clubMemberId: guestlessId, present: false }, { memberId: memberSecondId, proxyProofSource: "Vollmacht", proxyForClubMemberId: guestlessId }] });
+      expect(left.status).toBe(200);
+      const after = ((await left.json()) as { data: Array<Record<string, unknown>> }).data;
+      expect(after.find((r) => r.clubMemberId === guestlessId)).toMatchObject({ present: false, proxyFor: [] });
+      expect(after.find((r) => r.clubMemberId === guestlessId)!.leftAt).toBeTruthy();
+      expect(after.find((r) => r.memberId === memberSecondId)).toMatchObject({ proxyFor: [guestlessId] });
+      // Whoever gave a proxy cannot be checked in without withdrawing it.
+      const again = await req(cookieA, `/meetings/${meetingIdLocal}/attendance`, { method: "PATCH", body: [{ clubMemberId: guestlessId, present: true }] });
+      expect(again.status).toBe(409);
+      expect(((await again.json()) as { error: { details: { code: string } } }).error.details.code).toBe("proxy_granted");
     });
   });
 });
