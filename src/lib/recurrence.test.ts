@@ -79,8 +79,7 @@ describe("expandSeries", () => {
     const r = expandSeries(rule, { until });
     expect(r.skippedHolidays.map((s) => s.holiday)).toEqual(["Ostermontag"]);
     expect(r.occurrences.map((o) => o.localDate)).toEqual(["2026-04-13", "2026-04-20"]);
-    const dropped = zonedToUtc("2026-04-13", "18:00", "Europe/Berlin").getTime();
-    expect(localDates(rule, { exceptions: new Set([dropped]) })).toEqual(["2026-04-20"]);
+    expect(localDates(rule, { exceptions: new Set(["2026-04-13"]) })).toEqual(["2026-04-20"]);
     expect(localDates({ ...rule, skipHolidays: false }, { from: new Date("2026-04-10T00:00:00Z") })).toEqual(["2026-04-13", "2026-04-20"]);
   });
 

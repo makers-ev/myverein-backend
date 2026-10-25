@@ -12,6 +12,7 @@ import { events, type EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
 import { AudienceLimitError, resolveClubAudience, summarizeAudience } from "../lib/audience.js";
 import { clubTimezone, composeEventMessage, essentialDiff, eventAudience, locationName, notifyWaitlistPromoted, scheduleEventChanged } from "../lib/event-notify.js";
+import { markOverride, recordDroppedOccurrence } from "../lib/event-series.js";
 import { buildIcs } from "../lib/ics.js";
 import { confirmedWardSeats, promoteWaitingWard } from "../lib/ward-events.js";
 import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
@@ -277,6 +278,7 @@ eventRoutes.patch(
     // Moving only the start past the stored end keeps the duration (the end moves along) instead of leaving an inverted event.
     if (body.endsAt === undefined && newEnd && newEnd.getTime() < newStart.getTime()) newEnd = new Date(newStart.getTime() + (existing.endsAt!.getTime() - existing.startsAt.getTime()));
     assertTimeOrder(newStart, newEnd);
+    if (existing.seriesId && body.calendarId && body.calendarId !== existing.calendarId) throw new ValidationError("An occurrence of a series stays in the calendar of its series");
 
     const [row] = await db
       .update(events)
@@ -289,6 +291,11 @@ eventRoutes.patch(
       .where(eq(events.id, id))
       .returning();
 
+    // Edited on its own: the occurrence becomes an override that a later "all occurrences" edit of the series leaves alone.
+    if (existing.seriesId) {
+      await markOverride(db, existing, row!);
+      row!.isOverride = true;
+    }
     await writeAudit(db, { eventType: "event.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body), ...(notifyFlag === false ? { notify: false } : {}) } });
 
     // Essential change (start, end, location) of an event that has not been cancelled: tell attendees and waitlist (B10).
@@ -318,7 +325,11 @@ eventRoutes.delete("/:id", async (c) => {
   const audienceBefore = existing.cancelledAt === null ? await eventAudience(clubId, id, calendar.departmentId, true) : null;
   const hadRsvps = audienceBefore !== null && (await db.query.eventAttendees.findFirst({ where: eq(eventAttendees.eventId, id) })) !== undefined;
 
-  await db.delete(events).where(eq(events.id, id));
+  await db.transaction(async (tx) => {
+    // A deleted occurrence stays deleted when the horizon is refilled.
+    if (existing.seriesId) await recordDroppedOccurrence(tx, existing);
+    await tx.delete(events).where(eq(events.id, id));
+  });
   await writeAudit(db, { eventType: "event.delete", subjectId: id, payload: { clubId, ...(notifyFlag === "false" ? { notify: false } : {}) } });
   if (hadRsvps) {
     await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: { ...existing, updatedAt: new Date() }, departmentId: calendar.departmentId, cancelled: true, suppress: notifyFlag === "false", audience: audienceBefore });

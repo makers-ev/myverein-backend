@@ -62,8 +62,8 @@ export interface ExpandOptions {
   until: Date;
   /** Skip occurrences starting before this instant (they still count for COUNT). */
   from?: Date;
-  /** `originalStartsAt` instants (ms) that must not be returned (dropped / overridden occurrences). */
-  exceptions?: ReadonlySet<number>;
+  /** Local dates (`YYYY-MM-DD` in the rule's zone) that must not be returned (dropped / overridden occurrences). A rule yields at most one occurrence per day, and matching by date survives a change of the time of day. */
+  exceptions?: ReadonlySet<string>;
   /** Hard cap on returned occurrences (default 1000). */
   limit?: number;
 }
@@ -74,6 +74,8 @@ export interface ExpandResult {
   skippedHolidays: SkippedOccurrence[];
   /** True when the rule has no further occurrences (UNTIL/COUNT reached) rather than the horizon being hit. */
   finished: boolean;
+  /** Rule occurrences considered up to the horizon (before `from`, exceptions and holidays removed anything): the base for COUNT bookkeeping when a series is split. */
+  produced: number;
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -242,7 +244,7 @@ export function expandSeries(rule: SeriesRule, options: ExpandOptions): ExpandRe
     if (occ.startsAt.getTime() > untilMs) break;
     produced++;
     if (occ.startsAt.getTime() < fromMs) continue;
-    if (options.exceptions?.has(occ.originalStartsAt.getTime())) continue;
+    if (options.exceptions?.has(date)) continue;
     const holiday = rule.skipHolidays ? holidayOn(date, rule.state) : null;
     if (holiday) {
       skippedHolidays.push({ originalStartsAt: occ.originalStartsAt, localDate: date, holiday });
@@ -252,5 +254,5 @@ export function expandSeries(rule: SeriesRule, options: ExpandOptions): ExpandRe
     if (occurrences.length >= limit) break;
   }
   if (!finished && rule.count && produced >= rule.count) finished = true;
-  return { occurrences, skippedHolidays, finished };
+  return { occurrences, skippedHolidays, finished, produced };
 }

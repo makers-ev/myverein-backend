@@ -14,6 +14,7 @@ import { NOTIFY_TEMPLATES, renderNotifyEmail, unsubscribeBaseUrl } from "../lib/
 import { MAIL_LANGUAGES } from "../lib/notify/i18n.js";
 import { cleanText } from "../lib/text-policy.js";
 import { isValidTimezone } from "../lib/club-time.js";
+import { GERMAN_STATES } from "../lib/holidays-de.js";
 import { loadClubSettings } from "../lib/club-settings.js";
 import { MAJORITY_TOPICS, assemblyRulesPatchSchema, assemblyRulesSchema, loadAssemblyRules, mergeAssemblyRules, missingAssemblyRules, parseStoredAssemblyRules, type AssemblyRules } from "../lib/assembly-rules.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
@@ -77,6 +78,8 @@ const updateSettingsSchema = z.object({
     .max(64)
     .refine(isValidTimezone, { message: "timezone must be a valid IANA time zone" })
     .optional(),
+  // Federal state for the public holidays that event series can skip (null = nationwide holidays only).
+  state: z.enum(GERMAN_STATES).nullable().optional(),
   reminderEventEnabled: z.boolean().optional(),
   reminderEventLeadHours: z.number().int().min(1).max(168).optional(),
   reminderLoanEnabled: z.boolean().optional(),

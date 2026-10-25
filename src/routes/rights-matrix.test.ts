@@ -52,6 +52,7 @@ import { formSubmissionRoutes } from "./form-submissions.js";
 import { clubMemberRoutes } from "./club-members.js";
 import { clubRegistrationRoutes } from "./club-registrations.js";
 import { departmentRoutes } from "./departments.js";
+import { eventSeriesRoutes } from "./event-series.js";
 import { eventRoutes, icsRoutes } from "./events.js";
 import { healthRoutes } from "./health.js";
 import { internalStatsRoutes } from "./internal-stats.js";
@@ -124,6 +125,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/club-info", "clubInfoRoutes", clubInfoRoutes],
   ["/club-roles", "clubRoleRoutes", clubRoleRoutes],
   ["/calendars", "calendarRoutes", calendarRoutes],
+  ["/event-series", "eventSeriesRoutes", eventSeriesRoutes],
   ["/events", "eventRoutes", eventRoutes],
   ["/events.ics", "icsRoutes", icsRoutes],
   ["/availability", "availabilityRoutes", availabilityRoutes],
@@ -283,6 +285,9 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /calendars": { name: "Kalender" },
   "POST /calendars/:id/visibility": { roleType: "trainer" },
   "POST /events": { calendarId: SOME_ID, title: "Termin", startsAt: "2030-01-01T10:00:00Z" },
+  "POST /event-series": { calendarId: SOME_ID, title: "Training", startDate: "2030-01-07", startTime: "18:00", freq: "weekly" },
+  "POST /event-series/preview": { title: "Training", startDate: "2030-01-07", startTime: "18:00", freq: "weekly" },
+  "PATCH /event-series/:id": { scope: "all", title: "Neu" },
   "POST /meetings": { type: "sonstige", title: "Treffen" },
   "POST /meetings/:id/invitees": { memberId: SOME_ID },
   "PATCH /meetings/:id/attendance": [{ memberId: SOME_ID, present: true }],
