@@ -20,6 +20,7 @@ import { getVisibleCalendarIds } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { loadVisibleEvent } from "../lib/event-access.js";
 import { eventAttendanceRoutes } from "./event-attendance.js";
+import { eventHelperRoutes } from "./event-helpers.js";
 import { eventParticipantRoutes } from "./event-participants.js";
 import { eventRegistrationRoutes } from "./event-registration.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
@@ -413,3 +414,4 @@ icsRoutes.get("/", async (c) => {
 eventRoutes.route("/", eventAttendanceRoutes);
 eventRoutes.route("/", eventRegistrationRoutes);
 eventRoutes.route("/", eventParticipantRoutes);
+eventRoutes.route("/", eventHelperRoutes);
