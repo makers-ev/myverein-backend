@@ -20,6 +20,7 @@ import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
 import { writeAudit } from "../lib/audit.js";
+import { locationBookingRoutes } from "./location-bookings.js";
 
 export const locationRoutes = new Hono<ClubEnv>();
 
@@ -178,6 +179,7 @@ const createLocationSchema = z.object({
   photoUrl: photoUrlRemoved,
   contactPerson: z.string().optional(),
   accessNote: z.string().optional(),
+  bookable: z.boolean().optional(),
 });
 
 locationRoutes.post(
@@ -204,6 +206,7 @@ locationRoutes.post(
           photoKey: body.photoKey,
           contactPerson: body.contactPerson,
           accessNote: body.accessNote,
+          bookable: body.bookable,
         })
         .returning();
       if (body.photoKey) await claimLocationPhoto(tx, clubId, c.get("user").id, created!.id, body.photoKey);
@@ -225,6 +228,7 @@ const updateLocationSchema = z.object({
   photoUrl: photoUrlRemoved,
   contactPerson: z.string().nullable().optional(),
   accessNote: z.string().nullable().optional(),
+  bookable: z.boolean().optional(),
 });
 
 locationRoutes.patch(
@@ -721,3 +725,6 @@ locationRoutes.delete("/:id/links/:linkId", async (c) => {
 
   return c.body(null, 204);
 });
+
+// Wave 12 B19: occupancy plan and bookings of bookable locations (session + club guard come from this router).
+locationRoutes.route("/", locationBookingRoutes);

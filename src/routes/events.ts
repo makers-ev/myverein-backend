@@ -12,6 +12,7 @@ import { locations } from "../db/schema/locations.js";
 import { AudienceLimitError, resolveClubAudience, summarizeAudience } from "../lib/audience.js";
 import { announceEventChange, essentialDiff, eventAudience, eventGuests, notifyPromoted } from "../lib/event-notify.js";
 import { lockEvent } from "../lib/event-registration.js";
+import { conflictsForEvent } from "../lib/location-bookings.js";
 import { promoteWaitlist } from "../lib/event-seats.js";
 import { refillForRead } from "../lib/event-series-refill.js";
 import { markOverride, recordDroppedOccurrence } from "../lib/event-series.js";
@@ -199,7 +200,9 @@ eventRoutes.post(
 
     await writeAudit(db, { eventType: "event.create", subjectId: row.id, payload: { clubId, calendarId: body.calendarId } });
 
-    return c.json({ data: shapeEvent(row) }, 201);
+    // Warning, not a block: another booking or event at a bookable location overlaps.
+    const locationConflicts = await conflictsForEvent(clubId, row, { memberId: c.get("membership").id, roleTypes: roleTypes });
+    return c.json({ data: { ...shapeEvent(row), locationConflicts } }, 201);
   },
 );
 
@@ -276,7 +279,8 @@ eventRoutes.patch(
       await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: row!, departmentId: calendar.departmentId, cancelled: false, suppress: notifyFlag === false });
     }
 
-    return c.json({ data: shapeEvent(row!) });
+    const locationConflicts = await conflictsForEvent(clubId, row!, { memberId: c.get("membership").id, roleTypes });
+    return c.json({ data: { ...shapeEvent(row!), locationConflicts } });
   },
 );
 
