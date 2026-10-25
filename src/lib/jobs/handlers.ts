@@ -10,6 +10,7 @@ import { runFormCleanup } from "../form-sweeper.js";
 import { handleRetentionSweep, registerRetentionTasks, RETENTION_SWEEP_INTERVAL_MS, RETENTION_SWEEP_JOB_TYPE } from "../retention.js";
 import { handleTermNotify, handleTermSweep, TERM_NOTIFY_JOB_TYPE, TERM_SWEEP_INTERVAL_MS, TERM_SWEEP_JOB_TYPE } from "../term-jobs.js";
 import { handleSeriesRefill, SERIES_REFILL_INTERVAL_MS, SERIES_REFILL_JOB_TYPE } from "../event-series-refill.js";
+import { GUEST_SWEEP_INTERVAL_MS, GUEST_SWEEP_JOB_TYPE, sweepUnconfirmedGuests } from "../event-guests.js";
 import { handleHelperReminders, HELPER_REMINDER_INTERVAL_MS, HELPER_REMINDER_JOB_TYPE } from "../helper-reminders.js";
 import { registerNotifyJobs } from "../notify/index.js";
 import { installUnsubscribeProvider } from "../notify/unsubscribe-token.js";
@@ -50,6 +51,9 @@ export function registerAllJobs(): void {
   registerJob(TERM_NOTIFY_JOB_TYPE, handleTermNotify);
   registerRecurringJob({ type: SERIES_REFILL_JOB_TYPE, intervalMs: SERIES_REFILL_INTERVAL_MS }, handleSeriesRefill);
   registerRecurringJob({ type: HELPER_REMINDER_JOB_TYPE, intervalMs: HELPER_REMINDER_INTERVAL_MS }, handleHelperReminders);
+  registerRecurringJob({ type: GUEST_SWEEP_JOB_TYPE, intervalMs: GUEST_SWEEP_INTERVAL_MS }, async () => {
+    await sweepUnconfirmedGuests();
+  });
   registerRetentionTasks();
   registerRecurringJob({ type: RETENTION_SWEEP_JOB_TYPE, intervalMs: RETENTION_SWEEP_INTERVAL_MS }, handleRetentionSweep);
 }

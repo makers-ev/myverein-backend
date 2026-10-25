@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import { and, count, eq, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
@@ -253,4 +253,27 @@ export async function cancelGuest(reg: GuestRegistration): Promise<Promoted[]> {
 /** Own answers of a guest registration (for the edit form of the management page). */
 export async function guestAnswers(row: EventAttendeeRow): Promise<Record<string, unknown>> {
   return currentAnswers(db as never, row);
+}
+
+export const GUEST_SWEEP_JOB_TYPE = "event_guest_sweep";
+export const GUEST_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Deletes registrations of guests who never confirmed their address once the 48 hours are over (data minimisation: an unconfirmed
+ * sign-up is not a registration). This runs independently of the retention dry-run switch; confirmed guests are handled by the
+ * retention category `event_guests`.
+ */
+export async function sweepUnconfirmedGuests(now: Date = new Date()): Promise<number> {
+  const due = await db
+    .select({ id: eventAttendees.id, submission: eventAttendees.formSubmissionId })
+    .from(eventAttendees)
+    .where(and(isNotNull(eventAttendees.guestEmail), isNull(eventAttendees.guestConfirmedAt), isNotNull(eventAttendees.guestDeleteAfter), lt(eventAttendees.guestDeleteAfter, now)))
+    .limit(500);
+  if (due.length === 0) return 0;
+  await db.transaction(async (tx) => {
+    await tx.delete(eventAttendees).where(inArray(eventAttendees.id, due.map((d) => d.id)));
+    const submissions = due.flatMap((d) => (d.submission ? [d.submission] : []));
+    if (submissions.length > 0) await tx.delete(formSubmissions).where(inArray(formSubmissions.id, submissions));
+  });
+  return due.length;
 }

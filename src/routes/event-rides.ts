@@ -10,7 +10,7 @@ import { writeAudit } from "../lib/audit.js";
 import { isUuid } from "../lib/club-members.js";
 import { clubMailLanguage } from "../lib/club-settings.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
-import { loadVisibleEvent, ownClubMemberRow } from "../lib/event-access.js";
+import { loadVisibleEvent, mayManageEvent, ownClubMemberRow } from "../lib/event-access.js";
 import { resolveActingMember } from "../lib/event-actor.js";
 import { notifyHelpers } from "../lib/event-helpers.js";
 import { clubTimezone, formatWhen } from "../lib/event-notify.js";
@@ -49,11 +49,12 @@ eventRideRoutes.get("/:id/rides", async (c) => {
   const clubId = c.get("clubId");
   const membership = c.get("membership");
   const roles = c.get("clubRoleTypes");
-  const { event } = await loadVisibleEvent(c.req.param("id"), clubId, membership.id, roles);
+  const { event, calendar } = await loadVisibleEvent(c.req.param("id"), clubId, membership.id, roles);
   const own = await ownClubMemberRow(clubId, membership.id);
   const wards = await activeWardLinks(c.get("user").id, { clubId });
   const myIds = new Set<string>([...(own ? [own.id] : []), ...wards.map((w) => w.ward.id)]);
-  const organiser = roles.some((r) => ["vorsitz", "stellv_vorsitz", "schriftfuehrer", "abteilungsleitung"].includes(r));
+  // Organisers of this event (helpers:write within the event scope) may see the places; a department lead only for the own departments.
+  const organiser = await mayManageEvent("helpers:write", roles, membership.id, calendar);
   const showNames = membership.role !== "guest";
 
   const rides = await db

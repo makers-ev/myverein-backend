@@ -45,6 +45,8 @@ export interface EventFixture {
   addEvent: (values: Partial<typeof events.$inferInsert> & { calendarId: string }) => Promise<typeof events.$inferSelect>;
   addAccountless: (name: string, opts?: { birthDate?: string; departmentId?: string }) => Promise<string>;
   addAccount: (label: string) => Promise<TestUser>;
+  /** An external guest (`member.role = guest`, e.g. a guardian account without club member row of its own). */
+  addGuest: (label: string) => Promise<TestUser>;
   cleanup: () => Promise<void>;
 }
 
@@ -141,6 +143,12 @@ export async function createEventFixture(label: string, extraRoutes: Array<[stri
       return cm!.id;
     },
     addAccount: (name) => joined(clubId, name),
+    addGuest: async (name) => {
+      const guest = await joined(clubId, name, "guest");
+      // A guardian account has no club member row of its own.
+      await db.delete(clubMembers).where(eq(clubMembers.id, guest.clubMemberId));
+      return { ...guest, clubMemberId: "" };
+    },
     cleanup: async () => {
       await db.delete(organization).where(eq(organization.id, clubId));
       await db.delete(organization).where(eq(organization.id, otherClubId));
