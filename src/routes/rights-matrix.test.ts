@@ -41,6 +41,7 @@ import { dpaRoutes } from "./dpa.js";
 import { clubNoticeBySlugRoutes, clubPrivacyNoticeRoutes } from "./club-privacy-notices.js";
 import { retentionPolicyRoutes } from "./retention-policies.js";
 import { adminStatsRoutes } from "./admin-stats.js";
+import { attendanceReportRoutes } from "./attendance-report.js";
 import { availabilityRoutes } from "./availability.js";
 import { calendarRoutes } from "./calendars.js";
 import { clubApplicationRoutes } from "./club-applications.js";
@@ -52,7 +53,10 @@ import { formSubmissionRoutes } from "./form-submissions.js";
 import { clubMemberRoutes } from "./club-members.js";
 import { clubRegistrationRoutes } from "./club-registrations.js";
 import { departmentRoutes } from "./departments.js";
+import { calendarFeedRoutes, feedRoutes } from "./calendar-feeds.js";
+import { eventSeriesRoutes } from "./event-series.js";
 import { eventRoutes, icsRoutes } from "./events.js";
+import { publicEventRoutes } from "./public-events.js";
 import { healthRoutes } from "./health.js";
 import { internalStatsRoutes } from "./internal-stats.js";
 import { inventoryItemRoutes } from "./inventory-items.js";
@@ -65,6 +69,7 @@ import { meetingRoutes } from "./meetings.js";
 import { myClubRoutes } from "./my-clubs.js";
 import { notificationRoutes } from "./notifications.js";
 import { pushTokenRoutes } from "./push-tokens.js";
+import { rateCardRoutes, timeEntryRoutes, timeReportRoutes } from "./time-tracking.js";
 
 /**
  * Rights matrix (Wave 7 B12 part, deny-by-default): EVERY registered writing route (POST/PATCH/PUT/DELETE)
@@ -124,8 +129,16 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/club-info", "clubInfoRoutes", clubInfoRoutes],
   ["/club-roles", "clubRoleRoutes", clubRoleRoutes],
   ["/calendars", "calendarRoutes", calendarRoutes],
+  ["/calendar-feeds", "calendarFeedRoutes", calendarFeedRoutes],
+  ["/feeds", "feedRoutes", feedRoutes],
+  ["/event-series", "eventSeriesRoutes", eventSeriesRoutes],
   ["/events", "eventRoutes", eventRoutes],
+  ["/attendance", "attendanceReportRoutes", attendanceReportRoutes],
   ["/events.ics", "icsRoutes", icsRoutes],
+  ["/public", "publicEventRoutes", publicEventRoutes],
+  ["/time-entries", "timeEntryRoutes", timeEntryRoutes],
+  ["/rate-cards", "rateCardRoutes", rateCardRoutes],
+  ["/time-report", "timeReportRoutes", timeReportRoutes],
   ["/availability", "availabilityRoutes", availabilityRoutes],
   ["/meetings", "meetingRoutes", meetingRoutes],
   ["/ballots", "ballotRoutes", ballotRoutes],
@@ -158,6 +171,25 @@ const SELF_SERVICE: Record<string, string> = {
   "DELETE /notifications/:id": "own notifications",
   "POST /events/:id/rsvp": "own RSVP",
   "DELETE /events/:id/rsvp": "own RSVP",
+  "POST /public/events/:token/registrations": "public guest registration: no session, the secret event link is the credential (unknown tokens are 404, rate limited per IP / token / address, honeypot)",
+  "POST /public/registrations/confirm": "public double opt-in: no session, the confirmation code from the mail is the credential (unknown codes are 404)",
+  "PATCH /public/registrations/:guestToken": "public: a guest changes the own registration with the management link (hash lookup; unknown tokens are 404)",
+  "DELETE /public/registrations/:guestToken": "public: a guest cancels the own registration with the management link (unknown tokens are 404)",
+  "POST /events/:id/helpers/shifts/:shiftId/signup": "helper sign-up: the target is the caller, a ward with a live guardian link, or - with helpers:write inside the event scope - any member; minors are never entered by themselves (403); foreign events and shifts are 404",
+  "DELETE /events/:id/helpers/shifts/:shiftId/signup": "helper withdrawal: same target rules as the sign-up (only that person's own row is removed)",
+  "POST /events/:id/helpers/shifts/:shiftId/swaps": "hand over the own shift (the signup of the resolved target only; 404 without own sign-up)",
+  "POST /events/:id/helpers/swaps/:swapId/accept": "take over a shift as the resolved target (named person or anybody for an open request); one winner under lock",
+  "POST /events/:id/helpers/swaps/:swapId/decline": "the named person declines (only the addressee, others 409)",
+  "DELETE /events/:id/helpers/swaps/:swapId": "withdraw the own swap request (the owner of the signup, a guardian or an organiser)",
+  "POST /events/:id/rides": "offer a ride (the driver is the caller or, for an adult ward / as organiser with calendars:write, somebody else; minors never drive; unknown events are 404)",
+  "PATCH /events/:id/rides/:rideId": "the driver (or their guardian / an organiser) changes the own ride; everybody else gets 403, unknown rides 404",
+  "DELETE /events/:id/rides/:rideId": "the driver (or their guardian / an organiser) cancels the own ride",
+  "POST /events/:id/rides/:rideId/requests": "ask for a seat as the caller or a ward (live guardian link); minors only through their guardians",
+  "PATCH /events/:id/rides/:rideId/requests/:requestId": "the driver decides about a request (seats counted under a lock on the ride); others 403",
+  "DELETE /events/:id/rides/:rideId/requests/:requestId": "the passenger (or guardian) withdraws, or the driver removes a passenger; others 403",
+  "POST /calendar-feeds": "own subscription link (bound to the caller's membership; external guests get 403)",
+  "DELETE /calendar-feeds/:id": "revoking the own subscription link (foreign ids are 404)",
+  "POST /calendar-feeds/:id/rotate": "rotating the own subscription link (foreign ids are 404)",
   "POST /availability/slots": "own availability",
   "PATCH /availability/slots/:id": "own availability (ownership checked)",
   "DELETE /availability/slots/:id": "own availability (ownership checked)",
@@ -283,6 +315,9 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /calendars": { name: "Kalender" },
   "POST /calendars/:id/visibility": { roleType: "trainer" },
   "POST /events": { calendarId: SOME_ID, title: "Termin", startsAt: "2030-01-01T10:00:00Z" },
+  "POST /event-series": { calendarId: SOME_ID, title: "Training", startDate: "2030-01-07", startTime: "18:00", freq: "weekly" },
+  "POST /event-series/preview": { title: "Training", startDate: "2030-01-07", startTime: "18:00", freq: "weekly" },
+  "PATCH /event-series/:id": { scope: "all", title: "Neu" },
   "POST /meetings": { type: "sonstige", title: "Treffen" },
   "POST /meetings/:id/invitees": { memberId: SOME_ID },
   "PATCH /meetings/:id/attendance": [{ memberId: SOME_ID, present: true }],

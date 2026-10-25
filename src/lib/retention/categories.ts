@@ -6,6 +6,7 @@ import { auditLog } from "../../db/schema/audit-log.js";
 import { clubApplications } from "../../db/schema/club-applications.js";
 import { clubRegistrationDocuments, clubRegistrations } from "../../db/schema/club-registrations.js";
 import { clubMembers } from "../../db/schema/club-members.js";
+import { eventAttendees } from "../../db/schema/event-attendees.js";
 import { formSubmissions } from "../../db/schema/forms.js";
 import { writeAudit } from "../audit.js";
 import { scrubApplicationCopies } from "../form-retention.js";
@@ -244,6 +245,57 @@ export async function consentProofs(ctx: CategoryContext): Promise<CategoryResul
   return { scanned: n, affected: n };
 }
 
+/** Moment an event is over: its end, else its start. */
+const eventOver = sql`coalesce(e.ends_at, e.starts_at)`;
+
+/**
+ * Attendance lists (sheets with entries, supervisors and the log of corrections) `days` after the event. A list that holds an
+ * entry of a member under legal hold stays complete.
+ */
+export async function eventAttendanceOld(ctx: CategoryContext): Promise<CategoryResult> {
+  const cutoff = cutoffTime(ctx);
+  const due = sql`
+    SELECT s.id FROM event_attendance_sheets s
+    JOIN events e ON e.id = s.event_id
+    JOIN calendars cal ON cal.id = e.calendar_id
+    WHERE cal.club_id = ${ctx.clubId} AND ${eventOver} < ${cutoff}
+      AND NOT EXISTS (SELECT 1 FROM event_attendance a JOIN club_members hm ON hm.id = a.club_member_id WHERE a.sheet_id = s.id AND hm.legal_hold_at IS NOT NULL)`;
+  if (ctx.dryRun) {
+    const result = await db.execute(sql`SELECT count(*)::int AS n FROM (${due}) due`);
+    return { scanned: Number((result.rows[0] as { n: number } | undefined)?.n ?? 0), affected: 0 };
+  }
+  const result = await db.execute(sql`DELETE FROM event_attendance_sheets WHERE id IN (${due} LIMIT ${BATCH})`);
+  const n = result.rowCount ?? 0;
+  return { scanned: n, affected: n };
+}
+
+/**
+ * Registrations of guests without account (public link): the row, its contact data and the linked form answers go when the
+ * deletion date set at registration (`guest_delete_after`: event end + the days chosen for the event; 48 hours for an
+ * unconfirmed double opt-in) has passed, and in any case `days` after the event as a backstop.
+ */
+export async function eventGuestsOld(ctx: CategoryContext): Promise<CategoryResult> {
+  const cutoff = cutoffTime(ctx);
+  const due = sql`
+    SELECT ea.id, ea.form_submission_id FROM event_attendees ea
+    JOIN events e ON e.id = ea.event_id
+    JOIN calendars cal ON cal.id = e.calendar_id
+    WHERE cal.club_id = ${ctx.clubId} AND ea.guest_email IS NOT NULL
+      AND ((ea.guest_delete_after IS NOT NULL AND ea.guest_delete_after < ${ctx.now}) OR ${eventOver} < ${cutoff})`;
+  if (ctx.dryRun) {
+    const result = await db.execute(sql`SELECT count(*)::int AS n FROM (${due}) due`);
+    return { scanned: Number((result.rows[0] as { n: number } | undefined)?.n ?? 0), affected: 0 };
+  }
+  const rows = (await db.execute(sql`SELECT d.id, d.form_submission_id FROM (${due} LIMIT ${BATCH}) d`)).rows as Array<{ id: string; form_submission_id: string | null }>;
+  if (rows.length === 0) return { scanned: 0, affected: 0 };
+  await db.transaction(async (tx) => {
+    await tx.delete(eventAttendees).where(inArray(eventAttendees.id, rows.map((r) => r.id)));
+    const submissions = rows.flatMap((r) => (r.form_submission_id ? [r.form_submission_id] : []));
+    if (submissions.length > 0) await tx.delete(formSubmissions).where(inArray(formSubmissions.id, submissions));
+  });
+  return { scanned: rows.length, affected: rows.length };
+}
+
 export const categoryRunners = {
   registration_proofs_approved: registrationProofs("approved"),
   registration_proofs_rejected: registrationProofs("rejected"),
@@ -256,4 +308,6 @@ export const categoryRunners = {
   emergency_contacts_left: emergencyContactsLeft,
   absence_reports: absenceReportsOld,
   consent_proofs: consentProofs,
+  event_attendance: eventAttendanceOld,
+  event_guests: eventGuestsOld,
 } as const satisfies Record<string, (ctx: CategoryContext) => Promise<CategoryResult>>;

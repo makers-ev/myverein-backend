@@ -127,6 +127,14 @@ describe("push for reminders", () => {
     expect(pushDataFor("reminder.event", "e-1#2030-01-01", null, clubId, false)).toMatchObject({ type: "event", eventId: "e-1" });
     expect(genericPushText("reminder.loan_overdue", "reminder")).toBe("Rückgabe überfällig");
   });
+
+  it("helper.* and ride.* deep-link to the event via the content event id, not the shift/ride ref", () => {
+    for (const key of ["helper.reminder", "helper.shift_changed", "helper.swap_accepted", "helper.shift_open", "ride.requested"]) {
+      expect(pushDataFor(key, "shift-1#remind24", null, clubId, false, null, "e-7")).toEqual({ type: "event", urgent: false, clubId, eventId: "e-7" });
+    }
+    // Without an event id (rows written before this fix) the push still opens the inbox.
+    expect(pushDataFor("helper.reminder", "shift-1#remind24", null, clubId, false)).toEqual({ type: "message", urgent: false, clubId });
+  });
 });
 
 describe("push deep links of the general assembly", () => {

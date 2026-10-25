@@ -40,6 +40,8 @@ export interface NotifyContent {
   lang?: MailLanguage;
   /** The content carries a secret (e.g. an invite link): it is wiped from the delivery row once the mail is sent or failed for good. */
   sensitive?: boolean;
+  /** Event this message is about (ids only); lets the push deep link open the event when `refId` is a shift/ride/swap id. */
+  eventId?: string;
 }
 
 /** An explicitly addressed recipient (e.g. the applicant of a decision mail, who may have no club_members row). */
@@ -101,6 +103,7 @@ export interface DeliveryContent {
   sensitive?: boolean;
   /** Language of the chrome around the text (absent = `de`, rows written before G12). */
   lang?: MailLanguage;
+  eventId?: string;
 }
 
 export const EMAIL_JOB_TYPE = "notify.email";

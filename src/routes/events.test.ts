@@ -181,6 +181,46 @@ describe("events scoping and RSVP", () => {
     expect(res.status).toBe(404);
   });
 
+  async function createEvent(body: Record<string, unknown>) {
+    const res = await app.request(`/events?clubId=${clubAId}`, { method: "POST", headers: { cookie: cookieBoard, "content-type": "application/json" }, body: JSON.stringify({ calendarId, ...body }) });
+    return { res, event: ((await res.clone().json()) as { data?: { id: string } }).data };
+  }
+
+  it("range query returns a multi-day event that started before `from` and still runs at `from`", async () => {
+    const { event } = await createEvent({ title: "Lager", startsAt: "2031-03-01T08:00:00.000Z", endsAt: "2031-03-05T12:00:00.000Z" });
+    const { event: before } = await createEvent({ title: "Vorbei", startsAt: "2031-02-20T08:00:00.000Z", endsAt: "2031-02-21T08:00:00.000Z" });
+    const { event: single } = await createEvent({ title: "Ohne Ende", startsAt: "2031-03-03T08:00:00.000Z" });
+    const res = await app.request(`/events?clubId=${clubAId}&from=2031-03-03T00:00:00.000Z&to=2031-03-04T00:00:00.000Z`, { headers: { cookie: cookieMember1 } });
+    const ids = ((await res.json()) as { data: { id: string }[] }).data.map((e) => e.id);
+    expect(ids).toContain(event!.id);
+    expect(ids).toContain(single!.id);
+    expect(ids).not.toContain(before!.id);
+  });
+
+  it("rejects endsAt before startsAt on create and update, accepts the all-day flag", async () => {
+    const bad = await createEvent({ title: "Rueckwaerts", startsAt: "2031-04-02T08:00:00.000Z", endsAt: "2031-04-01T08:00:00.000Z" });
+    expect(bad.res.status).toBe(422);
+    const { res, event } = await createEvent({ title: "Ganztags", startsAt: "2031-04-01T00:00:00.000Z", endsAt: "2031-04-01T23:59:00.000Z", allDay: true });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { data: { allDay: boolean } }).data.allDay).toBe(true);
+    const patch = await app.request(`/events/${event!.id}?clubId=${clubAId}`, { method: "PATCH", headers: { cookie: cookieBoard, "content-type": "application/json" }, body: JSON.stringify({ endsAt: "2031-03-30T00:00:00.000Z" }) });
+    expect(patch.status).toBe(422);
+  });
+
+  it("GET /events and /events/:id carry myRsvp, attendeeCount and waitlistCount of the caller", async () => {
+    const { event } = await createEvent({ title: "Mit Zaehlern", startsAt: "2031-05-01T08:00:00.000Z", capacity: 1 });
+    await app.request(`/events/${event!.id}/rsvp?clubId=${clubAId}`, { method: "POST", headers: { cookie: cookieMember1 } });
+    await app.request(`/events/${event!.id}/rsvp?clubId=${clubAId}`, { method: "POST", headers: { cookie: cookieMember2 } });
+    type Shape = { id: string; myRsvp: string | null; attendeeCount: number; waitlistCount: number };
+
+    const one = (await (await app.request(`/events/${event!.id}?clubId=${clubAId}`, { headers: { cookie: cookieMember2 } })).json()) as { data: Shape };
+    expect(one.data).toMatchObject({ myRsvp: "warteliste", attendeeCount: 1, waitlistCount: 1 });
+    const list = (await (await app.request(`/events?clubId=${clubAId}&from=2031-05-01T00:00:00.000Z&to=2031-05-02T00:00:00.000Z`, { headers: { cookie: cookieMember1 } })).json()) as { data: Shape[] };
+    expect(list.data.find((e) => e.id === event!.id)).toMatchObject({ myRsvp: "angemeldet", attendeeCount: 1, waitlistCount: 1 });
+    const board = (await (await app.request(`/events/${event!.id}?clubId=${clubAId}`, { headers: { cookie: cookieBoard } })).json()) as { data: Shape };
+    expect(board.data.myRsvp).toBeNull();
+  });
+
   it("GET /events.ics is session-gated and returns a VCALENDAR body", async () => {
     const unauth = await app.request(`/events.ics?clubId=${clubAId}`);
     expect(unauth.status).toBe(401);

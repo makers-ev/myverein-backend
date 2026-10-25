@@ -4,13 +4,9 @@ import { and, eq } from "drizzle-orm";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { clubMembers } from "../db/schema/club-members.js";
-import { clubRoles } from "../db/schema/club-roles.js";
 import { auditContext } from "../lib/audit.js";
-import { suspendedRoleTypes } from "../lib/term-status.js";
-import { IMPLICIT_ROLE_TYPE } from "../lib/club-permissions.js";
+import { resolveClubRoleTypes } from "../lib/club-access.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../lib/errors.js";
-import { effectiveStatus, isLeftStatus, todayBerlin } from "../lib/member-lifecycle.js";
 import { dpaGate } from "./dpa-gate.js";
 import type { SessionEnv } from "./session-guard.js";
 
@@ -55,30 +51,15 @@ export const clubGuard = createMiddleware<ClubEnv>(async (c: Context, next: Next
     throw new NotFoundError("Club not found");
   }
 
-  const clubMember = await db.query.clubMembers.findFirst({
-    where: eq(clubMembers.memberId, membership.id),
-    columns: { status: true, leftAt: true },
-  });
-  if (clubMember && isLeftStatus(effectiveStatus(clubMember, todayBerlin()))) {
+  const effective = await resolveClubRoleTypes(membership, clubId);
+  if (effective === null) {
     throw new NotFoundError("Club not found");
   }
-
-  const roleRows = await db.query.clubRoles.findMany({
-    where: eq(clubRoles.memberId, membership.id),
-  });
 
   c.set("clubId", clubId);
   const auditStore = auditContext.getStore();
   if (auditStore) auditStore.clubId = clubId;
   c.set("membership", membership);
-  // The implicit base role `mitglied` is added for every account member except
-  // external guests (guardians etc.); it is never stored in club_roles.
-  const roleTypes = new Set(roleRows.map((row) => row.roleType));
-  roleTypes.delete(IMPLICIT_ROLE_TYPE);
-  // Wave 11 B8: with `term_expiry_effect = suspend_permissions` a role whose term has run out grants nothing any more.
-  for (const suspended of await suspendedRoleTypes(clubId, roleRows, todayBerlin())) roleTypes.delete(suspended);
-  const effective = [...roleTypes];
-  if (membership.role !== "guest") effective.unshift(IMPLICIT_ROLE_TYPE);
   c.set("clubRoleTypes", effective);
 
   // Wave 10 B10: no writing while the club has not accepted the processor agreement (DPA_REQUIRED, grace period).

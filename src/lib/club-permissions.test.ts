@@ -80,7 +80,7 @@ describe("announcements permissions (Wave 9 B7)", () => {
   it("announcements:write_department is held by abteilungsleitung and trainer only (scope comes from club_roles.department_id)", () => {
     for (const role of ["abteilungsleitung", "trainer"]) expect(hasClubPermission([role], "announcements:write_department")).toBe(true);
     for (const role of ["mitglied", "vorsitz", "kassenwart", "beisitzer", "erziehungsberechtigt"]) expect(hasClubPermission([role], "announcements:write_department")).toBe(false);
-    expect(clubPermissionsFor(["trainer"]).sort()).toEqual(["absences:read", "announcements:write_department"]);
+    expect(clubPermissionsFor(["trainer"]).sort()).toEqual(["absences:read", "announcements:write_department", "attendance:read", "attendance:write", "registrations:read"]);
   });
 });
 
@@ -109,5 +109,36 @@ describe("assembly permission (Wave 11 B1)", () => {
     for (const role of CLUB_ROLE_TYPES.filter((r) => !["vorsitz", "stellv_vorsitz", "schriftfuehrer"].includes(r))) expect(hasClubPermission([role], "assembly:manage")).toBe(false);
     expect(hasClubPermission([], "assembly:manage")).toBe(false);
     expect(clubPermissionsFor(["schriftfuehrer"])).toContain("assembly:manage");
+  });
+});
+
+describe("Wave 12 permissions (attendance, registrations, helpers, time)", () => {
+  it("grants the whole set to vorsitz and stellv_vorsitz", () => {
+    for (const role of ["vorsitz", "stellv_vorsitz"]) {
+      for (const p of ["attendance:write", "attendance:read", "registrations:read", "helpers:write", "time:write", "time:read_rates"] as const) expect(hasClubPermission([role], p)).toBe(true);
+    }
+  });
+
+  it("gives trainer attendance and the participant list, but no helper plan, no time confirmation and no rates", () => {
+    for (const p of ["attendance:write", "attendance:read", "registrations:read"] as const) expect(hasClubPermission(["trainer"], p)).toBe(true);
+    for (const p of ["helpers:write", "time:write", "time:read_rates"] as const) expect(hasClubPermission(["trainer"], p)).toBe(false);
+  });
+
+  it("gives abteilungsleitung attendance, registrations, helpers and time confirmation, but no rates", () => {
+    for (const p of ["attendance:write", "attendance:read", "registrations:read", "helpers:write", "time:write"] as const) expect(hasClubPermission(["abteilungsleitung"], p)).toBe(true);
+    expect(hasClubPermission(["abteilungsleitung"], "time:read_rates")).toBe(false);
+  });
+
+  it("gives schriftfuehrer the helper plan and kassenwart the rates only", () => {
+    expect(hasClubPermission(["schriftfuehrer"], "helpers:write")).toBe(true);
+    expect(hasClubPermission(["schriftfuehrer"], "attendance:write")).toBe(false);
+    expect(hasClubPermission(["kassenwart"], "time:read_rates")).toBe(true);
+    expect(hasClubPermission(["kassenwart"], "time:write")).toBe(false);
+  });
+
+  it("denies all of them to mitglied, beisitzer and erziehungsberechtigt", () => {
+    for (const role of ["mitglied", "beisitzer", "erziehungsberechtigt"]) {
+      for (const p of ["attendance:write", "attendance:read", "registrations:read", "helpers:write", "time:write", "time:read_rates"] as const) expect(hasClubPermission([role], p)).toBe(false);
+    }
   });
 });

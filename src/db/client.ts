@@ -26,6 +26,12 @@ import * as clubMembershipsSchema from "./schema/club-memberships.js";
 import * as clubRolesSchema from "./schema/club-roles.js";
 import * as departmentsSchema from "./schema/departments.js";
 import * as eventAttendeesSchema from "./schema/event-attendees.js";
+import * as calendarFeedTokensSchema from "./schema/calendar-feed-tokens.js";
+import * as eventAttendanceSchema from "./schema/event-attendance.js";
+import * as eventExtrasSchema from "./schema/event-extras.js";
+import * as eventHelpersSchema from "./schema/event-helpers.js";
+import * as eventSeriesExceptionsSchema from "./schema/event-series-exceptions.js";
+import * as eventSeriesSchema from "./schema/event-series.js";
 import * as eventsSchema from "./schema/events.js";
 import * as formsSchema from "./schema/forms.js";
 import * as guardianLinksSchema from "./schema/guardian-links.js";
@@ -83,6 +89,12 @@ export const schema = {
   ...calendarVisibilitySchema,
   ...eventsSchema,
   ...eventAttendeesSchema,
+  ...eventSeriesSchema,
+  ...eventSeriesExceptionsSchema,
+  ...eventAttendanceSchema,
+  ...eventHelpersSchema,
+  ...eventExtrasSchema,
+  ...calendarFeedTokensSchema,
   ...availabilitySchema,
   ...mediaFilesSchema,
   ...meetingsSchema,

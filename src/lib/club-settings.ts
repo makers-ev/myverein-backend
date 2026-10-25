@@ -17,6 +17,8 @@ export interface EffectiveClubSettings {
   textBlocks: ClubTextBlock[];
   /** IANA zone of the club's time-based logic (reminders, sweeps). */
   timezone: string;
+  /** German federal state code (e.g. "BY") for the public holidays of event series; null = nationwide holidays only. */
+  state: string | null;
   reminderEventEnabled: boolean;
   reminderEventLeadHours: number;
   reminderLoanEnabled: boolean;
@@ -63,6 +65,7 @@ export async function loadClubSettings(executor: DbExecutor, clubId: string): Pr
     replyTo: row?.replyTo ?? null,
     textBlocks: row?.textBlocks ?? [],
     timezone: row?.timezone ?? DEFAULT_CLUB_TIMEZONE,
+    state: row?.state ?? null,
     reminderEventEnabled: row?.reminderEventEnabled ?? true,
     reminderEventLeadHours: row?.reminderEventLeadHours ?? 24,
     reminderLoanEnabled: row?.reminderLoanEnabled ?? true,

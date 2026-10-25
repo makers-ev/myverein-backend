@@ -124,6 +124,7 @@ describe("exit workflow (B6)", () => {
         memberNumberPrefix: null,
         allowSelfLoans: true,
         timezone: "Europe/Berlin",
+        state: null,
         reminderEventEnabled: true,
         reminderEventLeadHours: 24,
         reminderLoanEnabled: true,

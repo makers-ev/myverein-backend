@@ -169,6 +169,7 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
       lang,
       ...(input.content.rendered ? { rendered: input.content.rendered } : {}),
       ...(input.content.sensitive ? { sensitive: true } : {}),
+      ...(input.content.eventId ? { eventId: input.content.eventId } : {}),
     } satisfies DeliveryContent,
   });
   const result: NotifyResult = { recipients: targets.length, inApp: 0, queuedEmail: 0, queuedPush: 0, sentEmail: 0, skippedOptout: 0, skippedNoAddress: 0, alreadyDelivered: 0 };

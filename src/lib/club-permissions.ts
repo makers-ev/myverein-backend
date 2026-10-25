@@ -58,7 +58,13 @@ export type ClubPermission =
   | "privacy:read" // Wave 10: audit log (who saw/changed what), consent overview, data subject requests, retention runs of the club
   | "privacy:manage" // Wave 10: consent purposes/texts, paper proofs, privacy notice, retention overrides, export/erasure of a member
   | "assembly:manage" // Wave 11: general assembly -- statute parameters, invitations, voting roll, attendance, ballots, minutes
-  | "absences:read"; // Wave 10: absence reports; trainer/abteilungsleitung only for the members of their OWN departments (scope in the route)
+  | "absences:read" // Wave 10: absence reports; trainer/abteilungsleitung only for the members of their OWN departments (scope in the route)
+  | "attendance:write" // Wave 12: record/close the attendance list of an event; trainer/abteilungsleitung only for events of calendars of their OWN departments
+  | "attendance:read" // Wave 12: read attendance lists and the attendance report (same department scope)
+  | "registrations:read" // Wave 12: participant list (incl. form answers) of an event; trainer/abteilungsleitung only for their OWN departments
+  | "helpers:write" // Wave 12: helper plan (stations, shifts, entering other people); abteilungsleitung only for events of their OWN departments
+  | "time:write" // Wave 12 (P2): confirm/reject time entries of trainers; abteilungsleitung only for the members of their OWN departments
+  | "time:read_rates"; // Wave 12 (P2): hourly rates and the time report with amounts (confidential)
 
 /**
  * Which permissions each role_type grants. A membership can hold several
@@ -93,6 +99,12 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "privacy:manage",
     "absences:read",
     "assembly:manage",
+    "attendance:write",
+    "attendance:read",
+    "registrations:read",
+    "helpers:write",
+    "time:write",
+    "time:read_rates",
   ],
   stellv_vorsitz: [
     "members:write",
@@ -113,11 +125,17 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "privacy:manage",
     "absences:read",
     "assembly:manage",
+    "attendance:write",
+    "attendance:read",
+    "registrations:read",
+    "helpers:write",
+    "time:write",
+    "time:read_rates",
   ],
-  kassenwart: ["members:read_sensitive", "club_stats:read"],
+  kassenwart: ["members:read_sensitive", "club_stats:read", "time:read_rates"],
   // A schriftfuehrer's real-world job in a German Verein is literally running
   // meeting agendas/Protokolle, so meetings:write is a natural fit here.
-  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write", "announcements:write", "assembly:manage"],
+  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write", "announcements:write", "assembly:manage", "helpers:write"],
   // Beisitzer sit on the board, so they may read Vorstandssitzungen and the club KPIs (but write nothing).
   beisitzer: ["meetings:read_board", "club_stats:read"],
   // Also calendars:write/locations:write/inventory:write, on top of
@@ -126,9 +144,9 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
   // operational-need reasoning as members:read_sensitive above). Note this
   // is club-wide, not scoped to just their own department -- same shape as
   // their existing departments:write (Wave 1 precedent), not a new gap.
-  abteilungsleitung: ["departments:write", "calendars:write", "locations:write", "inventory:write", "locations:read_access", "announcements:write_department", "absences:read"],
+  abteilungsleitung: ["departments:write", "calendars:write", "locations:write", "inventory:write", "locations:read_access", "announcements:write_department", "absences:read", "attendance:write", "attendance:read", "registrations:read", "helpers:write", "time:write"],
   // Trainers may inform their own departments (never club-wide, never urgent); the scope comes from club_roles.department_id.
-  trainer: ["announcements:write_department", "absences:read"],
+  trainer: ["announcements:write_department", "absences:read", "attendance:write", "attendance:read", "registrations:read"],
   erziehungsberechtigt: [],
 };
 

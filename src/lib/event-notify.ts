@@ -1,10 +1,13 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import type { AnnouncementAudience } from "../db/schema/communication.js";
-import { eventAttendees } from "../db/schema/event-attendees.js";
+import { wardEventResponses } from "../db/schema/absences.js";
+import { helperShifts, helperSignups, helperStations } from "../db/schema/event-helpers.js";
+import { eventAttendees, type EventAttendeeRow } from "../db/schema/event-attendees.js";
+import type { Promoted } from "./event-seats.js";
 import type { EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
 import { meetingInvitees, type MeetingInviteeRow, type MeetingRow } from "../db/schema/meetings.js";
@@ -96,10 +99,18 @@ export async function clubMemberIdsOf(clubId: string, accountMemberIds: string[]
  */
 export async function eventAudience(clubId: string, eventId: string, departmentId: string | null, cancelled: boolean): Promise<AnnouncementAudience | null> {
   const rows = await db
-    .select({ memberId: eventAttendees.memberId })
+    .select({ memberId: eventAttendees.memberId, clubMemberId: eventAttendees.clubMemberId })
     .from(eventAttendees)
     .where(and(eq(eventAttendees.eventId, eventId), inArray(eventAttendees.status, ["angemeldet", "warteliste"])));
-  const memberIds = await clubMemberIdsOf(clubId, rows.map((r) => r.memberId));
+  // Account RSVPs resolve to their club member; registrations of members without account already carry the club member id.
+  // The helpers of the event are told about changes as well (a cancelled event frees them).
+  const helpers = await db
+    .select({ id: helperSignups.clubMemberId })
+    .from(helperSignups)
+    .innerJoin(helperShifts, eq(helperShifts.id, helperSignups.shiftId))
+    .innerJoin(helperStations, eq(helperStations.id, helperShifts.stationId))
+    .where(eq(helperStations.eventId, eventId));
+  const memberIds = [...new Set([...(await clubMemberIdsOf(clubId, rows.flatMap((r) => (r.memberId ? [r.memberId] : [])))), ...rows.flatMap((r) => (r.clubMemberId ? [r.clubMemberId] : [])), ...helpers.map((h) => h.id)])];
   const departmentIds = cancelled && departmentId ? [departmentId] : [];
   if (memberIds.length === 0 && departmentIds.length === 0) return null;
   // Guardians are told about every change: the child's attendance is also the parent's schedule.
@@ -221,6 +232,110 @@ export async function notifyWaitlistPromoted(args: { clubId: string; event: Pick
   }
 }
 
+/**
+ * Tells everybody who moved up from the waitlist (`promote*` of `lib/event-seats.ts`), whatever their identity: an account, a
+ * member without account (the guardians are told as well) or a guest without any membership (mail only, no member data kept).
+ * Called after the transaction committed; never throws. Nothing is sent for a cancelled or already started event.
+ */
+export async function notifyPromoted(args: { clubId: string; event: Pick<EventRow, "id" | "title" | "startsAt" | "endsAt" | "locationId" | "cancelledAt">; promoted: Promoted[] }): Promise<void> {
+  try {
+    const { clubId, event, promoted } = args;
+    if (promoted.length === 0 || event.cancelledAt !== null || event.startsAt.getTime() <= Date.now()) return;
+    const timezone = await clubTimezone(clubId);
+    const lang = await clubMailLanguage(db, clubId);
+    const place = await locationName(clubId, event.locationId);
+    const when = formatWhen(event.startsAt, timezone, event.endsAt, lang);
+    const content = {
+      title: `${tr(lang, "Du bist nachgerückt", "You moved up")}: ${event.title}`,
+      body: tr(
+        lang,
+        `Für „${event.title}“ ist ein Platz frei geworden. Du stehst jetzt nicht mehr auf der Warteliste, sondern bist angemeldet.\nWann: ${when}${place ? `\nOrt: ${place}` : ""}\nWenn du nicht kommen kannst, sag bitte ab, damit der Platz weitergegeben wird.`,
+        `A spot opened up for “${event.title}”. You are no longer on the waitlist, you are registered.\nWhen: ${when}${place ? `\nLocation: ${place}` : ""}\nIf you cannot come, please cancel so the spot can be passed on.`,
+      ),
+      category: "events" as const,
+    };
+    const attendeeIds = promoted.filter((p) => p.kind === "attendee").map((p) => p.id);
+    const wardIds = promoted.filter((p) => p.kind === "ward").map((p) => p.id);
+    const rows = attendeeIds.length ? await db.select().from(eventAttendees).where(inArray(eventAttendees.id, attendeeIds)) : [];
+    const wards = wardIds.length ? await db.select({ id: wardEventResponses.id, wardClubMemberId: wardEventResponses.wardClubMemberId }).from(wardEventResponses).where(inArray(wardEventResponses.id, wardIds)) : [];
+    for (const p of promoted) {
+      const stamp = `${event.id}#${p.respondedAt.getTime()}`;
+      if (p.kind === "ward") {
+        const ward = wards.find((w) => w.id === p.id);
+        if (ward) await notifySafely({ clubId, class: "optional", eventKey: "event.promoted", refId: stamp, audience: { memberIds: [ward.wardClubMemberId], includeGuardians: true }, content: { ...content, template: "announcement" }, channels: ["in_app", "email", "push"] });
+        continue;
+      }
+      const row = rows.find((r) => r.id === p.id);
+      if (!row) continue;
+      if (row.guestEmail) {
+        // A guest without account: mail only, the delivery address is wiped by the retention job.
+        await notifySafely({ clubId, class: "mandatory", eventKey: "event.promoted", refId: `${stamp}:${p.id}`, recipients: [{ email: row.guestEmail, name: row.guestName }], content: { ...content, template: "notice", lang }, channels: ["email"] });
+        continue;
+      }
+      const [accountClubMemberId] = row.memberId ? await clubMemberIdsOf(clubId, [row.memberId]) : [];
+      const target = row.clubMemberId ?? accountClubMemberId;
+      if (!target) continue;
+      await notifySafely({ clubId, class: "optional", eventKey: "event.promoted", refId: stamp, audience: { memberIds: [target], includeGuardians: true }, content: { ...content, template: "announcement" }, channels: ["in_app", "email", "push"] });
+    }
+  } catch (err) {
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ eventId: args.event.id, errName: e?.name, errCode: e?.code }, "[event-notify] could not announce waitlist promotion");
+  }
+}
+
+export interface GuestRecipient {
+  email: string;
+  name: string | null;
+}
+
+/** Guests without account with a confirmed registration (seat or waitlist): they are told about changes by mail only. */
+export async function eventGuests(eventId: string): Promise<GuestRecipient[]> {
+  const rows = await db
+    .select({ email: eventAttendees.guestEmail, name: eventAttendees.guestName })
+    .from(eventAttendees)
+    .where(and(eq(eventAttendees.eventId, eventId), isNotNull(eventAttendees.guestEmail), isNotNull(eventAttendees.guestConfirmedAt), inArray(eventAttendees.status, ["angemeldet", "warteliste"])));
+  return rows.flatMap((r) => (r.email ? [{ email: r.email, name: r.name }] : []));
+}
+
+async function notifyGuestsOfChange(args: { clubId: string; before: EventRow; message: { title: string; body: string }; guests: GuestRecipient[]; version: number; cancelled: boolean }): Promise<void> {
+  if (args.guests.length === 0) return;
+  await notifySafely({
+    clubId: args.clubId,
+    class: "mandatory",
+    eventKey: args.cancelled ? "event.cancelled_guest" : "event.changed_guest",
+    refId: `${args.before.id}#${args.version}`,
+    recipients: args.guests,
+    content: { title: args.message.title, body: args.message.body, template: "notice", category: "events" },
+    channels: ["email"],
+  });
+}
+
+/** The organiser removed a registration: tell the person (member + guardians, or the guest by mail). Never throws. */
+export async function notifyRegistrationRemoved(args: { clubId: string; event: Pick<EventRow, "id" | "title" | "startsAt" | "endsAt" | "locationId" | "cancelledAt">; row: EventAttendeeRow }): Promise<void> {
+  try {
+    const { clubId, event, row } = args;
+    if (event.cancelledAt !== null || event.startsAt.getTime() <= Date.now()) return;
+    const lang = await clubMailLanguage(db, clubId);
+    const when = formatWhen(event.startsAt, await clubTimezone(clubId), event.endsAt, lang);
+    const content = {
+      title: `${tr(lang, "Anmeldung abgesagt", "Registration cancelled")}: ${event.title}`,
+      body: tr(lang, `Deine Anmeldung für „${event.title}“ (${when}) wurde vom Veranstalter abgesagt. Bei Fragen melde dich bitte bei deinem Verein.`, `Your registration for “${event.title}” (${when}) was cancelled by the organiser. If you have questions, please contact your club.`),
+      category: "events" as const,
+    };
+    const stamp = `${event.id}#removed:${row.id}`;
+    if (row.guestEmail) {
+      await notifySafely({ clubId, class: "mandatory", eventKey: "event.registration_removed", refId: stamp, recipients: [{ email: row.guestEmail, name: row.guestName }], content: { ...content, template: "notice", lang }, channels: ["email"] });
+      return;
+    }
+    const [accountClubMemberId] = row.memberId ? await clubMemberIdsOf(clubId, [row.memberId]) : [];
+    const target = row.clubMemberId ?? accountClubMemberId;
+    if (target) await notifySafely({ clubId, class: "optional", eventKey: "event.registration_removed", refId: stamp, audience: { memberIds: [target], includeGuardians: true }, content: { ...content, template: "announcement" }, channels: ["in_app", "email", "push"] });
+  } catch (err) {
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ eventId: args.event.id, errName: e?.name, errCode: e?.code }, "[event-notify] could not announce removed registration");
+  }
+}
+
 /** Statuses of a meeting that people can still react to (Terminfindung or planned); everything else is history. */
 const OPEN_MEETING_STATUSES = ["terminfindung", "geplant"];
 
@@ -273,6 +388,50 @@ export async function announceMeetingInvitation(args: { clubId: string; actor: s
     const e = err as { name?: string; code?: unknown } | undefined;
     logger.error({ meetingId: args.meeting.id, errName: e?.name, errCode: e?.code }, "[event-notify] could not announce meeting invitation");
     return "failed";
+  }
+}
+
+/**
+ * Composes and schedules the notification for an essential change or cancellation (B10). Audience and texts come from
+ * the state BEFORE the change; `notify: false` suppresses it (audited). Never throws.
+ */
+export async function announceEventChange(args: {
+  clubId: string;
+  actor: string | null;
+  before: EventRow;
+  after: EventRow;
+  departmentId: string | null;
+  cancelled: boolean;
+  reason?: string | null;
+  suppress: boolean;
+  /** Audience captured earlier (a deleted event no longer has its RSVPs). */
+  audience?: Awaited<ReturnType<typeof eventAudience>>;
+  /** Confirmed guests captured earlier (see `eventGuests`). */
+  guests?: GuestRecipient[];
+}): Promise<void> {
+  try {
+    const { clubId, before, after } = args;
+    const audience = args.audience !== undefined ? args.audience : await eventAudience(clubId, before.id, args.departmentId, args.cancelled);
+    const timezone = await clubTimezone(clubId);
+    const [placeBefore, placeAfter] = await Promise.all([locationName(clubId, before.locationId), locationName(clubId, after.locationId)]);
+    const message = composeEventMessage({
+      lang: await clubMailLanguage(db, clubId),
+      noun: "Termin",
+      title: after.title,
+      timezone,
+      before: { startsAt: before.startsAt, endsAt: before.endsAt, place: placeBefore },
+      after: { startsAt: after.startsAt, endsAt: after.endsAt, place: placeAfter },
+      cancelled: args.cancelled,
+      reason: args.reason ?? null,
+    });
+    const payload = { clubId, kind: "event" as const, refId: before.id, version: after.updatedAt.getTime(), cancelled: args.cancelled, ...message, audience: audience ?? { memberIds: [], includeGuardians: false } };
+    if (!args.suppress) await notifyGuestsOfChange({ clubId, before, message, guests: args.guests ?? (await eventGuests(before.id)), version: after.updatedAt.getTime(), cancelled: args.cancelled });
+    if (!args.suppress && audience === null) return;
+    await scheduleEventChanged(payload, { suppressed: args.suppress, actor: args.actor });
+  } catch (err) {
+    // Best effort: the change itself is already committed. Class and event id only (no message text, no addresses).
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ eventId: args.before.id, errName: e?.name, errCode: e?.code }, "[events] could not announce event change");
   }
 }
 

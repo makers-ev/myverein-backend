@@ -1,22 +1,31 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, eq, gte, inArray, isNull, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
 import { db } from "../db/client.js";
-import { clubMailLanguage } from "../lib/club-settings.js";
 import { calendars } from "../db/schema/calendars.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
+import { wardEventResponses } from "../db/schema/absences.js";
 import { events, type EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
 import { AudienceLimitError, resolveClubAudience, summarizeAudience } from "../lib/audience.js";
-import { clubTimezone, composeEventMessage, essentialDiff, eventAudience, locationName, notifyWaitlistPromoted, scheduleEventChanged } from "../lib/event-notify.js";
-import { buildIcs } from "../lib/ics.js";
-import { confirmedWardSeats, promoteWaitingWard } from "../lib/ward-events.js";
-import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
+import { announceEventChange, essentialDiff, eventAudience, eventGuests, notifyPromoted } from "../lib/event-notify.js";
+import { lockEvent } from "../lib/event-registration.js";
+import { conflictsForEvent } from "../lib/location-bookings.js";
+import { promoteWaitlist } from "../lib/event-seats.js";
+import { refillForRead } from "../lib/event-series-refill.js";
+import { markOverride, recordDroppedOccurrence } from "../lib/event-series.js";
+import { renderCalendarIcs } from "../lib/event-feed.js";
+import { getVisibleCalendarIds } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
+import { loadVisibleEvent } from "../lib/event-access.js";
+import { eventAttendanceRoutes } from "./event-attendance.js";
+import { eventHelperRoutes } from "./event-helpers.js";
+import { eventParticipantRoutes } from "./event-participants.js";
+import { eventRideRoutes } from "./event-rides.js";
+import { eventRegistrationRoutes } from "./event-registration.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
-import { logger } from "../lib/logger.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -28,21 +37,6 @@ eventRoutes.use("*", rateLimit({ windowMs: 60_000, max: 60 }));
 eventRoutes.use("*", sessionGuard);
 eventRoutes.use("*", clubGuard);
 
-/** Loads an event and 404s unless its calendar belongs to `clubId` AND is visible to the caller. Never leaks an invisible calendar's events. */
-async function loadVisibleEvent(id: string, clubId: string, memberId: string, clubRoleTypes: readonly string[]) {
-  const row = await db.query.events.findFirst({ where: eq(events.id, id) });
-  if (!row) throw new NotFoundError("Event not found");
-
-  const calendar = await db.query.calendars.findFirst({ where: and(eq(calendars.id, row.calendarId), eq(calendars.clubId, clubId)) });
-  if (!calendar) throw new NotFoundError("Event not found");
-
-  if (!(await isCalendarVisible(calendar.id, memberId, clubRoleTypes))) {
-    throw new NotFoundError("Event not found");
-  }
-
-  return { event: row, calendar };
-}
-
 /** Loads a calendar scoped to `clubId` only -- used by the calendars:write-gated write handlers below (board scope, not the visibility algorithm). */
 async function loadClubCalendar(calendarId: string, clubId: string) {
   const calendar = await db.query.calendars.findFirst({ where: and(eq(calendars.id, calendarId), eq(calendars.clubId, clubId)) });
@@ -51,55 +45,65 @@ async function loadClubCalendar(calendarId: string, clubId: string) {
 }
 
 /** Read shape: the row plus a `cancelled` flag (`cancelledAt`/`cancelReason` are part of the row; old clients ignore them). */
-function shapeEvent(row: EventRow) {
-  return { ...row, cancelled: row.cancelledAt !== null };
+function shapeEvent(row: EventRow, extra?: EventParticipation) {
+  return { ...row, cancelled: row.cancelledAt !== null, ...(extra ?? {}) };
+}
+
+/** Participation figures added to the read shape (Wave 12 B3): the caller's own RSVP and the head counts. */
+interface EventParticipation {
+  myRsvp: "angemeldet" | "warteliste" | null;
+  /** Confirmed seats (sum of `party_size` plus guardians' answers for wards without account). */
+  attendeeCount: number;
+  /** Seats waiting on the waitlist. */
+  waitlistCount: number;
+}
+
+/**
+ * Participation of the given events in two grouped queries (no N+1): the caller's own RSVP status and the number of
+ * confirmed / waiting entries. Guardian responses for wards without account (`ward_event_responses`) take seats and wait
+ * like account RSVPs, so they count too. `abgesagt` rows are not counted.
+ */
+async function loadParticipation(eventIds: string[], memberId: string): Promise<Map<string, EventParticipation>> {
+  const result = new Map<string, EventParticipation>();
+  for (const id of eventIds) result.set(id, { myRsvp: null, attendeeCount: 0, waitlistCount: 0 });
+  if (eventIds.length === 0) return result;
+
+  // Seats, not rows: a registration takes `party_size` seats; a guardian's answer for a ward without account takes one.
+  const seats = (status: "angemeldet" | "warteliste") => sql<number>`coalesce(sum(${eventAttendees.partySize}) filter (where ${eventAttendees.status} = ${status}), 0)::int`;
+  const wardCounted = (status: "angemeldet" | "warteliste") => sql<number>`count(*) filter (where ${wardEventResponses.status} = ${status})::int`;
+  const [accountRows, wardRows, ownRows] = await Promise.all([
+    db
+      .select({ eventId: eventAttendees.eventId, confirmed: seats("angemeldet"), waiting: seats("warteliste") })
+      .from(eventAttendees)
+      .where(inArray(eventAttendees.eventId, eventIds))
+      .groupBy(eventAttendees.eventId),
+    db
+      .select({ eventId: wardEventResponses.eventId, confirmed: wardCounted("angemeldet"), waiting: wardCounted("warteliste") })
+      .from(wardEventResponses)
+      .where(inArray(wardEventResponses.eventId, eventIds))
+      .groupBy(wardEventResponses.eventId),
+    db.select({ eventId: eventAttendees.eventId, status: eventAttendees.status }).from(eventAttendees).where(and(inArray(eventAttendees.eventId, eventIds), eq(eventAttendees.memberId, memberId))),
+  ]);
+  for (const row of [...accountRows, ...wardRows]) {
+    const entry = result.get(row.eventId)!;
+    entry.attendeeCount += row.confirmed;
+    entry.waitlistCount += row.waiting;
+  }
+  for (const row of ownRows) {
+    if (row.status === "angemeldet" || row.status === "warteliste") result.get(row.eventId)!.myRsvp = row.status;
+  }
+  return result;
+}
+
+/** `endsAt` must not lie before `startsAt` (422). */
+function assertTimeOrder(startsAt: Date, endsAt: Date | null | undefined): void {
+  if (endsAt && endsAt.getTime() < startsAt.getTime()) throw new ValidationError("endsAt must not be before startsAt");
 }
 
 /** A location must belong to the caller's club (404 otherwise, indistinguishable from unknown). */
 async function assertClubLocation(locationId: string, clubId: string): Promise<void> {
   const [row] = await db.select({ id: locations.id }).from(locations).where(and(eq(locations.id, locationId), eq(locations.clubId, clubId)));
   if (!row) throw new NotFoundError("Location not found");
-}
-
-/**
- * Composes and schedules the notification for an essential change or cancellation (B10). Audience and texts come from
- * the state BEFORE the change; `notify: false` suppresses it (audited). Never throws.
- */
-async function announceEventChange(args: {
-  clubId: string;
-  actor: string;
-  before: EventRow;
-  after: EventRow;
-  departmentId: string | null;
-  cancelled: boolean;
-  reason?: string | null;
-  suppress: boolean;
-  /** Audience captured earlier (a deleted event no longer has its RSVPs). */
-  audience?: Awaited<ReturnType<typeof eventAudience>>;
-}): Promise<void> {
-  try {
-    const { clubId, before, after } = args;
-    const audience = args.audience !== undefined ? args.audience : await eventAudience(clubId, before.id, args.departmentId, args.cancelled);
-    const timezone = await clubTimezone(clubId);
-    const [placeBefore, placeAfter] = await Promise.all([locationName(clubId, before.locationId), locationName(clubId, after.locationId)]);
-    const message = composeEventMessage({
-      lang: await clubMailLanguage(db, clubId),
-      noun: "Termin",
-      title: after.title,
-      timezone,
-      before: { startsAt: before.startsAt, endsAt: before.endsAt, place: placeBefore },
-      after: { startsAt: after.startsAt, endsAt: after.endsAt, place: placeAfter },
-      cancelled: args.cancelled,
-      reason: args.reason ?? null,
-    });
-    const payload = { clubId, kind: "event" as const, refId: before.id, version: after.updatedAt.getTime(), cancelled: args.cancelled, ...message, audience: audience ?? { memberIds: [], includeGuardians: false } };
-    if (!args.suppress && audience === null) return;
-    await scheduleEventChanged(payload, { suppressed: args.suppress, actor: args.actor });
-  } catch (err) {
-    // Best effort: the change itself is already committed. Class and event id only (no message text, no addresses).
-    const e = err as { name?: string; code?: unknown } | undefined;
-    logger.error({ eventId: args.before.id, errName: e?.name, errCode: e?.code }, "[events] could not announce event change");
-  }
 }
 
 function parseDateQuery(raw: string | undefined, paramName: string): Date | undefined {
@@ -118,15 +122,17 @@ eventRoutes.get("/", async (c) => {
 
   const calendarIds = await getVisibleCalendarIds(clubId, membership.id, roleTypes);
   if (calendarIds.length === 0) return c.json({ data: [] });
+  // No worker needed: a range beyond the materialized horizon of a series fills it first (capped).
+  if (to) await refillForRead(clubId, calendarIds, to);
 
   const conditions = [inArray(events.calendarId, calendarIds)];
-  if (from) conditions.push(gte(events.startsAt, from));
+  // Overlap, not start: a multi-day event that began before `from` and is still running at `from` belongs to the range.
+  if (from) conditions.push(gte(sql`coalesce(${events.endsAt}, ${events.startsAt})`, from));
   if (to) conditions.push(lte(events.startsAt, to));
 
-  // ponytail: no attendee count/caller-status inline -- plain event list,
-  // add when a client actually needs it without a follow-up request.
   const rows = await db.query.events.findMany({ where: and(...conditions), orderBy: (e, { asc }) => [asc(e.startsAt)] });
-  return c.json({ data: rows.map(shapeEvent) });
+  const participation = await loadParticipation(rows.map((r) => r.id), membership.id);
+  return c.json({ data: rows.map((r) => shapeEvent(r, participation.get(r.id))) });
 });
 
 eventRoutes.get("/:id", async (c) => {
@@ -136,7 +142,8 @@ eventRoutes.get("/:id", async (c) => {
   const id = c.req.param("id");
 
   const { event } = await loadVisibleEvent(id, clubId, membership.id, roleTypes);
-  return c.json({ data: shapeEvent(event) });
+  const participation = await loadParticipation([event.id], membership.id);
+  return c.json({ data: shapeEvent(event, participation.get(event.id)) });
 });
 
 const createEventSchema = z.object({
@@ -147,7 +154,12 @@ const createEventSchema = z.object({
   endsAt: z.string().datetime({ offset: true }).optional(),
   category: z.string().max(100).optional(),
   capacity: z.number().int().positive().optional(),
+  allDay: z.boolean().optional(),
   locationId: z.string().uuid().optional(),
+  /** Display only (no payment handling). */
+  costNote: z.string().trim().max(300).optional(),
+  costCents: z.number().int().min(0).max(10_000_000).optional(),
+  attendanceTracking: z.boolean().optional(),
 });
 
 eventRoutes.post(
@@ -165,6 +177,7 @@ eventRoutes.post(
     const body = c.req.valid("json");
     await loadClubCalendar(body.calendarId, clubId);
     if (body.locationId) await assertClubLocation(body.locationId, clubId);
+    assertTimeOrder(new Date(body.startsAt), body.endsAt ? new Date(body.endsAt) : null);
 
     const [row] = await db
       .insert(events)
@@ -176,14 +189,20 @@ eventRoutes.post(
         endsAt: body.endsAt ? new Date(body.endsAt) : undefined,
         category: body.category,
         capacity: body.capacity,
+        allDay: body.allDay,
         locationId: body.locationId,
+        costNote: body.costNote,
+        costCents: body.costCents,
+        attendanceTracking: body.attendanceTracking,
         createdBy: currentUser.id,
       })
       .returning();
 
     await writeAudit(db, { eventType: "event.create", subjectId: row.id, payload: { clubId, calendarId: body.calendarId } });
 
-    return c.json({ data: shapeEvent(row) }, 201);
+    // Warning, not a block: another booking or event at a bookable location overlaps.
+    const locationConflicts = await conflictsForEvent(clubId, row, { memberId: c.get("membership").id, roleTypes: roleTypes });
+    return c.json({ data: { ...shapeEvent(row), locationConflicts } }, 201);
   },
 );
 
@@ -195,7 +214,11 @@ const updateEventSchema = z.object({
   endsAt: z.string().datetime({ offset: true }).nullable().optional(),
   category: z.string().max(100).nullable().optional(),
   capacity: z.number().int().positive().nullable().optional(),
+  allDay: z.boolean().optional(),
   locationId: z.string().uuid().nullable().optional(),
+  costNote: z.string().trim().max(300).nullable().optional(),
+  costCents: z.number().int().min(0).max(10_000_000).nullable().optional(),
+  attendanceTracking: z.boolean().optional(),
   /** `false` saves the change without telling the attendees (audited). Default: essential changes are announced. */
   notify: z.boolean().optional(),
 });
@@ -219,19 +242,36 @@ eventRoutes.patch(
     const calendar = await loadClubCalendar(existing.calendarId, clubId);
     if (body.calendarId) await loadClubCalendar(body.calendarId, clubId);
     if (body.locationId) await assertClubLocation(body.locationId, clubId);
+    const newStart = body.startsAt ? new Date(body.startsAt) : existing.startsAt;
+    let newEnd = body.endsAt === undefined ? existing.endsAt : body.endsAt === null ? null : new Date(body.endsAt);
+    // Moving only the start past the stored end keeps the duration (the end moves along) instead of leaving an inverted event.
+    if (body.endsAt === undefined && newEnd && newEnd.getTime() < newStart.getTime()) newEnd = new Date(newStart.getTime() + (existing.endsAt!.getTime() - existing.startsAt.getTime()));
+    assertTimeOrder(newStart, newEnd);
+    if (existing.seriesId && body.calendarId && body.calendarId !== existing.calendarId) throw new ValidationError("An occurrence of a series stays in the calendar of its series");
 
     const [row] = await db
       .update(events)
       .set({
         ...body,
         startsAt: body.startsAt ? new Date(body.startsAt) : undefined,
-        endsAt: body.endsAt === undefined ? undefined : body.endsAt === null ? null : new Date(body.endsAt),
+        endsAt: body.endsAt === undefined ? (newEnd === existing.endsAt ? undefined : newEnd) : newEnd,
         updatedAt: new Date(),
       })
       .where(eq(events.id, id))
       .returning();
 
+    // Edited on its own: the occurrence becomes an override that a later "all occurrences" edit of the series leaves alone.
+    if (existing.seriesId) {
+      await markOverride(db, existing, row!);
+      row!.isOverride = true;
+    }
     await writeAudit(db, { eventType: "event.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body), ...(notifyFlag === false ? { notify: false } : {}) } });
+
+    // More room (or no limit any more): the waitlist moves up.
+    if (body.capacity !== undefined && (row!.capacity === null ? existing.capacity !== null : existing.capacity !== null && row!.capacity > existing.capacity)) {
+      const promoted = await db.transaction(async (tx) => promoteWaitlist(tx, await lockEvent(tx, id), clubId));
+      await notifyPromoted({ clubId, event: row!, promoted });
+    }
 
     // Essential change (start, end, location) of an event that has not been cancelled: tell attendees and waitlist (B10).
     const diff = essentialDiff(existing, row!);
@@ -239,7 +279,8 @@ eventRoutes.patch(
       await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: row!, departmentId: calendar.departmentId, cancelled: false, suppress: notifyFlag === false });
     }
 
-    return c.json({ data: shapeEvent(row!) });
+    const locationConflicts = await conflictsForEvent(clubId, row!, { memberId: c.get("membership").id, roleTypes });
+    return c.json({ data: { ...shapeEvent(row!), locationConflicts } });
   },
 );
 
@@ -258,12 +299,17 @@ eventRoutes.delete("/:id", async (c) => {
   // Deleting an event that people signed up for is a cancellation for them (B10): resolve the audience before the RSVPs vanish.
   const notifyFlag = c.req.query("notify");
   const audienceBefore = existing.cancelledAt === null ? await eventAudience(clubId, id, calendar.departmentId, true) : null;
-  const hadRsvps = audienceBefore !== null && (await db.query.eventAttendees.findFirst({ where: eq(eventAttendees.eventId, id) })) !== undefined;
+  const guestsBefore = existing.cancelledAt === null ? await eventGuests(id) : [];
+  const hadRsvps = (audienceBefore !== null || guestsBefore.length > 0) && (await db.query.eventAttendees.findFirst({ where: eq(eventAttendees.eventId, id) })) !== undefined;
 
-  await db.delete(events).where(eq(events.id, id));
+  await db.transaction(async (tx) => {
+    // A deleted occurrence stays deleted when the horizon is refilled.
+    if (existing.seriesId) await recordDroppedOccurrence(tx, existing);
+    await tx.delete(events).where(eq(events.id, id));
+  });
   await writeAudit(db, { eventType: "event.delete", subjectId: id, payload: { clubId, ...(notifyFlag === "false" ? { notify: false } : {}) } });
   if (hadRsvps) {
-    await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: { ...existing, updatedAt: new Date() }, departmentId: calendar.departmentId, cancelled: true, suppress: notifyFlag === "false", audience: audienceBefore });
+    await announceEventChange({ clubId, actor: c.get("user").id, before: existing, after: { ...existing, updatedAt: new Date() }, departmentId: calendar.departmentId, cancelled: true, suppress: notifyFlag === "false", audience: audienceBefore, guests: guestsBefore });
   }
 
   return c.body(null, 204);
@@ -344,105 +390,6 @@ eventRoutes.get("/:id/cancel-preview", async (c) => {
   return c.json({ data: { alreadyCancelled: existing.cancelledAt !== null, confirmed, waitlisted, departmentCalendar: calendar.departmentId !== null, audience: summary } });
 });
 
-// --- RSVP ----------------------------------------------------------------
-
-eventRoutes.post("/:id/rsvp", async (c) => {
-  const clubId = c.get("clubId");
-  const membership = c.get("membership");
-  const roleTypes = c.get("clubRoleTypes");
-  const id = c.req.param("id");
-
-  const { event } = await loadVisibleEvent(id, clubId, membership.id, roleTypes);
-  if (event.cancelledAt !== null) throw new ConflictError("Event is cancelled");
-
-  const row = await db.transaction(async (tx) => {
-    // Lock the event row for the duration of the tx -- without this, two
-    // concurrent RSVPs at capacity-1 both read "count < capacity" under
-    // READ COMMITTED before either commits, and both get seated (overbooking).
-    // The lock serializes them: the second waiter re-reads the up-to-date
-    // count once the first commits and releases it.
-    await tx.select().from(events).where(eq(events.id, id)).for("update");
-
-    // Count existing angemeldet rows EXCLUDING the caller's own row -- otherwise
-    // re-confirming an already-angemeldet RSVP at capacity would demote them.
-    const confirmed = await tx.query.eventAttendees.findMany({
-      where: and(eq(eventAttendees.eventId, id), eq(eventAttendees.status, "angemeldet")),
-    });
-    // Seats taken by guardians' responses for wards without account count too (Wave 10 B4).
-    const othersConfirmed = confirmed.filter((r) => r.memberId !== membership.id).length + (await confirmedWardSeats(tx, id));
-    const status = event.capacity === null || othersConfirmed < event.capacity ? "angemeldet" : "warteliste";
-
-    const [created] = await tx
-      .insert(eventAttendees)
-      .values({ eventId: id, memberId: membership.id, status })
-      .onConflictDoUpdate({
-        target: [eventAttendees.eventId, eventAttendees.memberId],
-        set: { status, respondedAt: new Date() },
-      })
-      .returning();
-
-    await writeAudit(tx, { eventType: "event_attendee.rsvp", subjectId: id, payload: { clubId, memberId: membership.id, status } });
-
-    return created;
-  });
-
-  return c.json({ data: { status: row.status } });
-});
-
-eventRoutes.delete("/:id/rsvp", async (c) => {
-  const clubId = c.get("clubId");
-  const membership = c.get("membership");
-  const roleTypes = c.get("clubRoleTypes");
-  const id = c.req.param("id");
-
-  const { event } = await loadVisibleEvent(id, clubId, membership.id, roleTypes);
-
-  const promoted = await db.transaction(async (tx): Promise<{ memberId: string; respondedAt: Date } | null> => {
-    // Same lock as the RSVP handler -- without it, two concurrent
-    // cancellations can both pick the same waitlisted row to promote (each
-    // reads "next in line" before the other commits), leaving one freed
-    // slot unfilled even though two members were waiting.
-    await tx.select().from(events).where(eq(events.id, id)).for("update");
-
-    const existing = await tx.query.eventAttendees.findFirst({
-      where: and(eq(eventAttendees.eventId, id), eq(eventAttendees.memberId, membership.id)),
-    });
-    if (!existing) throw new NotFoundError("RSVP not found");
-
-    await tx.delete(eventAttendees).where(eq(eventAttendees.id, existing.id));
-    await writeAudit(tx, {
-      eventType: "event_attendee.cancel",
-      subjectId: id,
-      payload: { clubId, memberId: membership.id },
-    });
-
-    // FIFO promotion: the caller freed a confirmed spot -- bump the
-    // earliest-responded waitlist row up, if there is one.
-    if (existing.status === "angemeldet" && event.capacity !== null) {
-      const nextInLine = await tx.query.eventAttendees.findFirst({
-        where: and(eq(eventAttendees.eventId, id), eq(eventAttendees.status, "warteliste")),
-        orderBy: (ea, { asc }) => [asc(ea.respondedAt)],
-      });
-      if (nextInLine) {
-        await tx.update(eventAttendees).set({ status: "angemeldet" }).where(eq(eventAttendees.id, nextInLine.id));
-        await writeAudit(tx, {
-          eventType: "event_attendee.promote",
-          subjectId: id,
-          payload: { clubId, memberId: nextInLine.memberId },
-        });
-        return { memberId: nextInLine.memberId, respondedAt: nextInLine.respondedAt };
-      }
-      // Nobody waits with an account: a waiting ward (response of a guardian) moves up.
-      await promoteWaitingWard(tx, id);
-    }
-    return null;
-  });
-  // After the commit: tell the person who moved up (best effort, in addition to the audit entry).
-  if (promoted !== null) await notifyWaitlistPromoted({ clubId, event, accountMemberId: promoted.memberId, respondedAt: promoted.respondedAt });
-
-  return c.body(null, 204);
-});
-
 // --- iCal feed (mounted separately, at top-level /events.ics) -----------
 
 export const icsRoutes = new Hono<ClubEnv>();
@@ -452,23 +399,25 @@ icsRoutes.use("*", sessionGuard);
 icsRoutes.use("*", clubGuard);
 
 /**
- * Session-gated iCal feed only. A static/token-based public link (so a
- * calendar app can subscribe without a login) is a real, still-open
- * question this repo's Wave 2 plan explicitly flags and defers -- not an
- * oversight -- so it isn't built here.
+ * Session-gated iCal feed of the calendars visible to the caller: event series as RRULE (+ EXDATE, RECURRENCE-ID), place, status
+ * and all-day events (`src/lib/ics.ts`, `src/lib/event-feed.ts`). The subscribable token link is `GET /feeds/:token.ics`.
  */
 icsRoutes.get("/", async (c) => {
   const clubId = c.get("clubId");
-  const membership = c.get("membership");
-  const roleTypes = c.get("clubRoleTypes");
-
-  const calendarIds = await getVisibleCalendarIds(clubId, membership.id, roleTypes);
-  const rows = calendarIds.length
-    ? await db.query.events.findMany({ where: inArray(events.calendarId, calendarIds), orderBy: (e, { asc }) => [asc(e.startsAt)] })
-    : [];
-
-  const ics = buildIcs(rows.map((r) => ({ id: r.id, title: r.title, description: r.description, startsAt: r.startsAt, endsAt: r.endsAt, cancelled: r.cancelledAt !== null })));
+  const calendarIds = await getVisibleCalendarIds(clubId, c.get("membership").id, c.get("clubRoleTypes"));
+  const { ics, etag } = await renderCalendarIcs(clubId, calendarIds);
 
   c.header("Content-Type", "text/calendar; charset=utf-8");
+  c.header("Cache-Control", "private, no-cache");
+  c.header("ETag", etag);
+  if (c.req.header("if-none-match") === etag) return c.body(null, 304);
   return c.body(ics);
 });
+
+// --- Wave 12: attendance, registration, helpers (session + club guard come from this router) ----------
+
+eventRoutes.route("/", eventAttendanceRoutes);
+eventRoutes.route("/", eventRegistrationRoutes);
+eventRoutes.route("/", eventParticipantRoutes);
+eventRoutes.route("/", eventHelperRoutes);
+eventRoutes.route("/", eventRideRoutes);
