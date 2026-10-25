@@ -69,6 +69,7 @@ import { meetingRoutes } from "./meetings.js";
 import { myClubRoutes } from "./my-clubs.js";
 import { notificationRoutes } from "./notifications.js";
 import { pushTokenRoutes } from "./push-tokens.js";
+import { rateCardRoutes, timeEntryRoutes, timeReportRoutes } from "./time-tracking.js";
 
 /**
  * Rights matrix (Wave 7 B12 part, deny-by-default): EVERY registered writing route (POST/PATCH/PUT/DELETE)
@@ -135,6 +136,9 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/attendance", "attendanceReportRoutes", attendanceReportRoutes],
   ["/events.ics", "icsRoutes", icsRoutes],
   ["/public", "publicEventRoutes", publicEventRoutes],
+  ["/time-entries", "timeEntryRoutes", timeEntryRoutes],
+  ["/rate-cards", "rateCardRoutes", rateCardRoutes],
+  ["/time-report", "timeReportRoutes", timeReportRoutes],
   ["/availability", "availabilityRoutes", availabilityRoutes],
   ["/meetings", "meetingRoutes", meetingRoutes],
   ["/ballots", "ballotRoutes", ballotRoutes],

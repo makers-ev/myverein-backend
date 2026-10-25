@@ -62,6 +62,7 @@ import { internalStatsRoutes } from "./routes/internal-stats.js";
 import { notificationPreferenceRoutes, unsubscribeRoutes } from "./routes/notification-preferences.js";
 import { notificationRoutes } from "./routes/notifications.js";
 import { pushTokenRoutes } from "./routes/push-tokens.js";
+import { rateCardRoutes, timeEntryRoutes, timeReportRoutes } from "./routes/time-tracking.js";
 import { trustedOrigins } from "./lib/trusted-origins.js";
 
 const app = new Hono<LoggerEnv>();
@@ -160,6 +161,9 @@ app.route("/events", eventRoutes);
 app.route("/attendance", attendanceReportRoutes);
 app.route("/events.ics", icsRoutes);
 app.route("/public", publicEventRoutes);
+app.route("/time-entries", timeEntryRoutes);
+app.route("/rate-cards", rateCardRoutes);
+app.route("/time-report", timeReportRoutes);
 app.route("/availability", availabilityRoutes);
 app.route("/meetings", meetingRoutes);
 app.route("/ballots", ballotRoutes);
