@@ -9,6 +9,7 @@ import { DPA_NOTIFY_JOB_TYPE, handleDpaVersionNotify } from "../dpa.js";
 import { runFormCleanup } from "../form-sweeper.js";
 import { handleRetentionSweep, registerRetentionTasks, RETENTION_SWEEP_INTERVAL_MS, RETENTION_SWEEP_JOB_TYPE } from "../retention.js";
 import { handleTermNotify, handleTermSweep, TERM_NOTIFY_JOB_TYPE, TERM_SWEEP_INTERVAL_MS, TERM_SWEEP_JOB_TYPE } from "../term-jobs.js";
+import { handleSeriesRefill, SERIES_REFILL_INTERVAL_MS, SERIES_REFILL_JOB_TYPE } from "../event-series-refill.js";
 import { registerNotifyJobs } from "../notify/index.js";
 import { installUnsubscribeProvider } from "../notify/unsubscribe-token.js";
 import { handleReminder, handleReminderSweep, REMINDER_JOB_TYPE, REMINDER_SWEEP_INTERVAL_MS, REMINDER_SWEEP_JOB_TYPE } from "../reminders.js";
@@ -46,6 +47,7 @@ export function registerAllJobs(): void {
   registerJob(BALLOT_NOTIFY_JOB, handleBallotNotify);
   registerRecurringJob({ type: TERM_SWEEP_JOB_TYPE, intervalMs: TERM_SWEEP_INTERVAL_MS }, handleTermSweep);
   registerJob(TERM_NOTIFY_JOB_TYPE, handleTermNotify);
+  registerRecurringJob({ type: SERIES_REFILL_JOB_TYPE, intervalMs: SERIES_REFILL_INTERVAL_MS }, handleSeriesRefill);
   registerRetentionTasks();
   registerRecurringJob({ type: RETENTION_SWEEP_JOB_TYPE, intervalMs: RETENTION_SWEEP_INTERVAL_MS }, handleRetentionSweep);
 }

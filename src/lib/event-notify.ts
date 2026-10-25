@@ -277,6 +277,47 @@ export async function announceMeetingInvitation(args: { clubId: string; actor: s
   }
 }
 
+/**
+ * Composes and schedules the notification for an essential change or cancellation (B10). Audience and texts come from
+ * the state BEFORE the change; `notify: false` suppresses it (audited). Never throws.
+ */
+export async function announceEventChange(args: {
+  clubId: string;
+  actor: string | null;
+  before: EventRow;
+  after: EventRow;
+  departmentId: string | null;
+  cancelled: boolean;
+  reason?: string | null;
+  suppress: boolean;
+  /** Audience captured earlier (a deleted event no longer has its RSVPs). */
+  audience?: Awaited<ReturnType<typeof eventAudience>>;
+}): Promise<void> {
+  try {
+    const { clubId, before, after } = args;
+    const audience = args.audience !== undefined ? args.audience : await eventAudience(clubId, before.id, args.departmentId, args.cancelled);
+    const timezone = await clubTimezone(clubId);
+    const [placeBefore, placeAfter] = await Promise.all([locationName(clubId, before.locationId), locationName(clubId, after.locationId)]);
+    const message = composeEventMessage({
+      lang: await clubMailLanguage(db, clubId),
+      noun: "Termin",
+      title: after.title,
+      timezone,
+      before: { startsAt: before.startsAt, endsAt: before.endsAt, place: placeBefore },
+      after: { startsAt: after.startsAt, endsAt: after.endsAt, place: placeAfter },
+      cancelled: args.cancelled,
+      reason: args.reason ?? null,
+    });
+    const payload = { clubId, kind: "event" as const, refId: before.id, version: after.updatedAt.getTime(), cancelled: args.cancelled, ...message, audience: audience ?? { memberIds: [], includeGuardians: false } };
+    if (!args.suppress && audience === null) return;
+    await scheduleEventChanged(payload, { suppressed: args.suppress, actor: args.actor });
+  } catch (err) {
+    // Best effort: the change itself is already committed. Class and event id only (no message text, no addresses).
+    const e = err as { name?: string; code?: unknown } | undefined;
+    logger.error({ eventId: args.before.id, errName: e?.name, errCode: e?.code }, "[events] could not announce event change");
+  }
+}
+
 /** Job handler `notify_event_changed`: dispatches the prepared message to the audience captured by the route. */
 export async function handleEventChanged(job: JobContext): Promise<void> {
   const p = job.payload as Partial<EventChangedPayload>;

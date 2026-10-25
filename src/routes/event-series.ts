@@ -6,13 +6,14 @@ import { z } from "zod";
 import { db } from "../db/client.js";
 import { calendars } from "../db/schema/calendars.js";
 import { eventSeries, type EventSeriesRow } from "../db/schema/event-series.js";
-import { events } from "../db/schema/events.js";
+import { events, type EventRow } from "../db/schema/events.js";
 import { locations } from "../db/schema/locations.js";
 import { writeAudit } from "../lib/audit.js";
 import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { loadClubSettings } from "../lib/club-settings.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { announceEventChange, essentialDiff } from "../lib/event-notify.js";
 import { assertValidRule, createSeries, editAll, editedSeries, editOccurrence, editThisAndFollowing, initialHorizon, lockSeries, removeScoped, ruleOf, type OccurrenceEdit, type SeriesEdit, type SeriesEditResult } from "../lib/event-series.js";
 import { expandSeries, RULE_FREQUENCIES, RULE_WEEKDAYS } from "../lib/recurrence.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
@@ -200,6 +201,7 @@ eventSeriesRoutes.patch("/:id", zValidator("json", patchSchema, invalid), async 
   if (typeof body.locationId === "string") await assertClubLocation(body.locationId, clubId);
   const settings = await loadClubSettings(db, clubId);
 
+  let occurrenceBefore: EventRow | null = null;
   const out = await db.transaction(async (tx) => {
     const series = await lockSeries(tx, found.id);
     if (!series) throw new NotFoundError("Series not found");
@@ -213,6 +215,7 @@ eventSeriesRoutes.patch("/:id", zValidator("json", patchSchema, invalid), async 
       const startsAt = edit.startsAt ?? event!.startsAt;
       const endsAt = edit.endsAt === undefined ? event!.endsAt : edit.endsAt;
       if (endsAt && endsAt.getTime() < startsAt.getTime()) throw new ValidationError("endsAt must not be before startsAt");
+      occurrenceBefore = event!;
       result = { series, event: await editOccurrence(tx, event!, edit, now) };
     } else if (body.scope === "all") {
       result = await editAll(tx, series, seriesEdit(body), settings.state, now, body.reason ?? null, now);
@@ -227,6 +230,16 @@ eventSeriesRoutes.patch("/:id", zValidator("json", patchSchema, invalid), async 
     });
     return result;
   });
+
+  // After the commit, best effort: attendees (and their guardians) hear about moved and cancelled occurrences.
+  const suppress = body.notify === false;
+  const actor = c.get("user").id;
+  const changes = [...(out.reconcile?.moved ?? []), ...(occurrenceBefore && out.event ? [{ before: occurrenceBefore, after: out.event }] : [])];
+  for (const { before, after } of changes) {
+    const diff = essentialDiff(before, after);
+    if ((diff.time || diff.place) && before.cancelledAt === null) await announceEventChange({ clubId, actor, before, after, departmentId: null, cancelled: false, suppress });
+  }
+  for (const row of out.reconcile?.removed.cancelled ?? []) await announceEventChange({ clubId, actor, before: row, after: row, departmentId: null, cancelled: true, reason: row.cancelReason, suppress });
 
   const rec = out.reconcile;
   return c.json({
@@ -259,6 +272,7 @@ eventSeriesRoutes.delete("/:id", async (c) => {
     await writeAudit(tx, { eventType: "event_series.delete", subjectId: series.id, payload: { clubId, scope, deleted: removal.removed.deleted.length, cancelled: removal.removed.cancelled.length, seriesDeleted: removal.seriesDeleted } });
     return removal;
   });
+  for (const row of result.removed.cancelled) await announceEventChange({ clubId, actor: c.get("user").id, before: row, after: row, departmentId: null, cancelled: true, reason: row.cancelReason, suppress: c.req.query("notify") === "false" });
   return c.json({ data: { deleted: result.removed.deleted.length, cancelled: result.removed.cancelled.length, seriesDeleted: result.seriesDeleted } });
 });
 

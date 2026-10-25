@@ -121,6 +121,7 @@ export const AUDIT_EVENTS = {
   "event.notify_suppressed": spec(["actor", "cancelled", "clubId"]),
   "event.update": spec(["changedFields", "clubId", "notify"]),
   "event_series.create": spec(["calendarId", "clubId", "occurrences"]),
+  "event_series.extend": spec(["clubId", "created"]),
   "event_series.delete": spec(["cancelled", "clubId", "deleted", "scope", "seriesDeleted"]),
   "event_series.update": spec(["cancelled", "changedFields", "clubId", "created", "removed", "scope", "split", "updated"]),
   "event_attendee.cancel": spec(["clubId", "memberId"]),

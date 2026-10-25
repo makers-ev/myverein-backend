@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -7,6 +7,8 @@ import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
+import { jobs } from "../db/schema/jobs.js";
+import { refillSeries } from "../lib/event-series-refill.js";
 import { eventSeries } from "../db/schema/event-series.js";
 import { eventSeriesExceptions } from "../db/schema/event-series-exceptions.js";
 import { events } from "../db/schema/events.js";
@@ -247,6 +249,58 @@ describe("event series", () => {
     expect(new Set(after.map((r) => r.originalStartsAt!.getTime())).size).toBe(6);
     const stored = await db.query.eventSeries.findFirst({ where: eq(eventSeries.id, series.id) });
     expect(after.every((r) => r.title === stored!.title)).toBe(true);
+  });
+
+  describe("horizon refill and notifications", () => {
+    it("the refill job tops the horizon up idempotently, also in parallel, and never recreates dropped days", async () => {
+      const { series } = await create(weekly("2033-01-03"));
+      const initial = await occurrences(series.id);
+      expect(initial.length).toBeGreaterThanOrEqual(52);
+      const dropped = initial[3]!;
+      expect((await call(board, `/events/${dropped.id}`, { method: "DELETE" })).status).toBe(204);
+
+      // Pretend the last run was long ago: the horizon shrinks to 3 months after the start, then two runs race.
+      await db.delete(events).where(and(eq(events.seriesId, series.id), sql`${events.originalStartsAt} > '2033-04-04T00:00:00Z'`));
+      await db.update(eventSeries).set({ horizonUntil: new Date("2033-04-04T00:00:00Z") }).where(eq(eventSeries.id, series.id));
+      const target = new Date(initial.at(-1)!.startsAt.getTime() + 1000);
+      const runs = await Promise.all([refillSeries({ clubId: clubA, target }), refillSeries({ clubId: clubA, target })]);
+      expect(runs[0]!.series + runs[1]!.series).toBeGreaterThanOrEqual(1);
+      const after = await occurrences(series.id);
+      expect(new Set(after.map((r) => r.originalStartsAt!.getTime())).size).toBe(after.length);
+      expect(after.map((r) => r.id)).not.toContain(dropped.id);
+      expect(after.length).toBe(initial.length - 1);
+      const again = await refillSeries({ clubId: clubA, target });
+      expect(again.created).toBe(0);
+    });
+
+    it("reading a range beyond the horizon fills it without a worker", async () => {
+      const { series } = await create(weekly("2034-01-03", { count: 80 }));
+      const first = await occurrences(series.id);
+      const lastBefore = first.at(-1)!.startsAt;
+      const to = new Date(lastBefore.getTime() + 60 * 86_400_000);
+      const res = await call(member, `/events?from=${lastBefore.toISOString()}&to=${to.toISOString()}`);
+      expect(res.status).toBe(200);
+      const after = await occurrences(series.id);
+      expect(after.length).toBeGreaterThan(first.length);
+    });
+
+    it("moving or cancelling occurrences with sign-ups queues one notification each, notify:false none", async () => {
+      const { series } = await create(weekly("2035-02-05", { count: 3 }));
+      const rows = await occurrences(series.id);
+      const memberRow = await db.query.member.findFirst({ where: (x, { and: a, eq: e }) => a(e(x.organizationId, clubA), e(x.userId, memberAccountId)) });
+      await db.insert(eventAttendees).values([
+        { eventId: rows[0]!.id, memberId: memberRow!.id, status: "angemeldet" },
+        { eventId: rows[1]!.id, memberId: memberRow!.id, status: "angemeldet" },
+      ]);
+      const queued = async (eventId: string) => (await db.select().from(jobs).where(and(eq(jobs.type, "notify_event_changed"), sql`${jobs.payload}->>'refId' = ${eventId}`))).length;
+
+      await call(board, `/event-series/${series.id}`, { method: "PATCH", body: { scope: "this", eventId: rows[0]!.id, startsAt: "2035-02-05T19:00:00Z", endsAt: "2035-02-05T20:00:00Z" } });
+      expect(await queued(rows[0]!.id)).toBe(1);
+      await call(board, `/event-series/${series.id}`, { method: "PATCH", body: { scope: "this", eventId: rows[1]!.id, startsAt: "2035-02-12T19:00:00Z", endsAt: "2035-02-12T20:00:00Z", notify: false } });
+      expect(await queued(rows[1]!.id)).toBe(0);
+      await call(board, `/event-series/${series.id}?scope=this&eventId=${rows[1]!.id}&reason=Halle`, { method: "DELETE" });
+      expect(await queued(rows[1]!.id)).toBe(1);
+    });
   });
 
   it("GET /event-series lists the visible series with upcoming counts", async () => {
