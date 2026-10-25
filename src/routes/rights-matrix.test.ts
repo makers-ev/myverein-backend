@@ -41,6 +41,7 @@ import { dpaRoutes } from "./dpa.js";
 import { clubNoticeBySlugRoutes, clubPrivacyNoticeRoutes } from "./club-privacy-notices.js";
 import { retentionPolicyRoutes } from "./retention-policies.js";
 import { adminStatsRoutes } from "./admin-stats.js";
+import { attendanceReportRoutes } from "./attendance-report.js";
 import { availabilityRoutes } from "./availability.js";
 import { calendarRoutes } from "./calendars.js";
 import { clubApplicationRoutes } from "./club-applications.js";
@@ -131,6 +132,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/feeds", "feedRoutes", feedRoutes],
   ["/event-series", "eventSeriesRoutes", eventSeriesRoutes],
   ["/events", "eventRoutes", eventRoutes],
+  ["/attendance", "attendanceReportRoutes", attendanceReportRoutes],
   ["/events.ics", "icsRoutes", icsRoutes],
   ["/public", "publicEventRoutes", publicEventRoutes],
   ["/availability", "availabilityRoutes", availabilityRoutes],

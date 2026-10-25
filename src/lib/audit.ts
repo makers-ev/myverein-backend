@@ -26,6 +26,7 @@ export const AUDIT_EVENTS = {
   "absence.withdraw": spec(["absenceId", "clubId", "clubMemberId"], "clubMemberId"),
   "admin.job_retry": spec(["actor", "type"]),
   "admin.user_remove": spec(["userId"]),
+  "attendance.export": spec(["clubId", "rows", "scope"]),
   "audit_log.export": spec(["clubId", "filters", "rows"]),
   "ballot.cancel": spec(["clubId", "previousStatus", "reason"]),
   "ballot.close": spec(["by", "clubId", "eligible", "participants"]),
