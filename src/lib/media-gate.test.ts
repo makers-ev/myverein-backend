@@ -58,7 +58,7 @@ describe("media layer grep gate", () => {
 
   it("only the media layer touches the raw object storage", () => {
     expect(violations(STORAGE_IMPORT, ["lib/media.ts"])).toEqual([]);
-    expect(violations(/\b(putObject|getObject|deleteObject|writeObject|objectSize)\s*\(/, ["lib/media.ts", "lib/storage.ts"])).toEqual([]);
+    expect(violations(/\b(putObject|getObject|deleteObject|writeObject|objectSize|openObjectStream|objectMtimeMs|listObjects)\s*\(/, ["lib/media.ts", "lib/storage.ts"])).toEqual([]);
     expect(violations(/\bUPLOADS_DIR\b/, ["lib/storage.ts"])).toEqual([]);
   });
 

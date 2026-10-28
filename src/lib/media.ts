@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 
 import { and, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Context } from "hono";
@@ -15,7 +16,8 @@ import { ConflictError, NotFoundError, ValidationError } from "./errors.js";
 import { MalformedImageError, stripImageMetadata } from "./image-sanitize.js";
 import { logger } from "./logger.js";
 import { buildMediaUrl } from "./media-url.js";
-import { deleteObject, getObject, objectSize, putObject, sanitizeFilename, writeObject } from "./storage.js";
+import { checkStorageThresholds, effectiveQuotaBytes, platformQuotaBytes, usedBytes } from "./media-quota.js";
+import { deleteObject, getObject, listObjects, objectMtimeMs, objectSize, openObjectStream, putObject, sanitizeFilename, writeObject } from "./storage.js";
 import { writeAudit } from "./audit.js";
 
 /**
@@ -53,11 +55,15 @@ export function sniffMimeType(buffer: Buffer): string | null {
   return null;
 }
 
-/** Per-club storage quota in bytes (`MEDIA_QUOTA_BYTES_PER_CLUB`, default 1 GiB). */
-export function clubQuotaBytes(): number {
-  const parsed = Number(process.env.MEDIA_QUOTA_BYTES_PER_CLUB);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 1024 * 1024 * 1024;
-}
+/** Platform default storage quota per club in bytes (`MEDIA_QUOTA_BYTES_PER_CLUB`, default 1 GiB); a club may carry its own (`club_settings.storage_quota_bytes`). */
+export const clubQuotaBytes = platformQuotaBytes;
+
+/** Generated PDFs are capped like the engine output (20 MiB). */
+export const MAX_GENERATED_PDF_BYTES = 20 * 1024 * 1024;
+/** Logo files of the branding (PNG/JPEG only, never SVG). */
+export const MAX_LOGO_BYTES = 2 * 1024 * 1024;
+/** `owner_type` values of the document area (Wave 13 BM). */
+export const DOCUMENT_OWNER_TYPES = { archive: "document", personal: "member_document", branding: "branding", generated: "generated_pdf" } as const;
 
 /** Optional antivirus hook: set it at startup, it rejects an upload by throwing. Unset (default) = no scan. */
 export type UploadScanner = (buffer: Buffer, info: { mimeType: string; filename: string }) => Promise<void>;
@@ -85,6 +91,15 @@ function unattachedLimits(): { files: number; bytes: number } {
 export function unattachedTtlMs(): number {
   const hours = Number(process.env.MEDIA_UNATTACHED_TTL_HOURS);
   return (Number.isFinite(hours) && hours > 0 ? hours : 24) * 60 * 60 * 1000;
+}
+
+/** Locks the club's quota (advisory lock per club, released with the transaction) and refuses a write that would exceed it. */
+export async function assertQuota(tx: DbExecutor, clubId: string, addBytes: number): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`media-quota:${clubId}`}, 0))`);
+  const [used, quota] = await Promise.all([usedBytes(tx, clubId), effectiveQuotaBytes(tx, clubId)]);
+  if (used + addBytes > quota) {
+    throw new ValidationError("The storage quota of this club is exhausted", { code: "QUOTA_EXCEEDED", details: { code: "club_quota", usedBytes: used, quotaBytes: quota } });
+  }
 }
 
 export interface StoreUploadInput {
@@ -143,16 +158,7 @@ export async function storeUpload(input: StoreUploadInput): Promise<MediaFileRow
   const { key } = await putObject({ prefix, extension: EXTENSION_BY_TYPE[sniffed] ?? "", buffer });
 
   const insert = async (tx: DbExecutor): Promise<MediaFileRow> => {
-    if (input.clubId) {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`media-quota:${input.clubId}`}, 0))`);
-      const [{ used }] = await tx
-        .select({ used: sql<number>`coalesce(sum(${mediaFiles.sizeBytes}), 0)::bigint::float8` })
-        .from(mediaFiles)
-        .where(and(eq(mediaFiles.clubId, input.clubId), isNull(mediaFiles.deletedAt)));
-      if (Number(used) + buffer.length > clubQuotaBytes()) {
-        throw new ValidationError("The storage quota of this club is exhausted", { code: "QUOTA_EXCEEDED", details: { code: "club_quota" } });
-      }
-    }
+    if (input.clubId) await assertQuota(tx, input.clubId, buffer.length);
     // Unclaimed uploads are capped per user so POST /media cannot be used as free storage (they are swept after a TTL).
     if (!input.owner && input.uploadedBy) {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`media-unattached:${input.uploadedBy}`}, 0))`);
@@ -186,7 +192,62 @@ export async function storeUpload(input: StoreUploadInput): Promise<MediaFileRow
   };
 
   try {
-    return input.executor ? await insert(input.executor) : await db.transaction(insert);
+    const row = input.executor ? await insert(input.executor) : await db.transaction(insert);
+    // 80 / 100 % notices; with the caller's transaction still open the numbers are not final, so the caller does it after its commit.
+    if (!input.executor && input.clubId) await checkStorageThresholds(input.clubId);
+    return row;
+  } catch (err) {
+    await discardStoredFile(key);
+    throw err;
+  }
+}
+
+export interface StoreGeneratedPdfInput {
+  buffer: Buffer;
+  clubId: string;
+  /** Storage directory below the club (default `generated`): the key becomes `<clubId>/<dir>/<uuid>.pdf`. */
+  directory?: string;
+  filename: string;
+  owner: { type: string; id: string | null };
+  /** Personal and evidence documents are streamed authenticated with an audit entry, never as a signed URL. */
+  sensitive: boolean;
+  uploadedBy: string | null;
+  executor?: DbExecutor;
+}
+
+/**
+ * Registers a PDF produced by the render pipeline (server-made, so no client content type to check): size cap, `%PDF-`
+ * magic bytes, quota under the per-club lock, registry row. Same rules as an upload for everything else.
+ */
+export async function storeGeneratedPdf(input: StoreGeneratedPdfInput): Promise<MediaFileRow> {
+  if (input.buffer.length === 0 || input.buffer.length > MAX_GENERATED_PDF_BYTES) throw new ValidationError("Generated file has an invalid size");
+  if (sniffMimeType(input.buffer) !== "application/pdf") throw new ValidationError("Generated file is not a PDF");
+  const { key } = await putObject({ prefix: `${input.clubId}/${input.directory ?? "generated"}`, extension: "pdf", buffer: input.buffer });
+  const insert = async (tx: DbExecutor): Promise<MediaFileRow> => {
+    await assertQuota(tx, input.clubId, input.buffer.length);
+    const [row] = await tx
+      .insert(mediaFiles)
+      .values({
+        clubId: input.clubId,
+        storageKey: key,
+        ownerType: input.owner.type,
+        ownerId: input.owner.id,
+        kind: "document",
+        mimeType: "application/pdf",
+        sizeBytes: input.buffer.length,
+        sha256: createHash("sha256").update(input.buffer).digest("hex"),
+        originalFilename: sanitizeFilename(input.filename),
+        sensitive: input.sensitive,
+        visibility: "private",
+        uploadedBy: input.uploadedBy,
+      })
+      .returning();
+    return row!;
+  };
+  try {
+    const row = input.executor ? await insert(input.executor) : await db.transaction(insert);
+    if (!input.executor) await checkStorageThresholds(input.clubId);
+    return row;
   } catch (err) {
     await discardStoredFile(key);
     throw err;
@@ -239,6 +300,40 @@ export async function sweepUnattachedUploads(now = Date.now()): Promise<number> 
     .returning({ storageKey: mediaFiles.storageKey });
   for (const { storageKey } of stale) await purgeMediaFile(storageKey);
   return stale.length;
+}
+
+/** Namespaces that exist only since the registry (Wave 13): a file there without a registry row is an orphan, never a legacy file. */
+const REGISTRY_ONLY_DIRECTORIES = ["documents", "personal", "generated", "branding"] as const;
+/** A file younger than this may belong to an upload whose registry row is about to be committed. */
+const ORPHAN_MIN_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Removes files of the registry-only namespaces (`<club>/documents|personal|generated|branding/...`) that have no registry
+ * row (crash between file write and commit) and are older than an hour; also files whose row is a tombstone. Files of the
+ * older namespaces are NOT touched (they are registered lazily on first use). Returns the number removed.
+ */
+export async function sweepOrphanFiles(clubIds: readonly string[], now = Date.now()): Promise<number> {
+  let removed = 0;
+  for (const clubId of clubIds) {
+    for (const dir of REGISTRY_ONLY_DIRECTORIES) {
+      const keys = await listObjects(`${clubId}/${dir}`);
+      for (let i = 0; i < keys.length; i += 200) {
+        const batch = keys.slice(i, i + 200);
+        const live = new Set((await db.select({ key: mediaFiles.storageKey }).from(mediaFiles).where(and(inArray(mediaFiles.storageKey, batch), isNull(mediaFiles.deletedAt)))).map((r) => r.key));
+        for (const key of batch) {
+          if (live.has(key)) continue;
+          try {
+            if (now - (await objectMtimeMs(key)) < ORPHAN_MIN_AGE_MS) continue;
+            await deleteObject(key);
+            removed += 1;
+          } catch (err) {
+            logger.error({ err, key }, "[media] failed to remove orphan file");
+          }
+        }
+      }
+    }
+  }
+  return removed;
 }
 
 /** Starts the sweep now and then hourly; the timer does not keep the process alive. */
@@ -408,9 +503,11 @@ function applyMediaHeaders(c: Context, row: MediaFileRow, cacheControl: string, 
   c.header("Content-Length", String(row.sizeBytes));
 }
 
-async function readFileOrNotFound(row: MediaFileRow): Promise<Buffer> {
+/** A web stream of the stored file (no full read into memory); a missing file is the same 404 as an unknown key. */
+async function streamOrNotFound(row: MediaFileRow): Promise<ReadableStream<Uint8Array>> {
   try {
-    return await getObject(row.storageKey);
+    await objectSize(row.storageKey);
+    return Readable.toWeb(openObjectStream(row.storageKey) as Readable) as ReadableStream<Uint8Array>;
   } catch {
     throw new NotFoundError("File not found");
   }
@@ -422,18 +519,18 @@ async function readFileOrNotFound(row: MediaFileRow): Promise<Buffer> {
  */
 export async function serveSignedMedia(c: Context, row: MediaFileRow, maxAgeSeconds: number): Promise<Response> {
   if (row.sensitive) throw new NotFoundError("File not found");
-  const buffer = await readFileOrNotFound(row);
+  const body = await streamOrNotFound(row);
   const isPublic = row.visibility === "public_opt_in";
   // `private`: a shared/CDN cache must never hand a signed response to someone else.
   applyMediaHeaders(c, row, isPublic ? "public, max-age=300" : `private, max-age=${Math.max(0, maxAgeSeconds)}`, row.kind === "document" ? "attachment" : "inline");
-  return c.body(new Uint8Array(buffer));
+  return c.body(body);
 }
 
 /** Authenticated stream of a non-sensitive file (the caller's route did the permission check). No signature involved. */
 export async function streamMedia(c: Context, row: MediaFileRow): Promise<Response> {
-  const buffer = await readFileOrNotFound(row);
+  const body = await streamOrNotFound(row);
   applyMediaHeaders(c, row, "private, no-store", row.kind === "document" ? "attachment" : "inline");
-  return c.body(new Uint8Array(buffer));
+  return c.body(body);
 }
 
 /**
@@ -447,7 +544,7 @@ export async function streamSensitiveMedia(c: Context, row: MediaFileRow, access
     subjectId: access.subjectId ?? row.id,
     payload: { mediaId: row.id, ownerType: row.ownerType, ownerId: row.ownerId, accessedBy: access.accessedBy, ...(access.reason ? { reason: access.reason } : {}) },
   });
-  const buffer = await readFileOrNotFound(row);
+  const body = await streamOrNotFound(row);
   applyMediaHeaders(c, row, "private, no-store", "attachment");
-  return c.body(new Uint8Array(buffer));
+  return c.body(body);
 }

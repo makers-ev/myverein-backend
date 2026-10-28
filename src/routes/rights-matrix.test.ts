@@ -41,6 +41,8 @@ import { dpaRoutes } from "./dpa.js";
 import { clubNoticeBySlugRoutes, clubPrivacyNoticeRoutes } from "./club-privacy-notices.js";
 import { retentionPolicyRoutes } from "./retention-policies.js";
 import { adminStatsRoutes } from "./admin-stats.js";
+import { adminStorageRoutes } from "./admin-storage.js";
+import { clubStorageRoutes } from "./club-storage.js";
 import { attendanceReportRoutes } from "./attendance-report.js";
 import { availabilityRoutes } from "./availability.js";
 import { calendarRoutes } from "./calendars.js";
@@ -88,6 +90,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/internal", "internalStatsRoutes", internalStatsRoutes],
   ["/admin", "adminStatsRoutes", adminStatsRoutes],
   ["/admin", "adminEmailRoutes", adminEmailRoutes],
+  ["/admin", "adminStorageRoutes", adminStorageRoutes],
   ["/admin", "adminClubRoutes", adminClubRoutes],
   ["/club-stats", "clubStatsRoutes", clubStatsRoutes],
   ["/consent-purposes", "consentPurposeRoutes", consentPurposeRoutes],
@@ -97,6 +100,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/my-wards", "myWardsRoutes", myWardsRoutes],
   ["/guardian", "guardianRoutes", guardianRoutes],
   ["/club-settings", "clubSettingsRoutes", clubSettingsRoutes],
+  ["/club-storage", "clubStorageRoutes", clubStorageRoutes],
   ["/audit-log", "auditLogRoutes", auditLogRoutes],
   ["/club-exit-requests", "clubExitRequestRoutes", clubExitRequestRoutes],
   ["/club-announcements", "clubAnnouncementRoutes", clubAnnouncementRoutes],

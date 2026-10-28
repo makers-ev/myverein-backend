@@ -94,6 +94,7 @@ export const AUDIT_EVENTS = {
   "club_registration.submit": spec(["from", "slugSuggestion", "userId"]),
   "club_role.assign": spec(["clubId", "clubMemberId", "departmentId", "roleType"], "clubMemberId"),
   "club_role.revoke": spec(["clubId", "clubMemberId", "roleId", "roleType"], "clubMemberId"),
+  "club_storage.quota_update": spec(["actor", "clubId", "quotaBytes"]),
   "club_settings.assembly_update": spec(["changedBy", "changedFields", "clubId"]),
   "club_settings.update": spec(["changedBy", "changedFields", "clubId"]),
   "consent.grant": spec(["clubId", "clubMemberId", "givenBy", "purposeId", "textVersionId", "via"], "clubMemberId"),

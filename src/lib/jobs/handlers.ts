@@ -12,6 +12,7 @@ import { handleTermNotify, handleTermSweep, TERM_NOTIFY_JOB_TYPE, TERM_SWEEP_INT
 import { handleSeriesRefill, SERIES_REFILL_INTERVAL_MS, SERIES_REFILL_JOB_TYPE } from "../event-series-refill.js";
 import { GUEST_SWEEP_INTERVAL_MS, GUEST_SWEEP_JOB_TYPE, sweepUnconfirmedGuests } from "../event-guests.js";
 import { handleHelperReminders, HELPER_REMINDER_INTERVAL_MS, HELPER_REMINDER_JOB_TYPE } from "../helper-reminders.js";
+import { handleMediaOrphanSweep, MEDIA_ORPHAN_SWEEP_INTERVAL_MS, MEDIA_ORPHAN_SWEEP_JOB_TYPE } from "../media-jobs.js";
 import { registerNotifyJobs } from "../notify/index.js";
 import { installUnsubscribeProvider } from "../notify/unsubscribe-token.js";
 import { handleReminder, handleReminderSweep, REMINDER_JOB_TYPE, REMINDER_SWEEP_INTERVAL_MS, REMINDER_SWEEP_JOB_TYPE } from "../reminders.js";
@@ -54,6 +55,7 @@ export function registerAllJobs(): void {
   registerRecurringJob({ type: GUEST_SWEEP_JOB_TYPE, intervalMs: GUEST_SWEEP_INTERVAL_MS }, async () => {
     await sweepUnconfirmedGuests();
   });
+  registerRecurringJob({ type: MEDIA_ORPHAN_SWEEP_JOB_TYPE, intervalMs: MEDIA_ORPHAN_SWEEP_INTERVAL_MS }, handleMediaOrphanSweep);
   registerRetentionTasks();
   registerRecurringJob({ type: RETENTION_SWEEP_JOB_TYPE, intervalMs: RETENTION_SWEEP_INTERVAL_MS }, handleRetentionSweep);
 }

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { isCleanText } from "./text-policy.js";
@@ -69,4 +70,35 @@ export async function objectSize(key: string): Promise<number> {
 /** Overwrites an existing stored file in place (same traversal guard). */
 export async function writeObject(key: string, buffer: Buffer): Promise<void> {
   await writeFile(resolveInside(key), buffer);
+}
+
+/** Streams a stored file (same traversal guard) without loading it into memory; the caller checks existence with `objectSize` first. */
+export function openObjectStream(key: string): NodeJS.ReadableStream {
+  return createReadStream(resolveInside(key));
+}
+
+/** Last modification time of a stored file in epoch milliseconds (same traversal guard). */
+export async function objectMtimeMs(key: string): Promise<number> {
+  return (await stat(resolveInside(key))).mtimeMs;
+}
+
+/** Lists the stored files below a key prefix (recursive, relative keys with `/`); an unknown prefix yields nothing. */
+export async function listObjects(prefix: string): Promise<string[]> {
+  const root = resolveInside(prefix);
+  const out: string[] = [];
+  const walk = async (dir: string, rel: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const next = `${rel}/${entry.name}`;
+      if (entry.isDirectory()) await walk(path.join(dir, entry.name), next);
+      else if (entry.isFile()) out.push(next);
+    }
+  };
+  await walk(root, prefix);
+  return out;
 }
