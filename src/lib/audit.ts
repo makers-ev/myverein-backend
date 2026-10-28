@@ -223,6 +223,7 @@ export const AUDIT_EVENTS = {
   "member_card.print_sheet": spec(["clubId", "count"]),
   "member_card.reissue": spec(["cardId", "clubId", "via"], "subject"),
   "member_card.revoke": spec(["cardId", "clubId", "via"], "subject"),
+  "member_card.view": spec(["cardId", "clubId"], "subject"),
   "member_card.verify": spec(["cardId", "clubId", "result"], "subject"),
   "member_card.verify_failed": spec(["clubId"]),
   "member_data.export": spec(["bytes", "clubId", "exportedBy", "format", "via"], "subject"),

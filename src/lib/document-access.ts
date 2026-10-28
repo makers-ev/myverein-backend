@@ -178,6 +178,7 @@ type DocLike = Pick<DocumentRow, "scope" | "folderId" | "status" | "clubId"> & P
  */
 export function documentLevel(p: DocumentPrincipal, index: FolderIndex, doc: DocLike): DocumentPermissionLevel | null {
   const level = folderLevel(p, index, doc.folderId);
-  if (!p.isGuest && doc.kind === "erzeugt" && doc.createdBy === p.userId && doc.status === "aktiv" && doc.scope === "verein") return maxLevel(level, "lesen");
+  // The exception lasts only while the requester still holds the right to generate: somebody who left the board keeps no copy of the member list.
+  if (!p.isGuest && doc.kind === "erzeugt" && doc.createdBy === p.userId && doc.status === "aktiv" && doc.scope === "verein" && hasClubPermission(p.roleTypes, "documents:generate")) return maxLevel(level, "lesen");
   return level;
 }

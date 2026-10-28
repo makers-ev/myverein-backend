@@ -345,6 +345,8 @@ async function loadVisible(c: Parameters<typeof buildPrincipal>[0], rawId: strin
   const acting = await actingRelation(p, row.person);
   const manager = manages(p, index, row.doc);
   if (!acting && !manager) throw new NotFoundError("Acknowledgement not found");
+  // A document the board took out of circulation (trash, deletion pending) is no longer readable through a request.
+  if (!manager && row.doc.status !== "aktiv") throw new NotFoundError("Acknowledgement not found");
   return { p, index, loaded: { ack: row.ack, doc: row.doc, version: row.version, person: row.person, acting, manager } };
 }
 
@@ -394,6 +396,7 @@ acknowledgementRoutes.post("/:id/confirm", respondLimiter, zValidator("json", re
   if (!acting) throw new NotFoundError("Acknowledgement not found");
   if (isLeftStatus(effectiveStatus(person, todayBerlin()))) throw new ConflictError("The person is no longer a member", { details: { code: "member_left" } });
   if (!acting.canAnswer) throw new ForbiddenError("A minor's request is answered by a guardian", { details: { code: "guardian_required" } });
+  if (loaded.doc.status !== "aktiv") throw new ConflictError("The document is no longer available", { details: { code: "document_not_available" } });
   const status = derivedStatus(ack);
   // Answering twice with the same decision is not an error (a retried request must not fail); a different decision after the fact is.
   if (status === "bestaetigt" || status === "abgelehnt") {

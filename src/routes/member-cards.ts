@@ -134,7 +134,10 @@ memberCardRoutes.get("/:id/card", async (c) => {
   const p = await buildPrincipal(c);
   const { person, relation } = await resolveSubject(p, c.req.param("id"));
   c.header("Cache-Control", "private, no-store");
-  return c.json({ data: await shapeCard(person, await cardForView(p, person, relation), { includeHint: true }) });
+  const card = await cardForView(p, person, relation);
+  // The board gets the live token of somebody else's card: that is logged like a print.
+  if (relation === "board" && card) await writeAudit(db, { eventType: "member_card.view", subjectId: person.id, actorUserId: p.userId, clubId: p.clubId, payload: { clubId: p.clubId, cardId: card.id } });
+  return c.json({ data: await shapeCard(person, card, { includeHint: true }) });
 });
 
 memberCardRoutes.get("/:id/card.pdf", pdfLimiter, async (c) => cardPdf(c, c.req.param("id")));

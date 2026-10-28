@@ -290,7 +290,7 @@ documentRoutes.get("/", zValidator("query", listQuery, invalid), async (c) => {
   const index = await loadFolderIndex(p.clubId);
   const need: DocumentPermissionLevel = q.status === "aktiv" ? "lesen" : "schreiben";
   if (q.mine === "1") {
-    if (q.status !== "aktiv") return c.json({ data: [], page: q.page, pageSize: q.pageSize, total: 0 });
+    if (q.status !== "aktiv" || p.isGuest || !hasClubPermission(p.roleTypes, "documents:generate")) return c.json({ data: [], page: q.page, pageSize: q.pageSize, total: 0 });
     const own = and(eq(documents.clubId, p.clubId), eq(documents.scope, "verein"), eq(documents.status, "aktiv"), eq(documents.kind, "erzeugt"), eq(documents.createdBy, p.userId));
     const [ownTotal] = await db.select({ n: count() }).from(documents).where(own);
     const ownRows = await db.select().from(documents).where(own).orderBy(desc(documents.updatedAt), desc(documents.id)).limit(q.pageSize).offset((q.page - 1) * q.pageSize);
