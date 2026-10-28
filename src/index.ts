@@ -23,6 +23,7 @@ import { clubNoticeBySlugRoutes, clubPrivacyNoticeRoutes } from "./routes/club-p
 import { adminRetentionRoutes } from "./routes/admin-retention.js";
 import { retentionPolicyRoutes } from "./routes/retention-policies.js";
 import { adminStorageRoutes } from "./routes/admin-storage.js";
+import { documentRoutes } from "./routes/documents.js";
 import { clubStorageRoutes } from "./routes/club-storage.js";
 import { adminStatsRoutes } from "./routes/admin-stats.js";
 import { adminEmailRoutes } from "./routes/admin-emails.js";
@@ -156,6 +157,7 @@ app.route("/club-forms", clubFormRoutes);
 app.route("/form-submissions", formSubmissionRoutes);
 app.route("/departments", departmentRoutes);
 app.route("/club-info", clubInfoRoutes);
+app.route("/documents", documentRoutes);
 app.route("/club-roles", clubRoleRoutes);
 app.route("/calendars", calendarRoutes);
 app.route("/calendar-feeds", calendarFeedRoutes);

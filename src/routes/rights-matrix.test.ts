@@ -43,6 +43,7 @@ import { retentionPolicyRoutes } from "./retention-policies.js";
 import { adminStatsRoutes } from "./admin-stats.js";
 import { adminStorageRoutes } from "./admin-storage.js";
 import { clubStorageRoutes } from "./club-storage.js";
+import { documentRoutes } from "./documents.js";
 import { attendanceReportRoutes } from "./attendance-report.js";
 import { availabilityRoutes } from "./availability.js";
 import { calendarRoutes } from "./calendars.js";
@@ -131,6 +132,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/form-submissions", "formSubmissionRoutes", formSubmissionRoutes],
   ["/departments", "departmentRoutes", departmentRoutes],
   ["/club-info", "clubInfoRoutes", clubInfoRoutes],
+  ["/documents", "documentRoutes", documentRoutes],
   ["/club-roles", "clubRoleRoutes", clubRoleRoutes],
   ["/calendars", "calendarRoutes", calendarRoutes],
   ["/calendar-feeds", "calendarFeedRoutes", calendarFeedRoutes],
@@ -247,7 +249,15 @@ const SELF_SERVICE: Record<string, string> = {
 };
 
 /** Routes that may answer 404 instead of 403 (the resource is resolved/scoped before the permission check). */
-const MAY_BE_404: Record<string, string> = {};
+const MAY_BE_404: Record<string, string> = {
+  "PATCH /documents/folders/:id": "the folder is resolved first: a folder the caller cannot see is 404 by design (no existence leak); a visible one without the right is 403",
+  "DELETE /documents/folders/:id": "same as the folder PATCH",
+  "PATCH /documents/:id": "documents the caller cannot see are 404 (not 403), asserted in documents.test.ts",
+  "DELETE /documents/:id": "same as the document PATCH (trash needs schreiben on the folder)",
+  "POST /documents/:id/restore": "same as the document PATCH",
+  "POST /documents/:id/versions": "same as the document PATCH (new version needs schreiben on the folder)",
+  "DELETE /documents/:id/permanent": "same as the document PATCH (needs verwalten on the folder)",
+};
 
 /** Read routes a plain mitglied may use but an external guest must NOT (guests: 403, or 404 where the resource is hidden). */
 const GUEST_DENIED_READS: Array<[string, string]> = [
@@ -316,6 +326,10 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /dpa/accept": { dpaVersionId: SOME_ID, signerName: "Max Mustermann", authorized: true },
   "POST /departments": { name: "Abteilung" },
   "PUT /club-info/:slug": { title: "Titel" },
+  "POST /documents/folders": { name: "Ordner" },
+  "PATCH /documents/folders/:id": { name: "Neu" },
+  "PUT /documents/folders/:id/permissions": { entries: [] },
+  "PATCH /documents/:id": { title: "Neu" },
   "POST /calendars": { name: "Kalender" },
   "POST /calendars/:id/visibility": { roleType: "trainer" },
   "POST /events": { calendarId: SOME_ID, title: "Termin", startsAt: "2030-01-01T10:00:00Z" },

@@ -84,6 +84,6 @@ describe("media layer grep gate", () => {
   it("uploads parse multipart bodies only in routes that hand the file to the media layer", () => {
     const parsers = files.filter((f) => /parseBody\(/.test(f.source));
     expect(parsers.length).toBeGreaterThan(0);
-    for (const f of parsers) expect(f.source, f.file).toMatch(/storeUpload|replaceMemberPhoto|readPhotoFile/);
+    for (const f of parsers) expect(f.source, f.file).toMatch(/storeUpload|replaceMemberPhoto|readPhotoFile|createUploadedDocument|addUploadedVersion/);
   });
 });
