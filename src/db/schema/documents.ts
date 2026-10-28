@@ -161,7 +161,9 @@ export const documentVersions = pgTable(
   (table) => [uniqueIndex("document_versions_doc_no_uidx").on(table.documentId, table.versionNo), index("document_versions_club_idx").on(table.clubId)],
 );
 
+/** `abgelaufen` is derived at read time (an open request past its due date); it is never written to the column. */
 export const ACK_STATUSES = ["offen", "bestaetigt", "abgelehnt", "abgelaufen"] as const;
+export const ACK_GIVEN_BY = ["self", "guardian", "board_paper"] as const;
 export type AckStatus = (typeof ACK_STATUSES)[number];
 
 /** Simple digital acknowledgement of a document version (Wave 13 B11): who, when, which version (hash), exact wording, on behalf of whom. */
@@ -192,12 +194,21 @@ export const documentAcknowledgements = pgTable(
     respondedAt: timestamp("responded_at", { withTimezone: true }),
     actedByUserId: text("acted_by_user_id").references(() => user.id, { onDelete: "set null" }),
     actedByClubMemberId: uuid("acted_by_club_member_id").references(() => clubMembers.id, { onDelete: "set null" }),
+    // Same proof structure as `consent_records`: who gave it (`self` / `guardian` / `board_paper`), and for a paper proof the date and source.
+    givenBy: text("given_by"),
+    proofDate: date("proof_date", { mode: "string" }),
+    proofSource: text("proof_source"),
+    // The person has to enter the password again to confirm (sensitive documents such as a liability waiver).
+    requiresReauth: boolean("requires_reauth").notNull().default(false),
+    remindedAt: timestamp("reminded_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("document_ack_version_member_uidx").on(table.versionId, table.clubMemberId),
     index("document_ack_club_status_idx").on(table.clubId, table.status),
     index("document_ack_member_idx").on(table.clubMemberId),
+    check("document_ack_given_by_chk", sql`${table.givenBy} IS NULL OR ${table.givenBy} IN ('self', 'guardian', 'board_paper')`),
+    check("document_ack_paper_proof_chk", sql`${table.givenBy} IS DISTINCT FROM 'board_paper' OR (${table.proofDate} IS NOT NULL AND ${table.proofSource} IS NOT NULL)`),
   ],
 );
 

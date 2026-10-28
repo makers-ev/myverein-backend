@@ -43,6 +43,7 @@ import { retentionPolicyRoutes } from "./retention-policies.js";
 import { adminStatsRoutes } from "./admin-stats.js";
 import { adminStorageRoutes } from "./admin-storage.js";
 import { clubStorageRoutes } from "./club-storage.js";
+import { acknowledgementRoutes } from "./acknowledgements.js";
 import { documentRoutes } from "./documents.js";
 import { clubBrandingRoutes } from "./club-branding.js";
 import { documentGenerationRoutes } from "./document-generation.js";
@@ -137,6 +138,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/departments", "departmentRoutes", departmentRoutes],
   ["/club-info", "clubInfoRoutes", clubInfoRoutes],
   ["/documents", "documentRoutes", documentRoutes],
+  ["/acknowledgements", "acknowledgementRoutes", acknowledgementRoutes],
   ["/document-generation", "documentGenerationRoutes", documentGenerationRoutes],
   ["/member-documents", "memberDocumentRoutes", memberDocumentRoutes],
   ["/club-roles", "clubRoleRoutes", clubRoleRoutes],
@@ -176,6 +178,7 @@ const SELF_SERVICE: Record<string, string> = {
   "DELETE /member-documents/:memberId/:docId": "removing an own upload (member side) or any document with a reason (documents:read_personal); retention blocks; other callers 404",
   "POST /member-documents/:memberId/:docId/hide": "hiding a receipt/generated document from the own list (self / guardian only; board and strangers 404)",
   "POST /member-documents/:memberId/:docId/unhide": "undoing the hide (same rules)",
+  "POST /acknowledgements/:id/confirm": "the person asked (an adult) or a guardian with a live link answers the own request; strangers and managers who are not the person get 404, a minor with an account 403 guardian_required, asserted in acknowledgements.test.ts",
   "PATCH /club-members/me": "own profile",
   "POST /club-members/apply": "join request (the caller is not yet a member)",
   "POST /club-registrations": "found a club (user-level, own application)",
@@ -261,6 +264,9 @@ const SELF_SERVICE: Record<string, string> = {
 
 /** Routes that may answer 404 instead of 403 (the resource is resolved/scoped before the permission check). */
 const MAY_BE_404: Record<string, string> = {
+  "POST /acknowledgements/requests": "the document is resolved first: one the caller cannot manage (schreiben) is 404, no existence leak; asserted in acknowledgements.test.ts",
+  "POST /acknowledgements/remind": "same as the request",
+  "POST /acknowledgements/:id/paper": "the acknowledgement is resolved first (the person, the guardian or the document manager see it); everybody else 404",
   "POST /document-generation/jobs/:id/retry": "the job is resolved first: a job of somebody else (or another club) is 404 by design; the template right is checked right after",
   "PATCH /documents/folders/:id": "the folder is resolved first: a folder the caller cannot see is 404 by design (no existence leak); a visible one without the right is 403",
   "DELETE /documents/folders/:id": "same as the folder PATCH",
@@ -297,6 +303,9 @@ const GUEST_DENIED_READS: Array<[string, string]> = [
 /** Routes whose body validation runs before the permission check need a valid sample body. Default `{}`. */
 const SOME_ID = "00000000-0000-4000-8000-000000000001";
 const SAMPLE_BODIES: Record<string, unknown> = {
+  "POST /acknowledgements/requests": { documentId: SOME_ID, audience: { all: true } },
+  "POST /acknowledgements/remind": { documentId: SOME_ID },
+  "POST /acknowledgements/:id/paper": { decision: "bestaetigt", proofDate: "2020-01-01", proofSource: "Liste" },
   "POST /club-members": { displayName: "Nobody", categoryKey: "aktiv" },
   "POST /club-members/:id/departments": { departmentId: SOME_ID },
   "POST /meetings/:id/agenda-items": { title: "Begrüßung" },
