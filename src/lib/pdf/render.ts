@@ -14,6 +14,9 @@ import type { JobContext } from "../jobs/registry.js";
 import { logger } from "../logger.js";
 import { discardStoredFile, DOCUMENT_OWNER_TYPES, storeGeneratedPdf } from "../media.js";
 import { checkStorageThresholds } from "../media-quota.js";
+import { clubMembers } from "../../db/schema/club-members.js";
+import { todayBerlin } from "../member-lifecycle.js";
+import { retentionUntilFor } from "../retention/document-classes.js";
 import { getPdfEngine, looksLikePdf, PdfRenderError, DEFAULT_PDF_LIMITS, type PdfBranding } from "./engine.js";
 import { getTemplate, RENDER_ENGINE_VERSION, type AnyTemplate } from "./registry.js";
 import { pdfText } from "./text.js";
@@ -245,7 +248,10 @@ async function persist(job: RenderJobRow, template: AnyTemplate, built: Awaited<
         const [{ n }] = await tx.select({ n: sql<number>`coalesce(max(${documentVersions.versionNo}), 0)::int` }).from(documentVersions).where(eq(documentVersions.documentId, doc.id));
         versionNo = n + 1;
       } else {
+        // Retention (B14): classes counted from the creation get their date now; exit-based ones follow the exit of the person.
+        const [owner] = person ? await tx.select({ leftAt: clubMembers.leftAt }).from(clubMembers).where(eq(clubMembers.id, built.subjectClubMemberId!)) : [];
         await tx.insert(documents).values({
+          retentionUntil: retentionUntilFor(template.docType, todayBerlin(), owner?.leftAt ?? null),
           id: documentId,
           clubId: job.clubId,
           scope: person ? "person" : "verein",

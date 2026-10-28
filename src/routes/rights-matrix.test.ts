@@ -269,6 +269,8 @@ const SELF_SERVICE: Record<string, string> = {
 
 /** Routes that may answer 404 instead of 403 (the resource is resolved/scoped before the permission check). */
 const MAY_BE_404: Record<string, string> = {
+  "PUT /documents/:id/legal-hold": "same as the document PATCH (needs verwalten on the folder)",
+  "PUT /member-documents/:memberId/:docId/legal-hold": "the subject is resolved first (strangers 404); the person themselves and the board without documents:manage get 403",
   "POST /acknowledgements/requests": "the document is resolved first: one the caller cannot manage (schreiben) is 404, no existence leak; asserted in acknowledgements.test.ts",
   "POST /acknowledgements/remind": "same as the request",
   "POST /acknowledgements/:id/paper": "the acknowledgement is resolved first (the person, the guardian or the document manager see it); everybody else 404",
@@ -308,6 +310,8 @@ const GUEST_DENIED_READS: Array<[string, string]> = [
 /** Routes whose body validation runs before the permission check need a valid sample body. Default `{}`. */
 const SOME_ID = "00000000-0000-4000-8000-000000000001";
 const SAMPLE_BODIES: Record<string, unknown> = {
+  "PUT /documents/:id/legal-hold": { active: true },
+  "PUT /member-documents/:memberId/:docId/legal-hold": { active: true },
   "POST /member-cards/verify": { token: "mc1.x" },
   "POST /member-cards/print": { clubMemberIds: [SOME_ID] },
   "POST /acknowledgements/requests": { documentId: SOME_ID, audience: { all: true } },

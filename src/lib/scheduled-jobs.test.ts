@@ -51,7 +51,7 @@ describe("retention hook point", () => {
     expect(JSON.stringify(results)).not.toContain("secret");
     clearRetentionTasks();
     registerRetentionTasks();
-    expect(retentionTasks().map((t) => t.key)).toEqual(["inbox-retention", "jobs-retention", "delivery-retention", "data-retention", "rate-limit-events"]);
+    expect(retentionTasks().map((t) => t.key)).toEqual(["inbox-retention", "jobs-retention", "delivery-retention", "data-retention", "document-retention", "rate-limit-events"]);
   });
 
   it("reads DELIVERY_RETENTION_DAYS with a default of 90", () => {

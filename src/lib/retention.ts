@@ -5,6 +5,7 @@ import type { JobContext } from "./jobs/registry.js";
 import { deleteFinishedJobs } from "./jobs/queue.js";
 import { logger } from "./logger.js";
 import { purgeRateLimitEvents } from "./rate-limits.js";
+import { runDocumentRetention } from "./document-retention.js";
 import { runRetentionRules } from "./retention/sweep.js";
 
 /**
@@ -164,6 +165,14 @@ export function registerRetentionTasks(): void {
       // Category names only (no data) so the queue retries; every category already logged its own error.
       if (summary.failed.length > 0) throw new Error(`retention categories failed: ${[...new Set(summary.failed)].join(", ")}`);
       return { affected: summary.affected };
+    },
+  });
+  registerRetentionTask({
+    key: "document-retention",
+    description: "Wave 13 documents: mark documents past their retention date, delete them after the notice period (RETENTION_DRY_RUN=true counts only)",
+    run: async ({ now }) => {
+      const r = await runDocumentRetention(now);
+      return { affected: r.marked + r.deleted };
     },
   });
   registerRetentionTask({

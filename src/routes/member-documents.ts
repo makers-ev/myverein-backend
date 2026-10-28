@@ -11,7 +11,8 @@ import { documents, documentVersions, type DocumentRow, type DocumentVersionRow 
 import { writeAudit } from "../lib/audit.js";
 import { buildPrincipal } from "../lib/document-access.js";
 import { addUploadedVersion, createUploadedDocument, mediaOfVersion, purgeableCondition, purgeDocuments } from "../lib/documents.js";
-import { ConflictError, NotFoundError, ValidationError } from "../lib/errors.js";
+import { hasClubPermission } from "../lib/club-permissions.js";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { isUuid } from "../lib/club-members.js";
 import { MAX_DOCUMENT_BYTES, streamSensitiveMedia } from "../lib/media.js";
 import { resolvePersonalSubject, type PersonalRelation } from "../lib/member-documents-access.js";
@@ -238,3 +239,21 @@ async function setHidden(c: Parameters<typeof buildPrincipal>[0], hidden: boolea
 /** Hides a document from the own list (it stays stored as evidence); the member side only. */
 memberDocumentRoutes.post("/:memberId/:docId/hide", (c) => setHidden(c, true));
 memberDocumentRoutes.post("/:memberId/:docId/unhide", (c) => setHidden(c, false));
+
+const legalHoldSchema = z.object({ active: z.boolean(), reason: cleanText(z.string().trim().min(1).max(200)).optional() });
+
+/** Legal hold on a personal document: `documents:manage` of the board only (the person cannot lock or unlock it). */
+memberDocumentRoutes.put("/:memberId/:docId/legal-hold", zValidator("json", legalHoldSchema, invalid), async (c) => {
+  const p = await buildPrincipal(c);
+  const { owner, relation } = await resolvePersonalSubject(c, p, c.req.param("memberId"));
+  if (relation !== "board" || !hasClubPermission(c.get("clubRoleTypes"), "documents:manage")) throw new ForbiddenError("Missing documents:manage permission");
+  const doc = await loadPersonalDocument(p.clubId, owner.id, c.req.param("docId"));
+  const { active } = c.req.valid("json");
+  const [updated] = await db
+    .update(documents)
+    .set({ legalHold: active, ...(active && doc.status === "zur_loeschung" ? { status: "aktiv" } : {}), updatedAt: new Date() })
+    .where(eq(documents.id, doc.id))
+    .returning();
+  await writeAudit(db, { eventType: "document.legal_hold", subjectId: doc.id, actorUserId: p.userId, clubId: p.clubId, payload: { clubId: p.clubId, documentId: doc.id, active } });
+  return c.json({ data: { id: updated!.id, legalHold: updated!.legalHold, status: updated!.status } });
+});

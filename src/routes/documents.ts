@@ -22,6 +22,7 @@ import {
 import { writeAudit } from "../lib/audit.js";
 import { CLUB_ROLE_TYPES, hasClubPermission } from "../lib/club-permissions.js";
 import { isUuid } from "../lib/club-members.js";
+import { DOCUMENT_RETENTION_CLASSES } from "../lib/retention/document-classes.js";
 import { atLeast, buildPrincipal, canAccessDocument, documentLevel, folderDepth, folderLevel, globalLevel, loadFolderIndex, subtreeHeight, subtreeIds, type DocumentPrincipal, type FolderIndex } from "../lib/document-access.js";
 import { addUploadedVersion, createUploadedDocument, listVersions, mediaOfVersion, purgeableCondition, purgeDocuments } from "../lib/documents.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
@@ -357,6 +358,29 @@ documentRoutes.post("/", uploadLimiter, uploadBody, async (c) => {
   const { document, version } = await createUploadedDocument({ clubId: p.clubId, scope: "verein", folderId, ownerClubMemberId: null, docType: "upload", title, file, uploadedBy: p.userId, note: textField(body["note"], 500, "note") });
   await writeAudit(db, { eventType: "document.upload", subjectId: document.id, payload: { clubId: p.clubId, documentId: document.id, folderId, docType: "upload", sizeBytes: version.sizeBytes } });
   return c.json({ data: shapeDocument(p, index, document, version) }, 201);
+});
+
+/** The retention classes (proposals, to be confirmed legally): read-only for the board. */
+documentRoutes.get("/retention-classes", (c) => {
+  requireManage(c);
+  return c.json({ data: DOCUMENT_RETENTION_CLASSES.map((k) => ({ docType: k.docType, class: k.class, label: k.label, years: k.years, startsOn: k.startsOn, description: k.description })) });
+});
+
+const legalHoldSchema = z.object({ active: z.boolean(), reason: cleanText(z.string().trim().min(1).max(200)).optional() });
+
+/** Legal hold on one archive document (`verwalten`): it cannot be deleted or purged while it is on; a pending retention deletion is called off. */
+documentRoutes.put("/:id/legal-hold", zValidator("json", legalHoldSchema, invalid), async (c) => {
+  const p = await buildPrincipal(c);
+  const index = await loadFolderIndex(p.clubId);
+  const doc = await loadDocument(c, p, index, c.req.param("id"), "verwalten");
+  const { active } = c.req.valid("json");
+  const [updated] = await db
+    .update(documents)
+    .set({ legalHold: active, ...(active && doc.status === "zur_loeschung" ? { status: "aktiv" } : {}), updatedAt: new Date() })
+    .where(eq(documents.id, doc.id))
+    .returning();
+  await writeAudit(db, { eventType: "document.legal_hold", subjectId: doc.id, actorUserId: p.userId, clubId: p.clubId, payload: { clubId: p.clubId, documentId: doc.id, active } });
+  return c.json({ data: { id: updated!.id, legalHold: updated!.legalHold, status: updated!.status } });
 });
 
 documentRoutes.get("/:id", async (c) => {
