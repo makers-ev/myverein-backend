@@ -112,6 +112,7 @@ export const AUDIT_EVENTS = {
   "dpa_version.delete": spec(["version"]),
   "dpa_version.publish": spec(["requiredFrom", "sha256", "version"]),
   "dpa_version.update": spec(["changedFields", "version"]),
+  "document.generate": spec(["clubId", "documentId", "templateId", "versionNo"]),
   "document.purge": spec(["clubId", "count", "documentId", "source"]),
   "document.restore": spec(["clubId", "documentId"]),
   "document.trash": spec(["clubId", "documentId"]),

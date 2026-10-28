@@ -345,6 +345,20 @@ export function startMediaSweeper(intervalMs = 60 * 60 * 1000): () => void {
   return () => clearInterval(timer);
 }
 
+/**
+ * The bytes of a registered file of this club (server-side consumers such as the PDF renderer reading the logo). `null` if the
+ * key is unknown, deleted, foreign or larger than `maxBytes`.
+ */
+export async function readRegisteredFile(clubId: string, storageKey: string, maxBytes: number): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  const row = await findMediaByKey(storageKey);
+  if (!row || row.clubId !== clubId || row.sizeBytes > maxBytes) return null;
+  try {
+    return { buffer: await getObject(storageKey), mimeType: row.mimeType };
+  } catch {
+    return null;
+  }
+}
+
 /** Opt a file into unauthenticated serving (`public_opt_in`). Sensitive files and files without a club can never be public. */
 export async function setMediaVisibility(storageKey: string, visibility: MediaVisibility): Promise<void> {
   const row = await findMediaByKey(storageKey);

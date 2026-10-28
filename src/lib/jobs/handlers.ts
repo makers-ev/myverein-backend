@@ -13,6 +13,8 @@ import { handleSeriesRefill, SERIES_REFILL_INTERVAL_MS, SERIES_REFILL_JOB_TYPE }
 import { GUEST_SWEEP_INTERVAL_MS, GUEST_SWEEP_JOB_TYPE, sweepUnconfirmedGuests } from "../event-guests.js";
 import { handleHelperReminders, HELPER_REMINDER_INTERVAL_MS, HELPER_REMINDER_JOB_TYPE } from "../helper-reminders.js";
 import { DOCUMENT_TRASH_INTERVAL_MS, DOCUMENT_TRASH_JOB_TYPE, handleDocumentTrashPurge, handleMediaOrphanSweep, MEDIA_ORPHAN_SWEEP_INTERVAL_MS, MEDIA_ORPHAN_SWEEP_JOB_TYPE } from "../media-jobs.js";
+import { registerBuiltinTemplates } from "../pdf/templates/index.js";
+import { handleRenderJob, RENDER_JOB_TYPE } from "../pdf/render.js";
 import { registerNotifyJobs } from "../notify/index.js";
 import { installUnsubscribeProvider } from "../notify/unsubscribe-token.js";
 import { handleReminder, handleReminderSweep, REMINDER_JOB_TYPE, REMINDER_SWEEP_INTERVAL_MS, REMINDER_SWEEP_JOB_TYPE } from "../reminders.js";
@@ -31,6 +33,8 @@ export function registerAllJobs(): void {
   if (registered) return;
   registered = true;
   registerNotifyJobs();
+  registerBuiltinTemplates();
+  registerJob(RENDER_JOB_TYPE, handleRenderJob);
   installUnsubscribeProvider();
   registerJob(PUBLISH_JOB_TYPE, handlePublishAnnouncement);
   registerJob(EVENT_CHANGED_JOB_TYPE, handleEventChanged);

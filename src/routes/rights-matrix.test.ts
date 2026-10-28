@@ -44,6 +44,7 @@ import { adminStatsRoutes } from "./admin-stats.js";
 import { adminStorageRoutes } from "./admin-storage.js";
 import { clubStorageRoutes } from "./club-storage.js";
 import { documentRoutes } from "./documents.js";
+import { documentGenerationRoutes } from "./document-generation.js";
 import { memberDocumentRoutes } from "./member-documents.js";
 import { attendanceReportRoutes } from "./attendance-report.js";
 import { availabilityRoutes } from "./availability.js";
@@ -134,6 +135,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/departments", "departmentRoutes", departmentRoutes],
   ["/club-info", "clubInfoRoutes", clubInfoRoutes],
   ["/documents", "documentRoutes", documentRoutes],
+  ["/document-generation", "documentGenerationRoutes", documentGenerationRoutes],
   ["/member-documents", "memberDocumentRoutes", memberDocumentRoutes],
   ["/club-roles", "clubRoleRoutes", clubRoleRoutes],
   ["/calendars", "calendarRoutes", calendarRoutes],
@@ -257,6 +259,7 @@ const SELF_SERVICE: Record<string, string> = {
 
 /** Routes that may answer 404 instead of 403 (the resource is resolved/scoped before the permission check). */
 const MAY_BE_404: Record<string, string> = {
+  "POST /document-generation/jobs/:id/retry": "the job is resolved first: a job of somebody else (or another club) is 404 by design; the template right is checked right after",
   "PATCH /documents/folders/:id": "the folder is resolved first: a folder the caller cannot see is 404 by design (no existence leak); a visible one without the right is 403",
   "DELETE /documents/folders/:id": "same as the folder PATCH",
   "PATCH /documents/:id": "documents the caller cannot see are 404 (not 403), asserted in documents.test.ts",
@@ -334,6 +337,7 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /departments": { name: "Abteilung" },
   "PUT /club-info/:slug": { title: "Titel" },
   "POST /documents/folders": { name: "Ordner" },
+  "POST /document-generation": { templateId: "branding-test" },
   "PATCH /documents/folders/:id": { name: "Neu" },
   "PUT /documents/folders/:id/permissions": { entries: [] },
   "PATCH /documents/:id": { title: "Neu" },
