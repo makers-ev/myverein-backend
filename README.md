@@ -11,6 +11,7 @@ Clone it, set three environment variables, run `docker compose up`, and you have
 - [Getting started](#getting-started)
 - [Architecture](#architecture)
 - [Data model](#data-model)
+- [Documents and PDF (Wave 13)](#documents-and-pdf-wave-13)
 - [Notification catalog](#notification-catalog)
 - [API reference](#api-reference)
 - [Rights and read scoping](#rights-and-read-scoping-wave-7-b7b8)
@@ -1352,6 +1353,20 @@ diff before.txt after.txt                 # only the new tables and the Wave 7 c
 ```
 
 The script runs in a `READ ONLY` transaction and prints only table names, counts and flags (`OK`/`FAIL`), never names, e-mail addresses or member numbers, so the output can be pasted into a ticket. Checks (all must be `OK`, exit code 0): every `member` has its `club_members` row, no duplicate `member_id`, linked rows match the account's club, no `ausgetreten` without `left_at`, every linked member has a category and `last_user_id`, no umlaut/unnormalised category keys and all five default categories per club, no dangling `guardian_links` ward and the legacy `ward_member_id` column gone, no foreign/external/traversal `photo_key`, every key holder covered by a history entry, no `open` wifi with a password, `meetings.type` within the controlled set, no unvalidated constraint. Informational lines (not failures): duplicate member-number groups (legacy data), `aktiv` members with a future `left_at`, cross-club guardian links. The script needs `tsx`, i.e. host mode (a checkout), not the production container.
+
+## Documents and PDF (Wave 13)
+
+Wave 13 adds document handling: versioned club documents (`club_info`), the document archive, the personal storage of members, branding, a storage quota and PDF generation. Decision record: vault ADR-010 "PDF-Erzeugung" (status Proposed, awaiting product owner sign-off).
+
+### PDF engine (Wave 13 B1, B8)
+
+`src/lib/pdf/` generates PDFs with **pdfkit** (pure Node, no shell, no external process, no template language) and **qrcode** (QR as vector squares). Callers only use `src/lib/pdf/engine.ts` (`PdfEngine.render(spec, limits)`, swap with `setPdfEngine`), so a render container could replace the implementation later.
+
+- A document is a declarative list of blocks (`heading`, `paragraph`, `keyValue`, `table`, `qr`, `spacer`, `signatureLine`) plus the club branding. User data is only ever text inside a block, there is no template code, so there is no injection class (`\input`, `\write18`, HTML) to escape.
+- `pdfText()` (`src/lib/pdf/text.ts`): NFC, control and bidi characters removed, length cut with an ellipsis, only glyphs of the PDF standard font (WinAnsi: umlauts, sz, accents, typographic quotes, dashes, euro) are kept; emoji, CJK, Arabic/Hebrew become `?` (documented replacement, no embedded font).
+- Limits (`DEFAULT_PDF_LIMITS`): 20 s timeout (checked between blocks and table rows), 200 pages, 20 MiB; the result must start with `%PDF-`. Errors are `PdfRenderError` with a fixed code (`timeout`, `page_limit`, `size_limit`, `engine_error`) and never contain user data.
+- Spike (ADR-010): receipt 1 page about 10 ms, member list with 400 rows 10 pages about 100 ms / 12 MiB RSS, ID card with QR about 20 ms; dependency size about 14 MB.
+- Limits of the engine: no PDF/A, no tagged PDF, standard fonts only (see ADR-010, E2/E3).
 
 ## Notification catalog
 
