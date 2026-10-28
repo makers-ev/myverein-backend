@@ -528,6 +528,20 @@ async function streamOrNotFound(row: MediaFileRow): Promise<ReadableStream<Uint8
 }
 
 /**
+ * Response for a PDF the server just rendered for the caller (e.g. the branding test page): nothing is stored, so there is no
+ * registry row; same hardening headers as every file response (`attachment`/`inline`, `no-store`, `nosniff`).
+ */
+export function respondRenderedPdf(c: Context, bytes: Buffer, filename: string, disposition: "inline" | "attachment" = "inline"): Response {
+  const safeName = sanitizeFilename(filename).replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+  c.header("Content-Type", "application/pdf");
+  c.header("Content-Disposition", `${disposition}; filename="${safeName}"`);
+  c.header("Cache-Control", "private, no-store");
+  c.header("X-Content-Type-Options", "nosniff");
+  c.header("Content-Length", String(bytes.length));
+  return c.body(new Uint8Array(bytes));
+}
+
+/**
  * Serves a registered file after a valid signature (or `public_opt_in`) -- called by `GET /media/*` only. Sensitive
  * files are refused here no matter how valid the signature is: they exist only on the authenticated, audited path.
  */

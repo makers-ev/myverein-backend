@@ -1415,6 +1415,10 @@ Code in `src/lib/pdf/`: `registry.ts` (fixed, versioned template whitelist; club
 
 Branding lives in `club_settings` (`brand_logo_key`, `brand_primary_color`, `brand_accent_color`, `letterhead_*`; all `NULL` = neutral product blue, no logo). `src/lib/branding.ts` (`loadBranding`) feeds every generated document: the logo is read through the media layer (`readRegisteredFile`, own club, PNG/JPEG only; an unreadable logo is skipped, never an error), letterhead lines are plain text and go through `pdfText`. The logo is a registered, non-sensitive image (`owner_type branding`, `<clubId>/branding/`), served as a signed URL after the permission check, never as a public link. Tests: `src/routes/club-branding.test.ts`.
 
+### Documents in export and erasure (Wave 13)
+
+The privacy contributor `documents` (`src/lib/privacy/contributors-documents.ts`, tables `documents`, `document_versions`, `document_permissions`, `document_acknowledgements`, `member_cards`, `render_jobs`) is part of the Art. 15 export (metadata and version list of the personal storage, acknowledgements with their wording, card, generated-document requests; the files are handed over on request) and of the Art. 17 erasure: personal documents are deleted with their files, **except** documents under legal hold or with a retention date in the future (they stay locked and are reported in the dry run), acknowledgements stay as proof, card, folder rights and jobs are deleted. Rendered PDFs for the branding test page are never stored. Test: `src/lib/privacy/contributors-documents.test.ts`.
+
 ## Notification catalog
 
 Complete inventory of everything MyVerein sends or schedules by itself, read from the code (Wave 9, branch `feature/communication`). One row per trigger. German long form with gaps and silent states: vault `Technical Reference - Benachrichtigungs-Katalog`. **Keep this table in sync**: every new `notify(...)`, `notifySafely(...)`, `sendEmail(...)` or `enqueue(...)` that reaches a person needs a row in the same commit (find them with `grep -rnE "notify\(|notifySafely|notifyInBackground|sendEmail\(|REMINDER_JOB_TYPE" src --include=*.ts`).

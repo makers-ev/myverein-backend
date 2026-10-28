@@ -11,7 +11,7 @@ import { DEFAULT_ACCENT_COLOR, DEFAULT_PRIMARY_COLOR } from "../lib/branding.js"
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, ValidationError } from "../lib/errors.js";
 import { contrastAgainstWhite, imageDimensions } from "../lib/image-dimensions.js";
-import { discardStoredFile, deleteMedia, DOCUMENT_OWNER_TYPES, MAX_LOGO_BYTES, signedMediaUrl, sniffMimeType, storeUpload } from "../lib/media.js";
+import { discardStoredFile, deleteMedia, DOCUMENT_OWNER_TYPES, MAX_LOGO_BYTES, respondRenderedPdf, signedMediaUrl, sniffMimeType, storeUpload } from "../lib/media.js";
 import { checkStorageThresholds } from "../lib/media-quota.js";
 import { renderEphemeral } from "../lib/pdf/render.js";
 import { registerBuiltinTemplates } from "../lib/pdf/templates/index.js";
@@ -191,9 +191,5 @@ clubBrandingRoutes.delete("/logo", async (c) => {
 clubBrandingRoutes.post("/preview", rateLimit({ windowMs: 60_000, max: 10, key: (c) => `branding-preview:${c.get("user").id}` }), async (c) => {
   requireWrite(c);
   const { bytes, filename } = await renderEphemeral("branding-test", c.get("clubId"), {});
-  c.header("Content-Type", "application/pdf");
-  c.header("Content-Disposition", `inline; filename="${filename}"`);
-  c.header("Cache-Control", "private, no-store");
-  c.header("X-Content-Type-Options", "nosniff");
-  return c.body(new Uint8Array(bytes));
+  return respondRenderedPdf(c, bytes, filename);
 });

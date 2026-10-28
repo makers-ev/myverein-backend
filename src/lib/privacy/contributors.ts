@@ -24,6 +24,7 @@ import type { DbExecutor } from "../club-members.js";
 import { eraseFormDataOfMember } from "../form-retention.js";
 import { markMediaDeleted } from "../media.js";
 import { todayBerlin } from "../member-lifecycle.js";
+import { documentData } from "./contributors-documents.js";
 import { eventParticipation } from "./contributors-events.js";
 import type { PrivacyContributor, PrivacySubject } from "./registry.js";
 
@@ -489,4 +490,4 @@ export async function listFilesOf(ex: DbExecutor, s: PrivacySubject): Promise<Ar
 }
 
 /** Registration order = erasure order: form data first (lock order submission -> member row), master data last of the member rows. */
-export const BUILT_IN_CONTRIBUTORS: PrivacyContributor[] = [formsAndApplications, exitRequests, absences, guardianship, consents, communication, accountData, assemblyData, eventParticipation, memberCore];
+export const BUILT_IN_CONTRIBUTORS: PrivacyContributor[] = [formsAndApplications, exitRequests, absences, guardianship, consents, communication, accountData, assemblyData, eventParticipation, documentData, memberCore];
