@@ -127,10 +127,10 @@ export async function purgeDocuments(executor: DbExecutor, docs: Array<Pick<Docu
 }
 
 /** Documents in the trash that may be deleted now: past the trash period, no legal hold, retention over. */
-export function purgeableCondition(now: Date, olderThanDays: number | null) {
+export function purgeableCondition(now: Date, olderThanDays: number | null, anyStatus = false) {
   const today = now.toISOString().slice(0, 10);
   return and(
-    eq(documents.status, "im_papierkorb"),
+    anyStatus ? undefined : eq(documents.status, "im_papierkorb"),
     eq(documents.legalHold, false),
     or(isNull(documents.retentionUntil), lt(documents.retentionUntil, today)),
     olderThanDays === null ? undefined : lt(documents.trashedAt, new Date(now.getTime() - olderThanDays * 86_400_000)),

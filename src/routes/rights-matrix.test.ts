@@ -44,6 +44,7 @@ import { adminStatsRoutes } from "./admin-stats.js";
 import { adminStorageRoutes } from "./admin-storage.js";
 import { clubStorageRoutes } from "./club-storage.js";
 import { documentRoutes } from "./documents.js";
+import { memberDocumentRoutes } from "./member-documents.js";
 import { attendanceReportRoutes } from "./attendance-report.js";
 import { availabilityRoutes } from "./availability.js";
 import { calendarRoutes } from "./calendars.js";
@@ -133,6 +134,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/departments", "departmentRoutes", departmentRoutes],
   ["/club-info", "clubInfoRoutes", clubInfoRoutes],
   ["/documents", "documentRoutes", documentRoutes],
+  ["/member-documents", "memberDocumentRoutes", memberDocumentRoutes],
   ["/club-roles", "clubRoleRoutes", clubRoleRoutes],
   ["/calendars", "calendarRoutes", calendarRoutes],
   ["/calendar-feeds", "calendarFeedRoutes", calendarFeedRoutes],
@@ -165,6 +167,11 @@ const WRITE_METHODS = ["POST", "PATCH", "PUT", "DELETE"];
 
 /** Self-service routes a plain `mitglied` may use. Not asserted as denied; each entry needs a reason. */
 const SELF_SERVICE: Record<string, string> = {
+  "POST /member-documents/:memberId": "own personal storage (self), a ward's (live guardian link) or - with documents:read_personal - any member's; everybody else gets 404 (resolvePersonalSubject), asserted in member-documents.test.ts",
+  "POST /member-documents/:memberId/:docId/versions": "new version of an own upload (same subject rules; the member side only for its own uploads)",
+  "DELETE /member-documents/:memberId/:docId": "removing an own upload (member side) or any document with a reason (documents:read_personal); retention blocks; other callers 404",
+  "POST /member-documents/:memberId/:docId/hide": "hiding a receipt/generated document from the own list (self / guardian only; board and strangers 404)",
+  "POST /member-documents/:memberId/:docId/unhide": "undoing the hide (same rules)",
   "PATCH /club-members/me": "own profile",
   "POST /club-members/apply": "join request (the caller is not yet a member)",
   "POST /club-registrations": "found a club (user-level, own application)",
