@@ -33,6 +33,7 @@ export type PdfBlock =
   | { type: "keyValue"; rows: Array<[string, string]> }
   | { type: "table"; columns: Array<{ title: string; width: number }>; rows: string[][]; zebra?: boolean }
   | { type: "qr"; payload: string; size?: number; caption?: string }
+  | { type: "photo"; image?: Buffer | null; initials?: string; size?: number }
   | { type: "spacer"; height?: number }
   | { type: "signatureLine"; label: string };
 
@@ -272,6 +273,34 @@ class PdfkitEngine implements PdfEngine {
           doc.y = y0 + size + 4;
           if (block.caption) doc.font("Helvetica").fontSize(8).fillColor("#444444").text(pdfText(block.caption, { maxLength: 120 }), x0, undefined, { width: Math.max(size, 120) });
           doc.fillColor("#000000").x = margin;
+          break;
+        }
+        case "photo": {
+          // A validated PNG/JPEG, or the initials in a plain box when there is no photo (or it cannot be drawn). On the card it
+          // sits in the lower left corner without moving the text flow; on a page it takes its place in the flow.
+          const size = block.size ?? (card ? 44 : 80);
+          const x0 = margin;
+          const y0 = card ? doc.page.height - margin - size : doc.y;
+          if (!card) ensure(size + 8);
+          const yy = card ? y0 : doc.y;
+          let drawn = false;
+          if (block.image && block.image.length > 0 && block.image.length <= 2 * 1024 * 1024) {
+            try {
+              doc.image(block.image, x0, yy, { fit: [size, size] });
+              drawn = true;
+            } catch {
+              drawn = false;
+            }
+          }
+          if (!drawn) {
+            doc.rect(x0, yy, size, size).fill("#e8ecf2");
+            doc.font("Helvetica-Bold").fontSize(size / 2.6).fillColor(primary).text(pdfText(block.initials ?? "", { maxLength: 3 }), x0, yy + size / 2 - size / 5.2, { width: size, align: "center", lineBreak: false });
+            doc.fillColor("#000000");
+          }
+          if (!card) {
+            doc.y = yy + size + 8;
+            doc.x = margin;
+          }
           break;
         }
         case "spacer":

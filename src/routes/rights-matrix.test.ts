@@ -47,6 +47,7 @@ import { acknowledgementRoutes } from "./acknowledgements.js";
 import { documentRoutes } from "./documents.js";
 import { clubBrandingRoutes } from "./club-branding.js";
 import { documentGenerationRoutes } from "./document-generation.js";
+import { memberCardRoutes, memberCardSheetRoutes } from "./member-cards.js";
 import { memberDocumentRoutes } from "./member-documents.js";
 import { attendanceReportRoutes } from "./attendance-report.js";
 import { availabilityRoutes } from "./availability.js";
@@ -130,6 +131,8 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/club-registrations", "clubRegistrationRoutes", clubRegistrationRoutes],
   ["/my-clubs", "myClubRoutes", myClubRoutes],
   ["/club-members", "clubMemberRoutes", clubMemberRoutes],
+  ["/club-members", "memberCardRoutes", memberCardRoutes],
+  ["/member-cards", "memberCardSheetRoutes", memberCardSheetRoutes],
   ["/club-applications", "clubApplicationRoutes", clubApplicationRoutes],
   ["/forms", "formRoutes", formRoutes],
   ["/member-fields", "memberFieldRoutes", memberFieldRoutes],
@@ -303,6 +306,7 @@ const GUEST_DENIED_READS: Array<[string, string]> = [
 /** Routes whose body validation runs before the permission check need a valid sample body. Default `{}`. */
 const SOME_ID = "00000000-0000-4000-8000-000000000001";
 const SAMPLE_BODIES: Record<string, unknown> = {
+  "POST /member-cards/print": { clubMemberIds: [SOME_ID] },
   "POST /acknowledgements/requests": { documentId: SOME_ID, audience: { all: true } },
   "POST /acknowledgements/remind": { documentId: SOME_ID },
   "POST /acknowledgements/:id/paper": { decision: "bestaetigt", proofDate: "2020-01-01", proofSource: "Liste" },

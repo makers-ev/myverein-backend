@@ -248,7 +248,10 @@ describe("render pipeline", () => {
       expect(out.bytes.subarray(0, 5).toString("latin1")).toBe("%PDF-");
       expect((await storageUsage(id())).usedBytes).toBe(before);
       await expect(renderEphemeral("test-report", id(), {})).rejects.toBeInstanceOf(NotFoundError);
-      expect((await generate(club.founder, { templateId: "branding-test" })).status).toBe(202); // not storable: the job fails visibly
+      // Not storable: refused up front (it is rendered by its own route), no job is created.
+      const refused = await generate(club.founder, { templateId: "branding-test" });
+      expect(refused.status).toBe(422);
+      expect(((await refused.json()) as { error: { details: { code: string } } }).error.details.code).toBe("ephemeral_template");
     });
   });
 

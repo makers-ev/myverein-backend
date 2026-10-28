@@ -82,6 +82,8 @@ export async function requestRender(req: RenderRequest): Promise<RenderJobRow> {
     if (template.permission !== null && !hasClubPermission(req.actor.roleTypes, template.permission)) throw new ForbiddenError(`Missing ${template.permission} permission`);
     await template.authorize(req.actor, parsed.data);
   }
+  // Ephemeral templates (branding test page, membership cards) are rendered by their own routes and never stored.
+  if (template.destination === "ephemeral") throw new ValidationError("This template is rendered directly and cannot be requested as a job", { details: { code: "ephemeral_template" } });
 
   if (req.replaceDocumentId) {
     const [doc] = await db.select({ id: documents.id }).from(documents).where(and(eq(documents.id, req.replaceDocumentId), eq(documents.clubId, req.clubId), eq(documents.kind, "erzeugt"), eq(documents.status, "aktiv"))).limit(1);
