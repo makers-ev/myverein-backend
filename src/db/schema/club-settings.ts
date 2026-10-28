@@ -1,4 +1,4 @@
-import { boolean, integer, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { bigint, boolean, integer, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 import { organization } from "../../auth/auth-schema.js";
 
@@ -68,6 +68,21 @@ export const clubSettings = pgTable("club_settings", {
   // Statute parameters of the general assembly (Wave 11): validated `AssemblyRules` (lib/assembly-rules.ts). NULL = nothing set yet;
   // the legal parameters have no defaults on purpose (the club has to state them before the first invitation).
   assemblyRules: jsonb("assembly_rules").$type<Record<string, unknown>>(),
+  // Branding of generated documents (Wave 13 B7): logo (storage key of a validated PNG/JPEG in media_files, never a URL),
+  // colours as #RRGGBB and the plain-text letterhead. All NULL = neutral default look.
+  brandLogoKey: text("brand_logo_key"),
+  brandPrimaryColor: text("brand_primary_color"),
+  brandAccentColor: text("brand_accent_color"),
+  letterheadAddress: text("letterhead_address"),
+  letterheadRegister: text("letterhead_register"),
+  letterheadRepresentatives: text("letterhead_representatives"),
+  letterheadContact: text("letterhead_contact"),
+  letterheadFooter: text("letterhead_footer"),
+  // Storage quota in bytes (Wave 13 B3); NULL = the platform default (`MEDIA_QUOTA_BYTES_PER_CLUB`). The used amount is the
+  // sum of the live `media_files` of the club (single source of truth, read under the same lock as the quota check).
+  storageQuotaBytes: bigint("storage_quota_bytes", { mode: "number" }),
+  // Highest quota threshold already reported to the board (80 or 100); reset when usage falls below 80 %.
+  storageNoticeLevel: integer("storage_notice_level").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

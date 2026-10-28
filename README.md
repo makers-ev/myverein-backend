@@ -1290,7 +1290,7 @@ Shared fixture `src/routes/event-test-support.ts` (club with two departments, bo
 
 Known limits: (1) the self check-in by event code (B10, P2) is not built; (2) attendance rosters do not pre-list registered guests (add them by name); (3) a waitlisted guest is only told by mail, the organiser cannot message guests directly; (4) guest registration data is deleted by the retention category `event_guests`, which only deletes for real with `RETENTION_DRY_RUN=false` (unconfirmed sign-ups are swept hourly regardless); (5) the helper reminder reaches organisers, not a free "who is available" audience -- the suggestions endpoint serves that need; (6) the shared database makes global counts unreliable, all new tests scope to their own club.
 
-### Migrations 0014-0054 (Wave 7 to Wave 12)
+### Migrations 0014-0055 (Wave 7 to Wave 13)
 
 Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runtime` (Docker boot) or `npm run db:migrate`.
 
@@ -1337,6 +1337,7 @@ Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runti
 | `0052_assembly-review-fixes` | Wave 11 review, additive: `meetings.schedule_exceptions` (jsonb, date changes after the invitation with the exception reason), `meeting_proxies.proof_source`, `ballots.cancel_reason`, `meeting_minutes.attendance_snapshot` (counts frozen at submission), the unique key `ballot_options (ballot_id, id)` with composite foreign keys from `ballot_votes_open` / `ballot_votes_secret` (an option can only be voted for in its own ballot), `meeting_minutes.approved_resolution_id` → `meeting_resolutions` (set null; dangling values are cleared first), the guard of 0051 now also freezes the snapshot, and the trigger `meeting_minutes_insert_guard` (a version starts as `entwurf`; the only other insert is the decision record of a circular resolution: `archiviert` with `approved_at`) |
 | `0053_events-all-day` | Wave 12 B3, additive: `events.all_day` (boolean, default false), index `events_ends_at_idx` |
 | `0054_events-series-attendance-helpers` | Wave 12 B2, additive: tables `event_series`, `event_series_exceptions`, `event_attendance*`, `event_registration_settings`, `helper_*`, `calendar_feed_tokens`, `event_rides`, `event_ride_requests`, `location_bookings`, `time_entries`, `rate_cards`; new columns of `events`, `event_attendees` (`member_id` nullable + identity check), `locations.bookable`, `club_settings.state`. Existing events/RSVPs stay valid (test `src/db/migration-events-model.test.ts`: count check before/after) |
+| `0055_documents-foundation` | Wave 13 B2, additive: tables `documents`, `document_versions`, `document_folders`, `document_permissions`, `document_acknowledgements`, `club_info_page_versions`, `member_cards`, `render_jobs`; new columns of `club_info_pages` and `club_settings` (branding, quota). **Backfill:** every existing info page becomes version 1 (test `src/db/migration-documents.test.ts`: count and content check before/after) |
 
 #### Verifying the Wave 7 migrations (B12)
 
@@ -1367,6 +1368,22 @@ Wave 13 adds document handling: versioned club documents (`club_info`), the docu
 - Limits (`DEFAULT_PDF_LIMITS`): 20 s timeout (checked between blocks and table rows), 200 pages, 20 MiB; the result must start with `%PDF-`. Errors are `PdfRenderError` with a fixed code (`timeout`, `page_limit`, `size_limit`, `engine_error`) and never contain user data.
 - Spike (ADR-010): receipt 1 page about 10 ms, member list with 400 rows 10 pages about 100 ms / 12 MiB RSS, ID card with QR about 20 ms; dependency size about 14 MB.
 - Limits of the engine: no PDF/A, no tagged PDF, standard fonts only (see ADR-010, E2/E3).
+
+### Data model of documents (Wave 13 B2)
+
+Migration `0055_documents-foundation` (additive only). Bytes always live in `media_files` (central media layer); the tables below hold metadata and reference files by `storage_key` (never a URL).
+
+| Table | Purpose |
+|---|---|
+| `documents` | Metadata: `scope` (`verein` archive / `person` personal storage, CHECK: `person` needs `owner_club_member_id` and no folder), `kind` (`erzeugt` / `hochgeladen`), `doc_type`, `title`, `current_version_id`, `status` (`aktiv`, `im_papierkorb`, `zur_loeschung`), `hidden_by_owner`, `retention_until`, `legal_hold`. Indexes on club/folder, owner, retention, status |
+| `document_versions` | One stored file per version (`version_no` unique per document): `storage_key`, `mime_type`, `size_bytes`, `sha256`, `original_filename`; for generated documents `template_id`, `template_version`, `input_hash`, `engine_version` (snapshot, never re-rendered on read) |
+| `document_folders` | Folder tree of the archive (`parent_id`, depth limit `MAX_FOLDER_DEPTH` = 5 enforced by the API, `system_key` for pipeline folders) |
+| `document_permissions` | Rights per folder: subject `rolle` / `abteilung` / `mitglied`, `level` `lesen` / `schreiben` / `verwalten`; no row = no access (deny-by-default); CHECK that exactly the matching subject column is set |
+| `document_acknowledgements` | Simple digital acknowledgement (who, when, version hash, wording, `acted_by_*` for guardians); unique per version and member |
+| `club_info_page_versions` | History of `club_info_pages` (title, markdown, link, `valid_from`, note, author); `club_info_pages` gains `current_version`, `updated_by`, `valid_from`, `document_id`. Existing pages are copied as version 1 (migration test checks the counts and the content; `npm run db:verify-counts` reports `club_info_pages.without_version_row`) |
+| `member_cards` | One digital membership card per `club_members.id`: `status` (`aktiv` / `widerrufen`), `token_version` (bumped by a re-issue), `valid_until`, revocation data |
+| `render_jobs` | One PDF generation: `template_id`/`template_version`, `status` (`wartet`, `rendert`, `fertig`, `fehlgeschlagen`), ids only in `params`, `error_code`, `attempts`, result `document_id`/`version_id` |
+| `club_settings` (extended) | Branding `brand_logo_key`, `brand_primary_color`, `brand_accent_color`, `letterhead_*` (plain text), quota `storage_quota_bytes` (NULL = platform default) and `storage_notice_level` (last reported threshold, 0/80/100) |
 
 ## Notification catalog
 

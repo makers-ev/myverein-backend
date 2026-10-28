@@ -114,6 +114,11 @@ export async function collectReport(client: Pool): Promise<VerifyReport> {
       zero("audit_log.payload_club_id_not_copied", await scalar(ro, `SELECT count(*)::int AS n FROM "audit_log" WHERE "club_id" IS NULL AND jsonb_typeof("payload") = 'object' AND jsonb_typeof("payload"->'clubId') = 'string'`));
       lines.push({ kind: "count", name: "audit_log.without_club_id", value: await scalar(ro, `SELECT count(*)::int AS n FROM "audit_log" WHERE "club_id" IS NULL`) });
     }
+
+    // Wave 13 (0055): every info page has a version row for its current version (the migration copies each page as version 1).
+    if (await exists(ro, "club_info_page_versions")) {
+      zero("club_info_pages.without_version_row", await scalar(ro, `SELECT count(*)::int AS n FROM "club_info_pages" p WHERE NOT EXISTS (SELECT 1 FROM "club_info_page_versions" v WHERE v."page_id" = p."id" AND v."version_no" = p."current_version")`));
+    }
   } finally {
     await conn.query("ROLLBACK").catch(() => undefined);
     conn.release();
