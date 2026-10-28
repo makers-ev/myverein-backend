@@ -1411,6 +1411,18 @@ Code in `src/lib/pdf/`: `registry.ts` (fixed, versioned template whitelist; club
 - **Failures.** `render_jobs.status` `wartet` -> `rendert` -> `fertig` | `fehlgeschlagen`. Error codes (fixed, no personal data): `render_timeout`, `render_limit` (pages/size), `render_failed`, `quota_exceeded`, `source_unavailable`, `internal_error`. Transient errors are retried by the queue (backoff, `JOB_MAX_ATTEMPTS`); quota, vanished sources and limit errors fail at once. Business actions use `requestRenderSafely`, which never throws and always goes through the worker, so a render problem can never block the action. Logs carry ids and the code only. Idempotency: the same `idempotencyKey` never creates a second job (advisory lock), at most 10 waiting/running jobs per club.
 - **Tests.** `src/lib/pdf/render.test.ts` (rights, hostile data, snapshot and hashes, failure mapping and retry, log redaction, idempotency under parallel requests, job cap, visibility) and `src/lib/pdf/engine.test.ts`.
 
+### Member document templates (Wave 13 B9)
+
+Templates live in `src/lib/pdf/templates/`; `GET /document-generation/templates` lists those the caller may request. All three land in the **personal storage** of the person (`destination person`, sensitive: authenticated stream + audit) and cannot be deleted by the owner, only hidden.
+
+| Template id | Request | Content | Trigger |
+|---|---|---|---|
+| `aufnahme-beleg` | `{ applicationId }`, `documents:generate` + `members:write` (strangers `404`) | Snapshot of the answers of the accepted application (labels and option texts of the PINNED form version), the wording of the consents that were ticked, the privacy notice of that version, SHA-256 of the consent texts (same hash as the consent evidence `consentTextSha256`). Fields the form marks `sensitive` are named as withheld, never printed | Automatically after the acceptance commit (`scheduleAdmissionReceipt` in all three accept paths: new member, child, re-admission); idempotency key `aufnahme-beleg:<applicationId>` |
+| `mitgliedsbestaetigung` | `{ clubMemberId, asOf? }`; no fixed permission: the person themselves, a guardian with a live link, or the board (`documents:generate` + `members:write` or `documents:read_personal`); everybody else `404` | "X ist seit ... Mitglied" or, for a former member, "war vom ... bis ... Mitglied"; reference date `asOf` (default today) | On request; `409 details.code` `as_of_in_future`, `not_a_member_on_date` |
+| `kuendigungsbestaetigung` | `{ exitRequestId }`, `documents:generate` + `members:write` | Receipt of the cancellation and the date the membership ends | Automatically after the board accepts a cancellation (member request or board-recorded); not for exclusions; key `kuendigung:<requestId>` |
+
+The business action never waits for or depends on the render (`requestRenderSafely`, always through the worker with retries). Tests: `src/routes/member-document-templates.test.ts`.
+
 ### Branding (Wave 13 B7)
 
 Branding lives in `club_settings` (`brand_logo_key`, `brand_primary_color`, `brand_accent_color`, `letterhead_*`; all `NULL` = neutral product blue, no logo). `src/lib/branding.ts` (`loadBranding`) feeds every generated document: the logo is read through the media layer (`readRegisteredFile`, own club, PNG/JPEG only; an unreadable logo is skipped, never an error), letterhead lines are plain text and go through `pdfText`. The logo is a registered, non-sensitive image (`owner_type branding`, `<clubId>/branding/`), served as a signed URL after the permission check, never as a public link. Tests: `src/routes/club-branding.test.ts`.

@@ -18,6 +18,7 @@ import type { FormField } from "../lib/form-schema.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { notifyApplicationApproved, notifyApplicationRejected } from "../lib/decision-notify.js";
+import { scheduleAdmissionReceipt } from "../lib/member-document-triggers.js";
 import { applyAcceptance, compensateAbortedApproval, asDecisionBusy, assertSubmissionDecidable, consentEvidence, lockDecisionSubmission, rejectSubmission, type DecisionContext, type MappingReport } from "../lib/form-applications.js";
 import { purgeMediaFile } from "../lib/media.js";
 import { buildApplicationReview, listExtras } from "../lib/application-review.js";
@@ -298,6 +299,8 @@ clubApplicationRoutes.post("/:id/approve", decisionBodyLimit, async (c) => {
 
     await notifyApplicationApproved({ clubId, applicationId: application.id, userId: application.userId, clubMemberId: result.clubMember.id, memberNumber: result.clubMember.memberNumber });
 
+    await scheduleAdmissionReceipt({ clubId, applicationId: application.id });
+
     // `membership` is the pre-Wave-7 shape (deprecated, kept for existing clients); `clubMember` is the canonical row.
     const { clubMember } = result;
     const membership = {
@@ -402,6 +405,7 @@ async function approveChild(clubId: string, application: typeof clubApplications
     });
     await Promise.all(result.purge.map((key) => purgeMediaFile(key)));
     await notifyApplicationApproved({ clubId, applicationId: application.id, userId: application.userId, clubMemberId: result.clubMember.id, memberNumber: result.clubMember.memberNumber, childName: result.clubMember.displayName });
+    await scheduleAdmissionReceipt({ clubId, applicationId: application.id });
     return {
       application: result.application,
       // The child has no account; the parent's account membership is reported under `guardian`.
@@ -505,6 +509,7 @@ async function readmit(
     await Promise.all(result.purge.map((key) => purgeMediaFile(key)));
     const { clubMember } = result;
     await notifyApplicationApproved({ clubId, applicationId: application.id, userId: application.userId, clubMemberId: clubMember.id, memberNumber: clubMember.memberNumber });
+    await scheduleAdmissionReceipt({ clubId, applicationId: application.id });
     // The category the member actually has now (board override / mapped answer / unchanged), not the applicant's request.
     const actual = clubMember.categoryId ? await db.query.memberCategories.findFirst({ where: (t, { eq: same }) => same(t.id, clubMember.categoryId!), columns: { key: true } }) : undefined;
     return {
