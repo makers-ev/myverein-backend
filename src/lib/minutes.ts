@@ -287,7 +287,7 @@ export async function attachMinutes<T extends { id: string }>(rows: T[], include
 
 // --- Export ----------------------------------------------------------------------------------------------------------------
 
-interface ExportDoc {
+export interface ExportDoc {
   title: string;
   facts: Array<[string, string]>;
   sections: Array<{ heading: string; lines: string[]; pre?: string }>;
@@ -315,10 +315,13 @@ function renderHtml(doc: ExportDoc): string {
   return `<!doctype html>\n<html lang="de"><head><meta charset="utf-8"><title>${escapeHtml(doc.title)}</title><style>body{font-family:sans-serif;max-width:48rem;margin:2rem auto;padding:0 1rem;line-height:1.5}dt{font-weight:bold}pre{white-space:pre-wrap;font-family:inherit}</style></head><body>\n${body}\n</body></html>\n`;
 }
 
-/** Export of the minutes the caller may see: attendance, quorum, invitation proof, resolutions with results, text, amendments, hash. */
-export async function exportMinutes(args: { meeting: MeetingRow; includeDrafts: boolean; includeNames: boolean; format: "html" | "md" }): Promise<{ body: string; contentType: string }> {
+/**
+ * The content of the minutes export: attendance, quorum, invitation proof, resolutions with results, text, amendments, hash.
+ * `onlyVersion` pins one specific version (the PDF of an approved version); otherwise the version the caller may see.
+ */
+export async function composeMinutesDoc(args: { meeting: MeetingRow; includeDrafts: boolean; includeNames: boolean; onlyVersion?: number }): Promise<ExportDoc> {
   const { meeting } = args;
-  const version = await visibleMinutes(meeting.id, args.includeDrafts);
+  const version = args.onlyVersion !== undefined ? (await db.select().from(meetingMinutes).where(and(eq(meetingMinutes.meetingId, meeting.id), eq(meetingMinutes.version, args.onlyVersion))))[0] : await visibleMinutes(meeting.id, args.includeDrafts);
   if (!version) throw new NotFoundError("Minutes not found");
   const timezone = await clubTimezone(meeting.clubId);
   const place = await locationName(meeting.clubId, meeting.locationId);
@@ -376,5 +379,11 @@ export async function exportMinutes(args: { meeting: MeetingRow; includeDrafts: 
     ],
     sections,
   };
+  return doc;
+}
+
+/** Export of the minutes the caller may see as HTML or Markdown. */
+export async function exportMinutes(args: { meeting: MeetingRow; includeDrafts: boolean; includeNames: boolean; format: "html" | "md" }): Promise<{ body: string; contentType: string }> {
+  const doc = await composeMinutesDoc(args);
   return args.format === "html" ? { body: renderHtml(doc), contentType: "text/html; charset=utf-8" } : { body: renderMarkdown(doc), contentType: "text/markdown; charset=utf-8" };
 }

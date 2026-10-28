@@ -162,9 +162,22 @@ export function subtreeHeight(index: FolderIndex, folderId: string): number {
  * personal storage are decided by `canAccessPersonalDocument` (B6) -- this function answers `false` for them, so a route
  * that forgot to dispatch fails closed.
  */
-export function canAccessDocument(p: DocumentPrincipal, index: FolderIndex, doc: Pick<DocumentRow, "scope" | "folderId" | "status" | "clubId">, need: DocumentPermissionLevel): boolean {
+export function canAccessDocument(p: DocumentPrincipal, index: FolderIndex, doc: DocLike, need: DocumentPermissionLevel): boolean {
   if (doc.clubId !== p.clubId || doc.scope !== "verein") return false;
-  const level = folderLevel(p, index, doc.folderId);
+  const level = documentLevel(p, index, doc);
   if (doc.status !== "aktiv" && !atLeast(level, "schreiben")) return false;
   return atLeast(level, need);
+}
+
+type DocLike = Pick<DocumentRow, "scope" | "folderId" | "status" | "clubId"> & Partial<Pick<DocumentRow, "kind" | "createdBy">>;
+
+/**
+ * The level of the caller on ONE document: the folder level, but whoever REQUESTED a generated document can always read it
+ * (a trainer who creates an attendance list must be able to open it although the system folder is a board folder). The
+ * exception is read-only, applies to active documents only and never to uploads.
+ */
+export function documentLevel(p: DocumentPrincipal, index: FolderIndex, doc: DocLike): DocumentPermissionLevel | null {
+  const level = folderLevel(p, index, doc.folderId);
+  if (!p.isGuest && doc.kind === "erzeugt" && doc.createdBy === p.userId && doc.status === "aktiv" && doc.scope === "verein") return maxLevel(level, "lesen");
+  return level;
 }

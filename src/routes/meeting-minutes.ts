@@ -9,6 +9,7 @@ import { writeAudit } from "../lib/audit.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { loadClubMeeting } from "../lib/meeting-access.js";
+import { scheduleMinutesPdf } from "../lib/member-document-triggers.js";
 import { addMinutesAmendment, approveMinutes, archiveMinutes, confirmMinutes, exportMinutes, readMinutes, reopenMinutes, saveMinutesDraft, shapeMinutes, submitMinutes, visibleMinutes } from "../lib/minutes.js";
 import { cleanText } from "../lib/text-policy.js";
 import type { ClubEnv } from "../middleware/club-guard.js";
@@ -81,7 +82,8 @@ meetingMinutesRoutes.post("/:id/minutes/reopen", async (c) => {
 meetingMinutesRoutes.post("/:id/minutes/approve", validate(z.object({ resolutionId: z.string().uuid() })), async (c) => {
   requireAssemblyManage(c);
   const meeting = await loadClubMeeting(c, idOf(c));
-  await approveMinutes({ clubId: c.get("clubId"), meetingId: meeting.id, resolutionId: c.req.valid("json").resolutionId, userId: c.get("user").id });
+  const approved = await approveMinutes({ clubId: c.get("clubId"), meetingId: meeting.id, resolutionId: c.req.valid("json").resolutionId, userId: c.get("user").id });
+  await scheduleMinutesPdf({ clubId: c.get("clubId"), meetingId: meeting.id, version: approved.version });
   return c.json({ data: await readMinutes(meeting, true) });
 });
 

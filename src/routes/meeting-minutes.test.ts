@@ -8,6 +8,7 @@ import { auth } from "../auth/auth.js";
 import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { meetingMinutes, meetingMinutesAmendments } from "../db/schema/assembly.js";
+import { renderJobs } from "../db/schema/documents.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { meetingAttendance, meetingResolutions, meetings } from "../db/schema/meetings.js";
@@ -150,6 +151,9 @@ describe("approval by a resolution of a later meeting", () => {
     const orphan = (await db.insert(meetingResolutions).values({ meetingId: mv2, description: "digital ohne Abstimmung", result: "angenommen", source: "digital" }).returning({ id: meetingResolutions.id }))[0]!.id;
     expect((await json(await approve(orphan))).error.details.code).toBe("resolution_ballot_missing");
     expect((await call(clerk, `/meetings/${mv1}/minutes/approve`, { method: "POST", body: { resolutionId: acceptedLater } })).status).toBe(200);
+    // Wave 13 B10: the approved version is filed as a PDF by the worker (a job, no user; never blocks the approval).
+    const filed = await db.select().from(renderJobs).where(eq(renderJobs.clubId, club));
+    expect(filed.filter((j) => j.templateId === "versammlung-protokoll" && j.params.meetingId === mv1 && j.params.version === 1)).toHaveLength(1);
     const view = (await json(await call(plain, `/meetings/${mv1}/minutes`))).data;
     expect(view.current).toMatchObject({ status: "genehmigt", approved: true, approvedInMeetingId: mv2, approvedResolutionId: acceptedLater, content: "Protokoll der MV 2025, korrigiert" });
     expect(view.current.confirmations).toBeUndefined();

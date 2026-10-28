@@ -22,7 +22,7 @@ import {
 import { writeAudit } from "../lib/audit.js";
 import { CLUB_ROLE_TYPES, hasClubPermission } from "../lib/club-permissions.js";
 import { isUuid } from "../lib/club-members.js";
-import { atLeast, buildPrincipal, canAccessDocument, folderDepth, folderLevel, globalLevel, loadFolderIndex, subtreeHeight, subtreeIds, type DocumentPrincipal, type FolderIndex } from "../lib/document-access.js";
+import { atLeast, buildPrincipal, canAccessDocument, documentLevel, folderDepth, folderLevel, globalLevel, loadFolderIndex, subtreeHeight, subtreeIds, type DocumentPrincipal, type FolderIndex } from "../lib/document-access.js";
 import { addUploadedVersion, createUploadedDocument, listVersions, mediaOfVersion, purgeableCondition, purgeDocuments } from "../lib/documents.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { MAX_DOCUMENT_BYTES, streamMedia, streamSensitiveMedia } from "../lib/media.js";
@@ -58,7 +58,7 @@ function requireManage(c: { get(key: "clubRoleTypes"): string[] }): void {
 }
 
 function shapeDocument(p: DocumentPrincipal, index: FolderIndex, doc: DocumentRow, version: DocumentVersionRow | null) {
-  const level = folderLevel(p, index, doc.folderId);
+  const level = documentLevel(p, index, doc);
   const manager = atLeast(level, "verwalten");
   return {
     id: doc.id,
@@ -273,6 +273,8 @@ const listQuery = z.object({
   folderId: z.uuid().optional(),
   q: z.string().trim().min(1).max(100).optional(),
   status: z.enum(["aktiv", "im_papierkorb"]).default("aktiv"),
+  // `1`: the documents the caller generated themselves (readable for them whatever the folder rights say).
+  mine: z.enum(["0", "1"]).default("0"),
   page: z.coerce.number().int().min(1).max(100_000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(50),
 });
@@ -286,6 +288,14 @@ documentRoutes.get("/", zValidator("query", listQuery, invalid), async (c) => {
   const q = c.req.valid("query");
   const index = await loadFolderIndex(p.clubId);
   const need: DocumentPermissionLevel = q.status === "aktiv" ? "lesen" : "schreiben";
+  if (q.mine === "1") {
+    if (q.status !== "aktiv") return c.json({ data: [], page: q.page, pageSize: q.pageSize, total: 0 });
+    const own = and(eq(documents.clubId, p.clubId), eq(documents.scope, "verein"), eq(documents.status, "aktiv"), eq(documents.kind, "erzeugt"), eq(documents.createdBy, p.userId));
+    const [ownTotal] = await db.select({ n: count() }).from(documents).where(own);
+    const ownRows = await db.select().from(documents).where(own).orderBy(desc(documents.updatedAt), desc(documents.id)).limit(q.pageSize).offset((q.page - 1) * q.pageSize);
+    const ownVersions = await currentVersionsOf(ownRows);
+    return c.json({ data: ownRows.map((d) => shapeDocument(p, index, d, d.currentVersionId ? (ownVersions.get(d.currentVersionId) ?? null) : null)), page: q.page, pageSize: q.pageSize, total: ownTotal?.n ?? 0 });
+  }
 
   let folderIds: string[];
   let includeRoot: boolean;

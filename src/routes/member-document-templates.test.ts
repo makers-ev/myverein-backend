@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -8,7 +8,7 @@ import { clubMembers } from "../db/schema/club-members.js";
 import { documents, renderJobs } from "../db/schema/documents.js";
 import { PdfRenderError, setPdfEngine, type PdfEngine } from "../lib/pdf/engine.js";
 import { executeRenderJob } from "../lib/pdf/render.js";
-import { getTemplate, registerTemplate, unregisterTemplate } from "../lib/pdf/registry.js";
+import { getTemplate } from "../lib/pdf/registry.js";
 import { registerBuiltinTemplates } from "../lib/pdf/templates/index.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
 import { clubApplicationRoutes } from "./club-applications.js";
@@ -143,12 +143,12 @@ describe("member document templates (B9)", () => {
       const submissionId = (await body(draft)).data.submission.id as string;
       const filed = await call(second, "/club-members/apply", { method: "POST", body: { clubSlug: club.slug, submissionId } });
       const id = (await body(filed)).data.application.id as string;
-      const template = getTemplate("aufnahme-beleg")!;
-      unregisterTemplate("aufnahme-beleg");
+      // Ten waiting jobs fill the club's queue: scheduling the receipt is refused (429) -- the acceptance still goes through.
+      const filler = await db.insert(renderJobs).values(Array.from({ length: 10 }, () => ({ clubId: club.clubId, templateId: "aufnahme-beleg", templateVersion: 1, params: { filler: true } }))).returning({ id: renderJobs.id });
       try {
         expect((await decide(club.founder, id, "approve")).status).toBe(200);
       } finally {
-        registerTemplate(template);
+        await db.delete(renderJobs).where(inArray(renderJobs.id, filler.map((f) => f.id)));
       }
       expect((await jobsOf("aufnahme-beleg")).filter((j) => j.params.applicationId === id)).toHaveLength(0);
     });

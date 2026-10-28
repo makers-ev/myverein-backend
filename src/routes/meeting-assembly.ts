@@ -22,6 +22,7 @@ import { cleanText } from "../lib/text-policy.js";
 import type { ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { loadClubMeeting } from "../lib/meeting-access.js";
+import { scheduleInvitationPdf } from "../lib/member-document-triggers.js";
 
 /**
  * General assembly on top of `/meetings` (Wave 11): structured agenda and the formal invitation with period check and proof of
@@ -221,6 +222,7 @@ meetingAssemblyRoutes.post(
     const meeting = await loadClubMeeting(c, paramId(c, "id"));
     const body = c.req.valid("json");
     const { invitation, summary } = await sendInvitation({ clubId: c.get("clubId"), meeting, actorUserId: c.get("user").id, message: body.message, exceptionReason: body.exceptionReason, audience: body.audience });
+    await scheduleInvitationPdf({ clubId: c.get("clubId"), meetingId: meeting.id, version: invitation.version });
     return c.json({ data: { ...shapeManaged(invitation), deliveries: summary, summary: await deliverySummary(invitation.id) } }, 201);
   },
 );

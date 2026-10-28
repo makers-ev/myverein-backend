@@ -214,6 +214,7 @@ export const AUDIT_EVENTS = {
   "member_data.export": spec(["bytes", "clubId", "exportedBy", "format", "via"], "subject"),
   "member_erasure.execute": spec(["anonymized", "clubId", "deleted", "kept", "via"], "subject"),
   "member_erasure.plan": spec(["blockers", "clubId", "requestedBy"], "subject"),
+  "member_list.generate": spec(["asOf", "clubId", "columns", "includeLeft"]),
   "member_legal_hold.update": spec(["active", "changedBy", "clubId"], "subject"),
   "member_field_visibility.update": spec(["changedBy", "clubId", "fields"], "subject"),
   "location_booking.create": spec(["bookingId", "clubId", "locationId"]),
