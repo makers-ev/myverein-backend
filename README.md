@@ -1960,6 +1960,14 @@ The scaffold's `/accounts` and `/examples` routes (ownership-scoped example reso
 | `helpers:write` (Wave 12: helper plan of an event, entering other people, suggestions; abteilungsleitung only for events of its **own** departments) | x | x | x | | | x | |
 | `time:write` (Wave 12 P2: confirm/reject time entries; abteilungsleitung only for members of its own departments) | x | x | | | | x | |
 | `time:read_rates` (Wave 12 P2: hourly rates and the time report with amounts, confidential) | x | x | | x | | | |
+| `documents:manage` (Wave 13 B15: archive folders, folder rights, trash, sees every folder with full rights) | x | x | | | | | |
+| `documents:write` (Wave 13: upload, new versions, move in **every** folder; other callers only where a folder right grants `schreiben`) | x | x | x | | | | |
+| `documents:read_personal` (Wave 13: personal storage of other members; every access is logged and visible to the member) | x | x | | | | | |
+| `documents:generate` (Wave 13: generate PDFs; each template additionally checks the permission of its source data, department scope for attendance lists) | x | x | x | x | | x | trainer: x |
+| `member_cards:verify` (Wave 13: check membership cards of the own club) | x | x | x | | x | x | trainer: x |
+| `member_cards:manage` (Wave 13: issue, re-issue, revoke cards of others, bulk print) | x | x | | | | | |
+| `branding:write` (Wave 13: logo, colours, letterhead) | x | x | | | | | |
+| `storage:read` (Wave 13: storage usage and quota) | x | x | | x | | | |
 
 `erziehungsberechtigt` holds **no** permission at all (deny-by-default): a guardian only reaches ward-bound data through the guardian scope (Wave 10 B4), never through a `ClubPermission`.
 

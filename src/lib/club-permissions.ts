@@ -64,7 +64,15 @@ export type ClubPermission =
   | "registrations:read" // Wave 12: participant list (incl. form answers) of an event; trainer/abteilungsleitung only for their OWN departments
   | "helpers:write" // Wave 12: helper plan (stations, shifts, entering other people); abteilungsleitung only for events of their OWN departments
   | "time:write" // Wave 12 (P2): confirm/reject time entries of trainers; abteilungsleitung only for the members of their OWN departments
-  | "time:read_rates"; // Wave 12 (P2): hourly rates and the time report with amounts (confidential)
+  | "time:read_rates" // Wave 12 (P2): hourly rates and the time report with amounts (confidential)
+  | "documents:manage" // Wave 13: archive -- folders, folder rights, trash/restore, sees every folder with full rights
+  | "documents:write" // Wave 13: archive -- upload/new versions/move in every folder (other callers write only where a folder right grants it)
+  | "documents:read_personal" // Wave 13: read/upload into the personal storage of OTHER members (every access is logged and visible to the member)
+  | "documents:generate" // Wave 13: generate PDFs from club data; each template additionally checks the permission of its source data
+  | "member_cards:verify" // Wave 13: scan/check membership cards of the own club
+  | "member_cards:manage" // Wave 13: issue, re-issue, revoke membership cards of other members, bulk print
+  | "branding:write" // Wave 13: logo, colours and letterhead of generated documents
+  | "storage:read"; // Wave 13: storage usage and quota of the club
 
 /**
  * Which permissions each role_type grants. A membership can hold several
@@ -105,6 +113,14 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "helpers:write",
     "time:write",
     "time:read_rates",
+    "documents:manage",
+    "documents:write",
+    "documents:read_personal",
+    "documents:generate",
+    "member_cards:verify",
+    "member_cards:manage",
+    "branding:write",
+    "storage:read",
   ],
   stellv_vorsitz: [
     "members:write",
@@ -131,22 +147,30 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "helpers:write",
     "time:write",
     "time:read_rates",
+    "documents:manage",
+    "documents:write",
+    "documents:read_personal",
+    "documents:generate",
+    "member_cards:verify",
+    "member_cards:manage",
+    "branding:write",
+    "storage:read",
   ],
-  kassenwart: ["members:read_sensitive", "club_stats:read", "time:read_rates"],
+  kassenwart: ["members:read_sensitive", "club_stats:read", "time:read_rates", "documents:generate", "storage:read"],
   // A schriftfuehrer's real-world job in a German Verein is literally running
   // meeting agendas/Protokolle, so meetings:write is a natural fit here.
-  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write", "announcements:write", "assembly:manage", "helpers:write"],
+  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write", "announcements:write", "assembly:manage", "helpers:write", "documents:write", "documents:generate", "member_cards:verify"],
   // Beisitzer sit on the board, so they may read Vorstandssitzungen and the club KPIs (but write nothing).
-  beisitzer: ["meetings:read_board", "club_stats:read"],
+  beisitzer: ["meetings:read_board", "club_stats:read", "member_cards:verify"],
   // Also calendars:write/locations:write/inventory:write, on top of
   // departments:write -- an Abteilungsleitung needs to manage calendars,
   // venues, and equipment day to day, not just the board (same
   // operational-need reasoning as members:read_sensitive above). Note this
   // is club-wide, not scoped to just their own department -- same shape as
   // their existing departments:write (Wave 1 precedent), not a new gap.
-  abteilungsleitung: ["departments:write", "calendars:write", "locations:write", "inventory:write", "locations:read_access", "announcements:write_department", "absences:read", "attendance:write", "attendance:read", "registrations:read", "helpers:write", "time:write"],
+  abteilungsleitung: ["departments:write", "calendars:write", "locations:write", "inventory:write", "locations:read_access", "announcements:write_department", "absences:read", "attendance:write", "attendance:read", "registrations:read", "helpers:write", "time:write", "documents:generate", "member_cards:verify"],
   // Trainers may inform their own departments (never club-wide, never urgent); the scope comes from club_roles.department_id.
-  trainer: ["announcements:write_department", "absences:read", "attendance:write", "attendance:read", "registrations:read"],
+  trainer: ["announcements:write_department", "absences:read", "attendance:write", "attendance:read", "registrations:read", "documents:generate", "member_cards:verify"],
   erziehungsberechtigt: [],
 };
 
