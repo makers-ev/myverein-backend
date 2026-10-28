@@ -44,6 +44,7 @@ import { adminStatsRoutes } from "./admin-stats.js";
 import { adminStorageRoutes } from "./admin-storage.js";
 import { clubStorageRoutes } from "./club-storage.js";
 import { documentRoutes } from "./documents.js";
+import { clubBrandingRoutes } from "./club-branding.js";
 import { documentGenerationRoutes } from "./document-generation.js";
 import { memberDocumentRoutes } from "./member-documents.js";
 import { attendanceReportRoutes } from "./attendance-report.js";
@@ -104,6 +105,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/guardian", "guardianRoutes", guardianRoutes],
   ["/club-settings", "clubSettingsRoutes", clubSettingsRoutes],
   ["/club-storage", "clubStorageRoutes", clubStorageRoutes],
+  ["/club-settings/branding", "clubBrandingRoutes", clubBrandingRoutes],
   ["/audit-log", "auditLogRoutes", auditLogRoutes],
   ["/club-exit-requests", "clubExitRequestRoutes", clubExitRequestRoutes],
   ["/club-announcements", "clubAnnouncementRoutes", clubAnnouncementRoutes],
