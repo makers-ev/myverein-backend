@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, count, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -10,7 +10,7 @@ import { auditLog } from "../db/schema/audit-log.js";
 import { documents, documentVersions, type DocumentRow, type DocumentVersionRow } from "../db/schema/documents.js";
 import { writeAudit } from "../lib/audit.js";
 import { buildPrincipal } from "../lib/document-access.js";
-import { addUploadedVersion, createUploadedDocument, mediaOfVersion, purgeableCondition, purgeDocuments } from "../lib/documents.js";
+import { addUploadedVersion, createUploadedDocument, MAX_DOCUMENTS_PER_MEMBER, mediaOfVersion, purgeableCondition, purgeDocuments } from "../lib/documents.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { isUuid } from "../lib/club-members.js";
@@ -36,7 +36,6 @@ memberDocumentRoutes.use("*", sessionGuard);
 memberDocumentRoutes.use("*", clubGuard);
 
 const uploadLimiter = rateLimit({ windowMs: 60_000, max: 30, key: (c) => `member-document-upload:${c.get("user").id}` });
-const MAX_DOCUMENTS_PER_MEMBER = 500;
 /** Why the board removes a document of somebody else's storage (structured, so no free text lands in the log). */
 export const BOARD_DELETE_REASONS = ["wunsch_mitglied", "falsch_zugeordnet", "fehlerhaft", "sonstiges"] as const;
 
@@ -146,8 +145,6 @@ memberDocumentRoutes.post("/:memberId", uploadLimiter, uploadBody, async (c) => 
   const body = await c.req.parseBody();
   const file = body["file"];
   if (!(file instanceof File)) throw new ValidationError("Missing file upload (field name: file)");
-  const [{ n }] = await db.select({ n: count() }).from(documents).where(and(eq(documents.clubId, p.clubId), eq(documents.scope, "person"), eq(documents.ownerClubMemberId, owner.id)));
-  if (n >= MAX_DOCUMENTS_PER_MEMBER) throw new ConflictError("The personal storage is full", { code: "CONFLICT", details: { code: "member_document_limit" } });
   const title = textField(body["title"], 200, "title") ?? (file.name.replace(/\.[^.]{1,8}$/, "").slice(0, 200) || "Dokument");
   const { document, version } = await createUploadedDocument({
     clubId: p.clubId,
@@ -159,6 +156,7 @@ memberDocumentRoutes.post("/:memberId", uploadLimiter, uploadBody, async (c) => 
     file,
     uploadedBy: p.userId,
     note: textField(body["note"], 500, "note"),
+    selfService: relation !== "board",
   });
   await writeAudit(db, { eventType: "member_document.upload", subjectId: owner.id, payload: { clubId: p.clubId, clubMemberId: owner.id, documentId: document.id, sizeBytes: version.sizeBytes, via: relation } });
   await logBoardAccess(p.clubId, owner.id, relation, "upload", document.id);
@@ -188,7 +186,7 @@ memberDocumentRoutes.post("/:memberId/:docId/versions", uploadLimiter, uploadBod
   const body = await c.req.parseBody();
   const file = body["file"];
   if (!(file instanceof File)) throw new ValidationError("Missing file upload (field name: file)");
-  const { document, version } = await addUploadedVersion(doc, file, p.userId, textField(body["note"], 500, "note"));
+  const { document, version } = await addUploadedVersion(doc, file, p.userId, textField(body["note"], 500, "note"), { selfService: relation !== "board" });
   await logBoardAccess(p.clubId, owner.id, relation, "upload", doc.id);
   return c.json({ data: shape(document, version, relation) }, 201);
 });

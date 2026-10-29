@@ -15,6 +15,27 @@ export const TRASH_RETENTION_DAYS = 30;
 /** Versions of one document (older ones stay readable; this only stops a runaway client). */
 export const MAX_VERSIONS_PER_DOCUMENT = 100;
 
+/** Documents and bytes one member may keep in the personal storage (all versions count). */
+export const MAX_DOCUMENTS_PER_MEMBER = 500;
+export function maxBytesPerMember(): number {
+  const n = Number(process.env.MEMBER_DOCUMENT_MAX_BYTES);
+  return Number.isFinite(n) && n >= 1_000_000 ? Math.floor(n) : 200 * 1024 * 1024;
+}
+/** Part of the club quota that members (and guardians) may fill; the rest is for the board and generated documents. */
+export const SELF_SERVICE_QUOTA_SHARE = 0.95;
+
+/** Serialises writes into one member's storage and refuses a write beyond the document or byte cap (inside the caller's transaction). */
+async function assertMemberLimits(tx: DbExecutor, clubId: string, ownerId: string, addBytes: number, addDocuments: number): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`member-docs:${ownerId}`}, 0))`);
+  const [row] = (
+    await tx.execute<{ docs: number; bytes: string }>(sql`
+      SELECT (SELECT count(*) FROM documents WHERE club_id = ${clubId} AND scope = 'person' AND owner_club_member_id = ${ownerId})::int AS docs,
+             coalesce((SELECT sum(v.size_bytes) FROM document_versions v JOIN documents d ON d.id = v.document_id WHERE d.club_id = ${clubId} AND d.scope = 'person' AND d.owner_club_member_id = ${ownerId}), 0)::text AS bytes`)
+  ).rows;
+  if (addDocuments > 0 && (row?.docs ?? 0) + addDocuments > MAX_DOCUMENTS_PER_MEMBER) throw new ConflictError("The personal storage is full", { code: "CONFLICT", details: { code: "member_document_limit" } });
+  if (Number(row?.bytes ?? 0) + addBytes > maxBytesPerMember()) throw new ConflictError("The personal storage has reached its size limit", { code: "CONFLICT", details: { code: "member_document_bytes", limitBytes: maxBytesPerMember() } });
+}
+
 export interface NewDocumentInput {
   clubId: string;
   scope: "verein" | "person";
@@ -25,6 +46,8 @@ export interface NewDocumentInput {
   file: File;
   uploadedBy: string;
   note?: string | null;
+  /** Self-service writes (member, guardian) leave a reserve of the club quota for the board and the system. */
+  selfService?: boolean;
 }
 
 const storageFor = (scope: "verein" | "person") =>
@@ -46,7 +69,9 @@ export async function createUploadedDocument(input: NewDocumentInput): Promise<{
   let storedKey: string | null = null;
   try {
     const result = await db.transaction(async (tx) => {
+      if (input.scope === "person" && input.ownerClubMemberId) await assertMemberLimits(tx, input.clubId, input.ownerClubMemberId, input.file.size, 1);
       const media = await storeUpload({
+        quotaShare: input.selfService ? SELF_SERVICE_QUOTA_SHARE : 1,
         file: input.file,
         clubId: input.clubId,
         storagePrefix: `${input.clubId}/${storage.directory}`,
@@ -76,7 +101,7 @@ export async function createUploadedDocument(input: NewDocumentInput): Promise<{
 }
 
 /** New version of an existing document (locks the document row, so parallel uploads get distinct numbers). */
-export async function addUploadedVersion(doc: DocumentRow, file: File, userId: string, note: string | null): Promise<{ document: DocumentRow; version: DocumentVersionRow }> {
+export async function addUploadedVersion(doc: DocumentRow, file: File, userId: string, note: string | null, opts: { selfService?: boolean } = {}): Promise<{ document: DocumentRow; version: DocumentVersionRow }> {
   const storage = storageFor(doc.scope as "verein" | "person");
   let storedKey: string | null = null;
   try {
@@ -86,7 +111,9 @@ export async function addUploadedVersion(doc: DocumentRow, file: File, userId: s
       if (locked.status !== "aktiv") throw new ConflictError("A document in the trash cannot get a new version");
       const [{ n }] = await tx.select({ n: sql<number>`coalesce(max(${documentVersions.versionNo}), 0)::int` }).from(documentVersions).where(eq(documentVersions.documentId, doc.id));
       if (n >= MAX_VERSIONS_PER_DOCUMENT) throw new ConflictError("This document has reached the maximum number of versions");
+      if (locked.scope === "person" && locked.ownerClubMemberId) await assertMemberLimits(tx, locked.clubId, locked.ownerClubMemberId, file.size, 0);
       const media = await storeUpload({
+        quotaShare: opts.selfService ? SELF_SERVICE_QUOTA_SHARE : 1,
         file,
         clubId: doc.clubId,
         storagePrefix: `${doc.clubId}/${storage.directory}`,

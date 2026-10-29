@@ -94,10 +94,12 @@ export function unattachedTtlMs(): number {
 }
 
 /** Locks the club's quota (advisory lock per club, released with the transaction) and refuses a write that would exceed it. */
-export async function assertQuota(tx: DbExecutor, clubId: string, addBytes: number): Promise<void> {
+export async function assertQuota(tx: DbExecutor, clubId: string, addBytes: number, share = 1): Promise<void> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`media-quota:${clubId}`}, 0))`);
   const [used, quota] = await Promise.all([usedBytes(tx, clubId), effectiveQuotaBytes(tx, clubId)]);
-  if (used + addBytes > quota) {
+  // `share` < 1: self-service writes may only fill part of the quota, the rest stays reserved for the board and the system
+  // (receipts, confirmations and protocols must still fit when members have filled their storage).
+  if (used + addBytes > Math.floor(quota * share)) {
     throw new ValidationError("The storage quota of this club is exhausted", { code: "QUOTA_EXCEEDED", details: { code: "club_quota", usedBytes: used, quotaBytes: quota } });
   }
 }
@@ -117,6 +119,8 @@ export interface StoreUploadInput {
   uploadedBy: string | null;
   /** Pass a transaction to make the registry row part of the caller's transaction (then call `discardStoredFile` if the caller's transaction rolls back later). */
   executor?: DbExecutor;
+  /** Fraction of the club quota this write may use (default 1); see `assertQuota`. */
+  quotaShare?: number;
 }
 
 /**
@@ -158,7 +162,7 @@ export async function storeUpload(input: StoreUploadInput): Promise<MediaFileRow
   const { key } = await putObject({ prefix, extension: EXTENSION_BY_TYPE[sniffed] ?? "", buffer });
 
   const insert = async (tx: DbExecutor): Promise<MediaFileRow> => {
-    if (input.clubId) await assertQuota(tx, input.clubId, buffer.length);
+    if (input.clubId) await assertQuota(tx, input.clubId, buffer.length, input.quotaShare ?? 1);
     // Unclaimed uploads are capped per user so POST /media cannot be used as free storage (they are swept after a TTL).
     if (!input.owner && input.uploadedBy) {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`media-unattached:${input.uploadedBy}`}, 0))`);
