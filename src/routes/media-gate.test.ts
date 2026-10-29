@@ -94,7 +94,7 @@ describe("media gate (static scan)", () => {
   it("nothing redirects to a file, builds a raw Response from bytes or serves with a hand-made Content-Disposition", () => {
     expect(offenders(/\b(?:c|ctx|res)\.redirect\s*\(|\bResponse\.redirect\s*\(/)).toEqual([]);
     expect(offenders(/\bnew Response\s*\(/)).toEqual([]);
-    expect(offenders(/Content-Disposition/i, ["lib/media.ts", "lib/privacy/respond.ts", "routes/attendance-report.ts", "routes/audit-log.ts", "routes/club-members.ts", "routes/dpa.ts", "routes/media.ts", "routes/event-participants.ts", "routes/meeting-assembly.ts", "routes/time-tracking.ts"])).toEqual([]);
+    expect(offenders(/Content-Disposition/i, ["lib/media.ts", "lib/privacy/respond.ts", "routes/acknowledgements.ts", "routes/attendance-report.ts", "routes/audit-log.ts", "routes/club-members.ts", "routes/dpa.ts", "routes/media.ts", "routes/event-participants.ts", "routes/meeting-assembly.ts", "routes/time-tracking.ts"])).toEqual([]);
   });
 
   it("only the media layer streams bytes: `c.body(new Uint8Array(...))` of a file exists only in lib/media.ts", () => {
@@ -102,10 +102,10 @@ describe("media gate (static scan)", () => {
   });
 
   it("only known response shapes carry a `url`/`photoUrl` field (each issues a signed URL after its own permission check)", () => {
-    // the demo seed writes external links (info page / location links) the board would type in, not files; location links hold external links the board typed in (not files); the e-mail/auth/notify files build links to the web app; the public registration link of an event (routes/event-registration.ts) is a web page link, not a file. CSV exports of attendance, participants and hours set their own Content-Disposition (generated text, no stored file).
-    const urlAllowed = ["auth/auth.ts", "scripts/demo/club.ts", "scripts/demo/places.ts", "db/schema/location-links.ts", "lib/club-registration-notify.ts", "lib/emailTemplate.ts", "lib/media-url.ts", "lib/member-invites.ts", "lib/notify/templates.ts", "lib/notify/unsubscribe.ts", "routes/calendar-feeds.ts", "routes/club-members.ts", "routes/event-registration.ts", "routes/form-submissions.ts", "routes/locations.ts", "routes/media.ts"];
+    // the demo seed writes external links (info page / location links) the board would type in, not files; location links hold external links the board typed in (not files); the e-mail/auth/notify files build links to the web app; the public registration link of an event (routes/event-registration.ts) is a web page link, not a file. The branding logo (routes/club-branding.ts) is a signed URL of a non-sensitive image issued after the session and branding read check. CSV exports of attendance, participants, hours and acknowledgements set their own Content-Disposition (generated text, no stored file). The membership card (routes/member-cards.ts, routes/member-card-verify.ts) returns signed URLs of the club logo and of the member photo, issued after the session check, the card permission and - for the photo - the consent `profilfoto_ausweis`.
+    const urlAllowed = ["auth/auth.ts", "scripts/demo/club.ts", "scripts/demo/places.ts", "db/schema/location-links.ts", "lib/club-registration-notify.ts", "lib/emailTemplate.ts", "lib/media-url.ts", "lib/member-invites.ts", "lib/notify/templates.ts", "lib/notify/unsubscribe.ts", "routes/calendar-feeds.ts", "routes/club-branding.ts", "routes/club-members.ts", "routes/event-registration.ts", "routes/form-submissions.ts", "routes/locations.ts", "routes/media.ts", "routes/member-card-verify.ts", "routes/member-cards.ts"];
     expect(offenders(/\burl\s*:/, urlAllowed)).toEqual([]);
-    expect(offenders(/\bphotoUrl\b/, ["routes/club-info.ts", "routes/club-members.ts", "routes/inventory-items.ts", "routes/locations.ts"])).toEqual([]);
+    expect(offenders(/\bphotoUrl\b/, ["routes/club-info.ts", "routes/club-members.ts", "routes/inventory-items.ts", "routes/locations.ts", "routes/member-card-verify.ts", "routes/member-cards.ts"])).toEqual([]);
     // the board-facing review of an application never carries a URL, only the authenticated stream path
     expect(sources.find((s) => s.file === "lib/application-review.ts")!.source).not.toMatch(/\burl\s*:|signedMediaUrl|buildMediaUrl/);
   });

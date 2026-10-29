@@ -71,3 +71,17 @@ export function digestHour(): number {
 export function isDigestTime(now: Date, timezone: string, hour: number = digestHour()): boolean {
   return localHour(now, timezone) >= hour;
 }
+
+/** The last second (23:59:59) of the calendar day `date` in `timezone`, as an instant; correct across daylight saving switches. */
+export function endOfLocalDay(date: string, timezone: string): Date {
+  const [y, m, d] = addDays(date, 1).split("-").map(Number) as [number, number, number];
+  const wall = Date.UTC(y, m - 1, d, 0, 0, 0);
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+  const offsetAt = (instant: number): number => {
+    const p = Object.fromEntries(fmt.formatToParts(new Date(instant)).map((x) => [x.type, x.value]));
+    return Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour) % 24, Number(p.minute), Number(p.second)) - instant;
+  };
+  let instant = wall;
+  for (let i = 0; i < 3; i++) instant = wall - offsetAt(instant);
+  return new Date(instant - 1000);
+}

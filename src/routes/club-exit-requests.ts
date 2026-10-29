@@ -18,6 +18,7 @@ import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, Valida
 import { closeExitSubmission, currentExitDefinition, insertExitSubmission, loadExitSubmission, prepareExitAnswers, type PreparedExitAnswers } from "../lib/form-exit.js";
 import { renderAnswers } from "../lib/form-review.js";
 import { ANSWERS_BODY_LIMIT, applicantCategories } from "../lib/forms.js";
+import { scheduleCancellationConfirmation } from "../lib/member-document-triggers.js";
 import { assertExitAllowed } from "../lib/member-protection.js";
 import { effectiveStatus, isLeftStatus, todayBerlin, transitionMember } from "../lib/member-lifecycle.js";
 import type { FormField } from "../lib/form-schema.js";
@@ -381,6 +382,7 @@ clubExitRequestRoutes.post("/", createBodyLimit, zValidator("json", createSchema
   });
 
   await notifyExitDecision({ clubId, requestId: result.request.id, clubMemberId: result.member.id, kind: kind === "exclusion" ? "exclusion" : "accepted", effectiveOn, note: kind === "exclusion" ? reason : null, today });
+  if (kind === "cancellation") await scheduleCancellationConfirmation({ clubId, exitRequestId: result.request.id });
   return c.json(
     {
       data: shapeRequest(result.request, result.member, settings),
@@ -486,6 +488,7 @@ clubExitRequestRoutes.post("/:id/approve", zValidator("json", approveSchema, val
     note: result.request.kind === "exclusion" ? result.request.reason : result.request.decisionNote,
     today,
   });
+  if (result.request.kind === "cancellation") await scheduleCancellationConfirmation({ clubId, exitRequestId: result.request.id });
   return c.json({
     data: shapeRequest(result.request, result.member, settings),
     transition: { kind: result.transition.kind, fromStatus: result.transition.fromStatus, toStatus: result.transition.toStatus, effectiveOn: result.transition.effectiveOn },

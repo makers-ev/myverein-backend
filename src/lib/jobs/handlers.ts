@@ -12,6 +12,10 @@ import { handleTermNotify, handleTermSweep, TERM_NOTIFY_JOB_TYPE, TERM_SWEEP_INT
 import { handleSeriesRefill, SERIES_REFILL_INTERVAL_MS, SERIES_REFILL_JOB_TYPE } from "../event-series-refill.js";
 import { GUEST_SWEEP_INTERVAL_MS, GUEST_SWEEP_JOB_TYPE, sweepUnconfirmedGuests } from "../event-guests.js";
 import { handleHelperReminders, HELPER_REMINDER_INTERVAL_MS, HELPER_REMINDER_JOB_TYPE } from "../helper-reminders.js";
+import { DOCUMENT_TRASH_INTERVAL_MS, DOCUMENT_TRASH_JOB_TYPE, handleDocumentTrashPurge, handleMediaOrphanSweep, MEDIA_ORPHAN_SWEEP_INTERVAL_MS, MEDIA_ORPHAN_SWEEP_JOB_TYPE } from "../media-jobs.js";
+import { assertCardSecret } from "../member-cards.js";
+import { registerBuiltinTemplates } from "../pdf/templates/index.js";
+import { handleRenderJob, RENDER_JOB_TYPE } from "../pdf/render.js";
 import { registerNotifyJobs } from "../notify/index.js";
 import { installUnsubscribeProvider } from "../notify/unsubscribe-token.js";
 import { handleReminder, handleReminderSweep, REMINDER_JOB_TYPE, REMINDER_SWEEP_INTERVAL_MS, REMINDER_SWEEP_JOB_TYPE } from "../reminders.js";
@@ -30,7 +34,10 @@ export function registerAllJobs(): void {
   if (registered) return;
   registered = true;
   registerNotifyJobs();
+  registerBuiltinTemplates();
+  registerJob(RENDER_JOB_TYPE, handleRenderJob);
   installUnsubscribeProvider();
+  assertCardSecret(); // fail fast: a too short MEMBER_CARD_SECRET in production must not start
   registerJob(PUBLISH_JOB_TYPE, handlePublishAnnouncement);
   registerJob(EVENT_CHANGED_JOB_TYPE, handleEventChanged);
   registerRecurringJob({ type: REMINDER_SWEEP_JOB_TYPE, intervalMs: REMINDER_SWEEP_INTERVAL_MS }, handleReminderSweep);
@@ -54,6 +61,8 @@ export function registerAllJobs(): void {
   registerRecurringJob({ type: GUEST_SWEEP_JOB_TYPE, intervalMs: GUEST_SWEEP_INTERVAL_MS }, async () => {
     await sweepUnconfirmedGuests();
   });
+  registerRecurringJob({ type: MEDIA_ORPHAN_SWEEP_JOB_TYPE, intervalMs: MEDIA_ORPHAN_SWEEP_INTERVAL_MS }, handleMediaOrphanSweep);
+  registerRecurringJob({ type: DOCUMENT_TRASH_JOB_TYPE, intervalMs: DOCUMENT_TRASH_INTERVAL_MS }, handleDocumentTrashPurge);
   registerRetentionTasks();
   registerRecurringJob({ type: RETENTION_SWEEP_JOB_TYPE, intervalMs: RETENTION_SWEEP_INTERVAL_MS }, handleRetentionSweep);
 }

@@ -25,6 +25,7 @@ import * as clubSettingsSchema from "./schema/club-settings.js";
 import * as clubMembershipsSchema from "./schema/club-memberships.js";
 import * as clubRolesSchema from "./schema/club-roles.js";
 import * as departmentsSchema from "./schema/departments.js";
+import * as documentsSchema from "./schema/documents.js";
 import * as eventAttendeesSchema from "./schema/event-attendees.js";
 import * as calendarFeedTokensSchema from "./schema/calendar-feed-tokens.js";
 import * as eventAttendanceSchema from "./schema/event-attendance.js";
@@ -82,6 +83,7 @@ export const schema = {
   ...clubApplicationsSchema,
   ...clubRegistrationsSchema,
   ...departmentsSchema,
+  ...documentsSchema,
   ...clubRolesSchema,
   ...guardianLinksSchema,
   ...clubInfoPagesSchema,

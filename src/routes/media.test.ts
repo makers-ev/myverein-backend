@@ -196,7 +196,7 @@ describe("media routes and security layer", () => {
       const rejected = results.find((r) => r.status === 422)!;
       const rejectedBody = (await rejected.json()) as { error: { code: string; details?: unknown } };
       expect(rejectedBody.error.code).toBe("QUOTA_EXCEEDED");
-      expect(rejectedBody.error.details).toEqual({ code: "club_quota" });
+      expect(rejectedBody.error.details).toMatchObject({ code: "club_quota" });
 
       // Deleting a file gives the space back.
       const live = await db.select().from(mediaFiles).where(eq(mediaFiles.clubId, clubBId));

@@ -16,10 +16,10 @@ function pngChunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([length, body, crc]);
 }
 
-export function makePng(withMetadata = true): Buffer {
+export function makePng(withMetadata = true, size: { width: number; height: number } = { width: 1, height: 1 }): Buffer {
   const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(1, 0);
-  ihdr.writeUInt32BE(1, 4);
+  ihdr.writeUInt32BE(size.width, 0);
+  ihdr.writeUInt32BE(size.height, 4);
   ihdr.set([8, 6, 0, 0, 0], 8);
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -36,7 +36,7 @@ function jpegSegment(marker: number, data: Buffer): Buffer {
   return Buffer.concat([Buffer.from([0xff, marker]), length, data]);
 }
 
-export function makeJpeg(withMetadata = true): Buffer {
+export function makeJpeg(withMetadata = true, size: { width: number; height: number } = { width: 1, height: 1 }): Buffer {
   return Buffer.concat([
     Buffer.from([0xff, 0xd8]),
     jpegSegment(0xe0, Buffer.from("JFIF\0\x01\x01\0\0\x01\0\x01\0\0")),
@@ -44,7 +44,7 @@ export function makeJpeg(withMetadata = true): Buffer {
       ? [jpegSegment(0xe1, Buffer.from(`Exif\0\0${GPS_MARKER}`)), jpegSegment(0xe1, Buffer.from(`http://ns.adobe.com/xap/1.0/\0${GPS_MARKER}`)), jpegSegment(0xed, Buffer.from(`Photoshop 3.0\0${GPS_MARKER}`)), jpegSegment(0xfe, Buffer.from(GPS_MARKER))]
       : []),
     jpegSegment(0xdb, Buffer.alloc(65, 1)),
-    jpegSegment(0xc0, Buffer.from([8, 0, 1, 0, 1, 1, 1, 0x11, 0])),
+    jpegSegment(0xc0, Buffer.from([8, size.height >> 8, size.height & 0xff, size.width >> 8, size.width & 0xff, 1, 1, 0x11, 0])),
     jpegSegment(0xda, Buffer.from([1, 1, 0, 0, 0x3f, 0])),
     Buffer.from([0x12, 0x34, 0xff, 0x00, 0x56]), // entropy-coded data incl. a stuffed 0xFF
     Buffer.from([0xff, 0xd9]),

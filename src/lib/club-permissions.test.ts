@@ -80,7 +80,7 @@ describe("announcements permissions (Wave 9 B7)", () => {
   it("announcements:write_department is held by abteilungsleitung and trainer only (scope comes from club_roles.department_id)", () => {
     for (const role of ["abteilungsleitung", "trainer"]) expect(hasClubPermission([role], "announcements:write_department")).toBe(true);
     for (const role of ["mitglied", "vorsitz", "kassenwart", "beisitzer", "erziehungsberechtigt"]) expect(hasClubPermission([role], "announcements:write_department")).toBe(false);
-    expect(clubPermissionsFor(["trainer"]).sort()).toEqual(["absences:read", "announcements:write_department", "attendance:read", "attendance:write", "registrations:read"]);
+    expect(clubPermissionsFor(["trainer"]).sort()).toEqual(["absences:read", "announcements:write_department", "attendance:read", "attendance:write", "documents:generate", "member_cards:verify", "registrations:read"]);
   });
 });
 
@@ -140,5 +140,35 @@ describe("Wave 12 permissions (attendance, registrations, helpers, time)", () =>
     for (const role of ["mitglied", "beisitzer", "erziehungsberechtigt"]) {
       for (const p of ["attendance:write", "attendance:read", "registrations:read", "helpers:write", "time:write", "time:read_rates"] as const) expect(hasClubPermission([role], p)).toBe(false);
     }
+  });
+});
+
+describe("Wave 13 permissions (documents, cards, branding, storage)", () => {
+  const NEW = ["documents:manage", "documents:write", "documents:read_personal", "documents:generate", "member_cards:verify", "member_cards:manage", "branding:write", "storage:read"] as const;
+
+  it("grants the whole set to vorsitz and stellv_vorsitz", () => {
+    for (const role of ["vorsitz", "stellv_vorsitz"]) for (const p of NEW) expect(hasClubPermission([role], p), `${role} ${p}`).toBe(true);
+  });
+
+  it("limits the rest to the agreed roles", () => {
+    const expected: Record<string, string[]> = {
+      schriftfuehrer: ["documents:write", "documents:generate", "member_cards:verify"],
+      kassenwart: ["documents:generate", "storage:read"],
+      beisitzer: ["member_cards:verify"],
+      abteilungsleitung: ["documents:generate", "member_cards:verify"],
+      trainer: ["documents:generate", "member_cards:verify"],
+      erziehungsberechtigt: [],
+      mitglied: [],
+    };
+    for (const [role, allowed] of Object.entries(expected)) {
+      for (const p of NEW) expect(hasClubPermission([role], p), `${role} ${p}`).toBe(allowed.includes(p));
+    }
+  });
+
+  it("never lets a role other than the board read personal storage, manage folders, issue cards or change the branding", () => {
+    for (const role of CLUB_ROLE_TYPES.filter((r) => !["vorsitz", "stellv_vorsitz"].includes(r))) {
+      for (const p of ["documents:manage", "documents:read_personal", "member_cards:manage", "branding:write"] as const) expect(hasClubPermission([role], p), `${role} ${p}`).toBe(false);
+    }
+    for (const p of NEW) expect(hasClubPermission([], p)).toBe(false);
   });
 });

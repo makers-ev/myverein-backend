@@ -12,6 +12,8 @@ import { and, eq } from "drizzle-orm";
 import { clubMembers, clubMemberStatusHistory, LEFT_STATUSES, type ClubMemberRow, type MemberCategoryRow, type MemberStatus } from "../db/schema/club-members.js";
 import type { DbExecutor } from "./club-members.js";
 import { ConflictError, NotFoundError, ValidationError } from "./errors.js";
+import { syncExitRetention } from "./document-retention-sync.js";
+import { syncCardWithStatus } from "./member-cards.js";
 
 /**
  * Allowed status changes (source = the member's EFFECTIVE status). Leaving statuses can only be left again by an
@@ -216,6 +218,11 @@ export async function transitionMember(tx: DbExecutor, clubId: string, memberRow
     reason,
     changedBy: actorMemberId,
   });
+
+  // Wave 13 B12: leaving revokes the membership card at once (a scheduled exit is derived live at the key date), coming back re-issues it.
+  // Wave 13 B14: the retention period of the person's documents starts with the exit date and is lifted when the exit is taken back.
+  if ("leftAt" in set) await syncExitRetention(tx, row.id, updated!.leftAt);
+  await syncCardWithStatus(tx, row.id, { wasLeft: isLeftStatus(from), nowLeft: isLeftStatus(effectiveStatus(updated!, today)) });
 
   return { row: updated!, fromStatus: historyFrom, toStatus: historyTo, fromCategoryId: row.categoryId, toCategoryId, effectiveOn, kind };
 }

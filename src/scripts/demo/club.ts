@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { auth } from "../../auth/auth.js";
 import { organization } from "../../auth/auth-schema.js";
 import { db } from "../../db/client.js";
-import { clubInfoPages } from "../../db/schema/club-info-pages.js";
+import { writeInfoPage } from "../../lib/club-info.js";
 import { clubRegistrations } from "../../db/schema/club-registrations.js";
 import { clubSettings, type ClubTextBlock } from "../../db/schema/club-settings.js";
 import { departments } from "../../db/schema/departments.js";
@@ -193,8 +193,10 @@ const PAGES: Array<{ slug: string; title: string; markdown: string | null; url?:
 
 export async function seedInfoPages(ctx: DemoCtx): Promise<void> {
   for (const p of PAGES) {
-    await db.insert(clubInfoPages).values({ clubId: ctx.clubId, slug: p.slug, title: p.title, contentMarkdown: p.markdown, externalUrl: p.url ?? null }).onConflictDoNothing();
-    await writeAudit(db, { eventType: "club_info_page.create", subjectId: ctx.clubId, actorUserId: accountOf(ctx, "vorsitz").userId, payload: { clubId: ctx.clubId, slug: p.slug } });
+    const { page, outcome } = await db.transaction((tx) =>
+      writeInfoPage(tx, { clubId: ctx.clubId, slug: p.slug, title: p.title, contentMarkdown: p.markdown ?? null, externalUrl: p.url ?? null, validFrom: null, documentId: null, note: null, userId: accountOf(ctx, "vorsitz").userId }),
+    );
+    if (outcome === "created") await writeAudit(db, { eventType: "club_info_page.create", subjectId: page.id, actorUserId: accountOf(ctx, "vorsitz").userId, payload: { clubId: ctx.clubId, slug: p.slug, version: 1 } });
   }
   ctx.log(`${PAGES.length} Vereinsinfo-Seiten`);
 }
