@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import { clubMembers, memberCategories, type ClubMemberRow } from "../db/schema/club-members.js";
@@ -121,7 +121,7 @@ export async function ensureCard(executor: DbExecutor, clubId: string, clubMembe
 export async function reissueCard(executor: DbExecutor, card: MemberCardRow, issuedBy: string | null, validUntil: string | null | undefined): Promise<MemberCardRow> {
   const [row] = await executor
     .update(memberCards)
-    .set({ tokenVersion: card.tokenVersion + 1, status: "aktiv", revokedAt: null, revokedReason: null, issuedAt: new Date(), issuedBy, ...(validUntil !== undefined ? { validUntil } : {}) })
+    .set({ tokenVersion: sql`${memberCards.tokenVersion} + 1`, status: "aktiv", revokedAt: null, revokedReason: null, issuedAt: new Date(), issuedBy, ...(validUntil !== undefined ? { validUntil } : {}) })
     .where(eq(memberCards.id, card.id))
     .returning();
   return row!;

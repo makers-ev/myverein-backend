@@ -187,6 +187,13 @@ describe("membership card", () => {
       expect(parseCardToken(back.token)).toMatchObject({ version: 3 });
     });
 
+    it("parallel re-issues each count: the version is incremented in SQL, none is lost", async () => {
+      const before = (await db.select().from(memberCards).where(eq(memberCards.clubMemberId, plainCm)))[0]!.tokenVersion;
+      const results = await Promise.all(Array.from({ length: 6 }, () => send(club.founder, `/club-members/${plainCm}/card/reissue`, "POST", {})));
+      expect(results.every((r) => r.status === 200)).toBe(true);
+      expect((await db.select().from(memberCards).where(eq(memberCards.clubMemberId, plainCm)))[0]!.tokenVersion).toBe(before + 6);
+    });
+
     it("leaving revokes at once, a scheduled exit follows the date, coming back re-issues with a new version", async () => {
       const [person] = await db.insert(clubMembers).values({ clubId: id(), displayName: "Geht Bald", joinedAt: "2020-01-01", birthDate: yearsAgo(30), status: "aktiv" }).returning();
       const pid = person!.id;
