@@ -85,7 +85,7 @@ export async function runDocumentRetention(now: Date = new Date(), options: { dr
     const removed = await db.transaction(async (tx) => {
       // Re-check under the transaction: a hold set a moment ago wins.
       const still = await tx.select({ id: documents.id, clubId: documents.clubId }).from(documents).where(and(inArray(documents.id, group.map((g) => g.id)), eq(documents.legalHold, false), eq(documents.status, "zur_loeschung")));
-      const n = await purgeDocuments(tx, still, afterCommit);
+      const n = await purgeDocuments(tx, still, afterCommit, { ignoreAcknowledgements: true });
       if (n > 0) await writeAudit(tx, { eventType: "document.retention_purge", subjectId: group[0]!.clubId, payload: { clubId: group[0]!.clubId, docType: group[0]!.docType, count: n } });
       return n;
     });

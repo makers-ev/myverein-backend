@@ -8,12 +8,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers } from "../db/schema/club-members.js";
-import { documents, documentVersions } from "../db/schema/documents.js";
+import { documentAcknowledgements, documents, documentVersions } from "../db/schema/documents.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { documentRoutes } from "../routes/documents.js";
 import { createClub, dropClubs, installErrorHandler, requester } from "../routes/forms-test-support.js";
 import { memberDocumentRoutes } from "../routes/member-documents.js";
-import { purgeDocuments } from "./documents.js";
+import { purgeDocuments, purgeExpiredTrash } from "./documents.js";
 import { runDocumentRetention } from "./document-retention.js";
 import { storageUsage } from "./media-quota.js";
 import { PDF_BYTES } from "./media-fixtures.js";
@@ -166,6 +166,29 @@ describe("document retention", () => {
       expect(await row(held.id)).toBeDefined();
       expect(await row(dated.id)).toBeDefined();
       expect(await row(free.id)).toBeUndefined();
+    });
+  });
+
+  describe("acknowledgement proof", () => {
+    it("is not deleted by a purge by hand or by the trash job, only by the end of the retention period", async () => {
+      const doc = await addDoc({ scope: "verein", docType: "versammlung_protokoll", retentionUntil: null });
+      const [version] = await db.select().from(documentVersions).where(eq(documentVersions.documentId, doc.id));
+      await db.insert(documentAcknowledgements).values({ clubId: id(), documentId: doc.id, versionId: version!.id, sha256: version!.sha256, clubMemberId: plainCm, status: "bestaetigt", wording: "ok" });
+      await call(club.founder, `/documents/${doc.id}`, { method: "DELETE", clubId: id() });
+      const manual = await call(club.founder, `/documents/${doc.id}/permanent`, { method: "DELETE", clubId: id() });
+      expect(manual.status).toBe(409);
+      expect((await body(manual)).error.details.code).toBe("acknowledgements");
+      const emptied = await body(await call(club.founder, "/documents/trash/empty", { method: "POST", clubId: id() }));
+      expect(emptied.data.kept).toBeGreaterThanOrEqual(1);
+      await db.update(documents).set({ trashedAt: new Date(Date.now() - 40 * 86_400_000) }).where(eq(documents.id, doc.id));
+      await purgeExpiredTrash();
+      expect(await row(doc.id)).toBeDefined();
+      expect(await db.select().from(documentAcknowledgements).where(eq(documentAcknowledgements.documentId, doc.id))).toHaveLength(1);
+      // The retention period ending is the deliberate end of the proof.
+      await db.update(documents).set({ retentionUntil: "2020-01-01", status: "zur_loeschung", updatedAt: new Date(Date.now() - 30 * 86_400_000) }).where(eq(documents.id, doc.id));
+      await runDocumentRetention(new Date(), { dryRun: false, clubId: id() });
+      expect(await row(doc.id)).toBeUndefined();
+      expect(await db.select().from(documentAcknowledgements).where(eq(documentAcknowledgements.documentId, doc.id))).toHaveLength(0);
     });
   });
 

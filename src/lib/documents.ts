@@ -115,7 +115,7 @@ export async function addUploadedVersion(doc: DocumentRow, file: File, userId: s
  * Deletes documents for good: registry tombstones inside the transaction, the files after the commit (a failure there leaves
  * an orphan the daily sweep removes). Returns the number of documents removed. Documents under legal hold or retention are skipped.
  */
-export async function purgeDocuments(executor: DbExecutor, docs: Array<Pick<DocumentRow, "id" | "clubId">>, afterCommit: Array<() => Promise<void>>): Promise<number> {
+export async function purgeDocuments(executor: DbExecutor, docs: Array<Pick<DocumentRow, "id" | "clubId">>, afterCommit: Array<() => Promise<void>>, opts: { ignoreAcknowledgements?: boolean } = {}): Promise<number> {
   if (docs.length === 0) return 0;
   // Re-checked under a row lock INSIDE the transaction: a legal hold or retention date set after the caller selected the
   // documents (a board member clicking at the same moment) wins, the document is simply not part of this purge.
@@ -123,7 +123,7 @@ export async function purgeDocuments(executor: DbExecutor, docs: Array<Pick<Docu
   const locked = await executor
     .select({ id: documents.id })
     .from(documents)
-    .where(and(inArray(documents.id, docs.map((d) => d.id)), eq(documents.legalHold, false), or(isNull(documents.retentionUntil), lt(documents.retentionUntil, today))))
+    .where(and(inArray(documents.id, docs.map((d) => d.id)), eq(documents.legalHold, false), or(isNull(documents.retentionUntil), lt(documents.retentionUntil, today)), opts.ignoreAcknowledgements ? undefined : noAcknowledgements))
     .for("update");
   const ids = locked.map((l) => l.id);
   if (ids.length === 0) return 0;
@@ -135,6 +135,13 @@ export async function purgeDocuments(executor: DbExecutor, docs: Array<Pick<Docu
   return ids.length;
 }
 
+/**
+ * Acknowledgement proof (who confirmed which version) hangs off the document with ON DELETE CASCADE; a purge by hand or by the
+ * trash job therefore refuses documents that still carry acknowledgements. Only the end of the retention period (the sweep) may
+ * remove the proof together with the document.
+ */
+export const noAcknowledgements = sql`NOT EXISTS (SELECT 1 FROM document_acknowledgements a WHERE a.document_id = ${documents.id})`;
+
 /** Documents in the trash that may be deleted now: past the trash period, no legal hold, retention over. */
 export function purgeableCondition(now: Date, olderThanDays: number | null, anyStatus = false) {
   const today = now.toISOString().slice(0, 10);
@@ -142,6 +149,7 @@ export function purgeableCondition(now: Date, olderThanDays: number | null, anyS
     anyStatus ? undefined : eq(documents.status, "im_papierkorb"),
     eq(documents.legalHold, false),
     or(isNull(documents.retentionUntil), lt(documents.retentionUntil, today)),
+    noAcknowledgements,
     olderThanDays === null ? undefined : lt(documents.trashedAt, new Date(now.getTime() - olderThanDays * 86_400_000)),
   );
 }

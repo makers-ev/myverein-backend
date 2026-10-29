@@ -10,6 +10,7 @@ import { db } from "../db/client.js";
 import {
   DOCUMENT_PERMISSION_LEVELS,
   DOCUMENT_SUBJECT_TYPES,
+  documentAcknowledgements,
   documentFolders,
   documentPermissions,
   documents,
@@ -473,6 +474,10 @@ documentRoutes.delete("/:id/permanent", async (c) => {
   const doc = await loadDocument(c, p, index, c.req.param("id"), "verwalten");
   if (doc.status !== "im_papierkorb") throw new ConflictError("Only documents in the trash can be deleted for good");
   const [ok] = await db.select({ id: documents.id }).from(documents).where(and(eq(documents.id, doc.id), purgeableCondition(new Date(), null))).limit(1);
+  if (!ok) {
+    const [acks] = await db.select({ n: count() }).from(documentAcknowledgements).where(eq(documentAcknowledgements.documentId, doc.id));
+    if ((acks?.n ?? 0) > 0) throw new ConflictError("The document carries acknowledgements (proof); it can only leave with its retention period", { code: "CONFLICT", details: { code: "acknowledgements" } });
+  }
   if (!ok) throw new ConflictError("The document is under legal hold or retention", { code: "CONFLICT", details: { code: "retention" } });
   const afterCommit: Array<() => Promise<void>> = [];
   const removedNow = await db.transaction((tx) => purgeDocuments(tx, [doc], afterCommit));
