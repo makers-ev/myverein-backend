@@ -6,7 +6,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 import { auth } from "./auth/auth.js";
 import { closeDatabase } from "./db/client.js";
-import { AppError, toAppError } from "./lib/errors.js";
+import { AppError, NotFoundError, toAppError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
 import { registerAllJobs, startJobWorker, workerEnabled } from "./lib/jobs/index.js";
 import { startMediaSweeper } from "./lib/media.js";
@@ -50,6 +50,7 @@ import { guardianRoutes, myWardsRoutes } from "./routes/guardian.js";
 import { consentOverviewRoutes, consentPurposeRoutes } from "./routes/consent-purposes.js";
 import { clubSettingsRoutes } from "./routes/club-settings.js";
 import { clubStatsRoutes } from "./routes/club-stats.js";
+import { clubOverviewRoutes } from "./routes/club-overview.js";
 import { departmentRoutes } from "./routes/departments.js";
 import { calendarFeedRoutes, feedRoutes } from "./routes/calendar-feeds.js";
 import { eventSeriesRoutes } from "./routes/event-series.js";
@@ -112,6 +113,9 @@ app.onError((err, c) => {
   return c.json(appError.toJSON(), appError.status as ContentfulStatusCode);
 });
 
+// Unknown routes answer in the same JSON error shape as every other error.
+app.notFound((c) => c.json(new NotFoundError("Not found").toJSON(), 404));
+
 // Better Auth owns everything under /api/auth/* -- sign-up, sign-in,
 // session management, 2FA, organization, admin, and the OpenAPI reference
 // (per plugin config in src/auth/auth.ts). No hand-rolled auth routes exist
@@ -133,6 +137,7 @@ app.route("/admin/dpa-acceptances", adminDpaAcceptanceRoutes);
 app.route("/dpa", dpaRoutes);
 app.route("/club-privacy-notices", clubPrivacyNoticeRoutes);
 app.route("/clubs", clubNoticeBySlugRoutes);
+app.route("/clubs", clubOverviewRoutes);
 app.route("/retention-policies", retentionPolicyRoutes);
 app.route("/admin/notifications", adminNotificationRoutes);
 app.route("/admin/notification-templates", adminNotificationTemplateRoutes);

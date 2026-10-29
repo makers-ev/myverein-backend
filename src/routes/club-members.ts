@@ -26,6 +26,7 @@ import { memberFieldValues } from "../db/schema/forms.js";
 import { departments } from "../db/schema/departments.js";
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { ASSIGNABLE_ROLE_TYPES, IMPLICIT_ROLE_TYPE, clubPermissionsFor, hasClubPermission } from "../lib/club-permissions.js";
+import { stripControlChars } from "../lib/search-text.js";
 import { DEFAULT_CATEGORY_KEY, type DbExecutor, ensureClubMember, ensureDefaultCategories, isUuid, markDetachedMembersLeft, memberNumberTaken, resolveClubMember } from "../lib/club-members.js";
 import { notifyApplicationReceived } from "../lib/decision-notify.js";
 import { ConflictError, ForbiddenError, isUniqueViolation, NotFoundError, ValidationError } from "../lib/errors.js";
@@ -673,8 +674,9 @@ clubMemberRoutes.get("/", zValidator("query", listQuerySchema, validationHook), 
   // Former members (and interessenten) are only visible to callers who manage members; everyone else sees members with
   // an effective status probe|aktiv|ruhend plus their own row. Status filters narrow this set, they cannot widen it.
   if (!canSeeAllMembers(c)) conditions.push(or(visibleStatusCondition(today), eq(clubMembers.memberId, caller.memberId)));
-  if (query.q) {
-    const pattern = `%${query.q.replace(/[\\%_]/g, "\\$&")}%`;
+  const searchText = query.q ? stripControlChars(query.q).trim() : "";
+  if (searchText) {
+    const pattern = `%${searchText.replace(/[\\%_]/g, "\\$&")}%`;
     conditions.push(
       caller.canReadSensitive
         ? or(ilike(clubMembers.displayName, pattern), ilike(clubMembers.memberNumber, pattern), ilike(clubMembers.contactEmail, pattern), ilike(user.email, pattern))

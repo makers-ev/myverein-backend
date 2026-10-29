@@ -446,7 +446,7 @@ clubInboxRoutes.use("*", clubGuard);
  * the audience snapshot contained, and every query is bound to `user_id = caller AND club_id = club`. Withdrawn, expired
  * and unsent announcements are hidden.
  */
-function inboxWhere(clubId: string, userId: string, unreadOnly: boolean) {
+export function inboxWhere(clubId: string, userId: string, unreadOnly: boolean) {
   return and(
     eq(messageDeliveries.userId, userId),
     eq(messageDeliveries.clubId, clubId),

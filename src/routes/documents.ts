@@ -21,6 +21,7 @@ import {
   type DocumentVersionRow,
 } from "../db/schema/documents.js";
 import { writeAudit } from "../lib/audit.js";
+import { stripControlChars } from "../lib/search-text.js";
 import { CLUB_ROLE_TYPES, hasClubPermission } from "../lib/club-permissions.js";
 import { isUuid } from "../lib/club-members.js";
 import { DOCUMENT_RETENTION_CLASSES } from "../lib/retention/document-classes.js";
@@ -314,7 +315,7 @@ documentRoutes.get("/", zValidator("query", listQuery, invalid), async (c) => {
   }
   const placement = [folderIds.length > 0 ? inArray(documents.folderId, folderIds) : undefined, includeRoot ? isNull(documents.folderId) : undefined].filter((x) => x !== undefined);
   if (placement.length === 0) return c.json({ data: [], page: q.page, pageSize: q.pageSize, total: 0 });
-  const escaped = q.q?.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+  const escaped = q.q ? stripControlChars(q.q).trim().replace(/[\\%_]/g, (ch) => `\\${ch}`) : undefined;
   const where = and(eq(documents.clubId, p.clubId), eq(documents.scope, "verein"), eq(documents.status, q.status), or(...placement), escaped ? ilike(documents.title, `%${escaped}%`) : undefined);
   const [total] = await db.select({ n: count() }).from(documents).where(where);
   const rows = await db

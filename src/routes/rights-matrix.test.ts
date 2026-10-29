@@ -22,6 +22,7 @@ import { adminClubRegistrationRoutes } from "./admin-club-registrations.js";
 import { adminClubRoutes } from "./admin-clubs.js";
 import { adminUserRoutes } from "./admin-users.js";
 import { clubStatsRoutes } from "./club-stats.js";
+import { clubOverviewRoutes } from "./club-overview.js";
 import { clubExitRequestRoutes } from "./club-exit-requests.js";
 import { clubAnnouncementRoutes, clubInboxRoutes } from "./club-announcements.js";
 import { notificationPreferenceRoutes, unsubscribeRoutes } from "./notification-preferences.js";
@@ -125,6 +126,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/admin", "adminUserRoutes", adminUserRoutes],
   ["/club-privacy-notices", "clubPrivacyNoticeRoutes", clubPrivacyNoticeRoutes],
   ["/clubs", "clubNoticeBySlugRoutes", clubNoticeBySlugRoutes],
+  ["/clubs", "clubOverviewRoutes", clubOverviewRoutes],
   ["/retention-policies", "retentionPolicyRoutes", retentionPolicyRoutes],
   ["/admin/notifications", "adminNotificationRoutes", adminNotificationRoutes],
   ["/admin/notification-templates", "adminNotificationTemplateRoutes", adminNotificationTemplateRoutes],

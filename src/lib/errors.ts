@@ -25,7 +25,8 @@ export type ErrorCode =
   | "QUOTA_EXCEEDED"
   | "FORM_VERSION_OUTDATED"
   | "RECIPIENT_CONFIRMATION_REQUIRED"
-  | "DPA_REQUIRED";
+  | "DPA_REQUIRED"
+  | "QUERY_TOO_SHORT";
 
 export interface AppErrorOptions {
   cause?: unknown;
