@@ -10,6 +10,9 @@ import { ERROR_CODES } from "../lib/error-codes.js";
  * helpers, with the HTTP status of the error class thrown on the same line. Codes built dynamically (CSV row problems, form
  * publishing problems, erasure blockers) are documented where they are produced and are not part of this scan.
  *
+
+ * Dev tooling: reads and writes only source files and README.md (excluded from the media grep gate like scratch-db.ts), never user files.
+ *
  * `npm run docs:error-codes` rewrites the block between the markers; `error-codes.test.ts` fails if the README is stale.
  */
 
