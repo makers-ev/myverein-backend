@@ -16,9 +16,9 @@ import { locations } from "../db/schema/locations.js";
 import { meetingAttendance } from "../db/schema/meetings.js";
 import { getVisibleCalendarIds } from "./calendar-visibility.js";
 import { hasClubPermission } from "./club-permissions.js";
-import { isMaintenanceDue } from "./inventory-status.js";
 import { callerClubMemberId } from "./meeting-members.js";
 import { todayBerlin } from "./member-lifecycle.js";
+import { inboxWhere } from "../routes/club-announcements.js";
 import { visibleStatusCondition } from "./member-read-scope.js";
 
 /**
@@ -66,7 +66,11 @@ async function upcomingEvents(caller: TodayCaller, now: Date) {
       .where(and(window, isNull(events.cancelledAt), sql`NOT EXISTS (SELECT 1 FROM ${eventAttendees} a WHERE a.event_id = ${events.id} AND a.member_id = ${caller.accountMemberId})`))
       .orderBy(events.startsAt, events.id)
       .limit(TODAY_LIST_MAX),
-    db.select(pick).from(events).where(and(window, isNotNull(events.cancelledAt))).orderBy(events.startsAt, events.id).limit(TODAY_LIST_MAX),
+    db
+      .select(pick)
+      .from(events)
+      .where(and(window, isNotNull(events.cancelledAt), sql`EXISTS (SELECT 1 FROM ${eventAttendees} a WHERE a.event_id = ${events.id} AND a.member_id = ${caller.accountMemberId})`))
+      .orderBy(events.startsAt, events.id).limit(TODAY_LIST_MAX),
   ]);
   return { open, cancelled };
 }
@@ -76,15 +80,7 @@ async function unreadCount(caller: TodayCaller): Promise<number> {
     .select({ n: count() })
     .from(messageDeliveries)
     .leftJoin(clubAnnouncements, eq(clubAnnouncements.id, messageDeliveries.announcementId))
-    .where(
-      and(
-        eq(messageDeliveries.userId, caller.userId),
-        eq(messageDeliveries.clubId, caller.clubId),
-        eq(messageDeliveries.channel, "in_app"),
-        isNull(messageDeliveries.readAt),
-        or(isNull(messageDeliveries.announcementId), and(eq(clubAnnouncements.status, "sent"), or(isNull(clubAnnouncements.expiresAt), gt(clubAnnouncements.expiresAt, sql`now()`)))),
-      ),
-    );
+    .where(inboxWhere(caller.clubId, caller.userId, true));
   return row?.n ?? 0;
 }
 
@@ -144,10 +140,17 @@ async function boardSection(caller: TodayCaller, now: Date): Promise<TodayOvervi
   if (may("inventory:write")) {
     jobs.push(
       db
-        .select({ maintenanceIntervalDays: inventoryItems.maintenanceIntervalDays, lastMaintenanceAt: inventoryItems.lastMaintenanceAt, acquiredAt: inventoryItems.acquiredAt })
+        .select({ n: count() })
         .from(inventoryItems)
-        .where(and(eq(inventoryItems.clubId, caller.clubId), isNotNull(inventoryItems.maintenanceIntervalDays)))
-        .then((items) => void (board.maintenanceDue = items.filter((i) => isMaintenanceDue(i, now)).length)),
+        .where(
+          and(
+            eq(inventoryItems.clubId, caller.clubId),
+            isNotNull(inventoryItems.maintenanceIntervalDays),
+            // Same rule as isMaintenanceDue: (last maintenance, else acquisition) + interval days <= now, in UTC.
+            sql`coalesce(${inventoryItems.lastMaintenanceAt}, ${inventoryItems.acquiredAt})::timestamp + make_interval(days => ${inventoryItems.maintenanceIntervalDays}) <= (${now.toISOString()}::timestamptz AT TIME ZONE 'UTC')`,
+          ),
+        )
+        .then(([r]) => void (board.maintenanceDue = r?.n ?? 0)),
     );
   }
   if (may("club_stats:read")) {
@@ -166,22 +169,18 @@ async function boardSection(caller: TodayCaller, now: Date): Promise<TodayOvervi
 /** Setup checklist for a new club; only for callers who maintain the club data, gone once everything is done. */
 async function setupSection(caller: TodayCaller): Promise<TodayOverview["setup"] | undefined> {
   if (caller.isGuest || !hasClubPermission(caller.roleTypes, "club_info:write")) return undefined;
-  const has = (rows: Array<{ n: number }>) => (rows[0]?.n ?? 0) > 0;
-  const [logo, depts, calendar, location, others] = await Promise.all([
-    db.select({ n: count() }).from(clubSettings).where(and(eq(clubSettings.clubId, caller.clubId), isNotNull(clubSettings.brandLogoKey))),
-    db.select({ n: count() }).from(departments).where(eq(departments.clubId, caller.clubId)),
-    db.select({ n: count() }).from(events).innerJoin(calendars, eq(calendars.id, events.calendarId)).where(eq(calendars.clubId, caller.clubId)),
-    db.select({ n: count() }).from(locations).where(eq(locations.clubId, caller.clubId)),
-    // "Members" is done once somebody besides the founder is in the club.
-    db.select({ n: count() }).from(clubMembers).where(and(eq(clubMembers.clubId, caller.clubId), visibleStatusCondition(todayBerlin()))),
-  ]);
-  const state: Record<SetupKey, boolean> = {
-    logo: has(logo),
-    departments: has(depts),
-    calendar: has(calendar),
-    location: has(location),
-    members: (others[0]?.n ?? 0) > 1,
-  };
+  const yes = async (q: PromiseLike<unknown[]>): Promise<boolean> => (await q).length > 0;
+  const state: Record<SetupKey, boolean> = { logo: false, departments: false, calendar: false, location: false, members: false };
+  const checks: Array<[SetupKey, () => Promise<boolean>]> = [
+    ["logo", () => yes(db.select({ one: sql`1` }).from(clubSettings).where(and(eq(clubSettings.clubId, caller.clubId), isNotNull(clubSettings.brandLogoKey))).limit(1))],
+    ["departments", () => yes(db.select({ one: sql`1` }).from(departments).where(eq(departments.clubId, caller.clubId)).limit(1))],
+    ["calendar", () => yes(db.select({ one: sql`1` }).from(events).innerJoin(calendars, eq(calendars.id, events.calendarId)).where(eq(calendars.clubId, caller.clubId)).limit(1))],
+    ["location", () => yes(db.select({ one: sql`1` }).from(locations).where(eq(locations.clubId, caller.clubId)).limit(1))],
+    // "Members" is done once somebody besides the founder is in the club (LIMIT 2 instead of a full count).
+    ["members", async () => (await db.select({ one: sql`1` }).from(clubMembers).where(and(eq(clubMembers.clubId, caller.clubId), visibleStatusCondition(todayBerlin()))).limit(2)).length > 1],
+  ];
+  // Existence probes (LIMIT 1/2) instead of full counts; the checklist needs every key, so all run in parallel.
+  await Promise.all(checks.map(async ([key, run]) => void (state[key] = await run())));
   const done = SETUP_KEYS.filter((k) => state[k]);
   const open = SETUP_KEYS.filter((k) => !state[k]);
   return open.length === 0 ? undefined : { done, open };

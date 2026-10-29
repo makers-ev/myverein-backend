@@ -40,6 +40,8 @@ describe("GET /clubs/:clubId/today", () => {
     await fx.addEvent({ calendarId: fx.calClub, title: "Vorbei", startsAt: new Date(Date.now() - 5 * HOUR) });
     const cancelled = await fx.addEvent({ calendarId: fx.calClub, title: "Abgesagt", startsAt: new Date(Date.now() + 4 * HOUR), cancelledAt: new Date() });
     await db.insert(eventAttendees).values({ eventId: answered.id, memberId: fx.users.member1.memberId, status: "angemeldet" });
+    await db.insert(eventAttendees).values({ eventId: cancelled.id, memberId: fx.users.member1.memberId, status: "angemeldet" });
+    await fx.addEvent({ calendarId: fx.calClub, title: "Abgesagt ohne RSVP", startsAt: new Date(Date.now() + 5 * HOUR), cancelledAt: new Date() });
 
     const body = await fx.json<{ data: Today }>(await today(fx.users.member1));
     const titles = body.data.openRsvps.map((e) => e.title);
@@ -49,6 +51,7 @@ describe("GET /clubs/:clubId/today", () => {
     expect(titles).not.toContain("Vorbei");
     expect(titles).not.toContain("Abgesagt");
     expect(body.data.openRsvps.find((e) => e.eventId === open.id)).toMatchObject({ eventId: open.id, title: "Offen" });
+    // Only cancellations of events the caller had an RSVP row for.
     expect(body.data.cancelled.map((e) => e.eventId)).toEqual([cancelled.id]);
     expect(typeof body.data.generatedAt).toBe("string");
     // Another member still has "Zugesagt" open: the answer is per caller.
@@ -85,8 +88,13 @@ describe("GET /clubs/:clubId/today", () => {
     expect(plain.data.board).toBeUndefined();
     expect(plain.data.setup).toBeUndefined();
 
+    await db.insert(inventoryItems).values([
+      { clubId: fx.clubId, name: "Wartung faellig", condition: "gut", maintenanceIntervalDays: 30, lastMaintenanceAt: "2000-01-01" },
+      { clubId: fx.clubId, name: "Wartung spaeter", condition: "gut", maintenanceIntervalDays: 30, lastMaintenanceAt: "2999-01-01" },
+      { clubId: fx.clubId, name: "Ohne Plan", condition: "gut" },
+    ]);
     const board = await fx.json<{ data: Today }>(await today(fx.users.board));
-    expect(board.data.board).toMatchObject({ openApplications: expect.any(Number), openExits: 0, maintenanceDue: 0, memberCount: expect.any(Number) });
+    expect(board.data.board).toMatchObject({ openApplications: expect.any(Number), openExits: 0, maintenanceDue: 1, memberCount: expect.any(Number) });
     expect(board.data.board!.openApplications).toBeGreaterThanOrEqual(1);
     expect(board.data.setup?.open).toEqual(["logo", "location"]);
     expect(board.data.setup?.done).toEqual(expect.arrayContaining(["departments", "calendar", "members"]));

@@ -41,7 +41,7 @@ afterAll(async () => fx.cleanup());
 
 describe("GET /clubs/:clubId/search", () => {
   it("rejects short queries with QUERY_TOO_SHORT and keeps unknown limits harmless", async () => {
-    for (const qs of ["", "?q=", "?q=a", "?q=%20a%20"]) {
+    for (const qs of ["", "?q=", "?q=a", "?q=%20a%20", "?q=a%00", "?q=%00%00%1f"]) {
       const res = await search(fx.users.member1, qs);
       expect(res.status, qs).toBe(400);
       const body = await fx.json<{ error: { code: string; details: { code: string } } }>(res);
@@ -49,6 +49,11 @@ describe("GET /clubs/:clubId/search", () => {
       expect(body.error.details.code).toBe("query_too_short");
     }
     expect((await search(fx.users.member1, "?q=ze&limit=abc")).status).toBe(200);
+  });
+
+  it("strips control characters (NUL) instead of failing with 500", async () => {
+    const res = await search(fx.users.member1, "?q=ze%00lda");
+    expect(res.status).toBe(200);
   });
 
   it("is 404 for a foreign club and 401 without a session", async () => {

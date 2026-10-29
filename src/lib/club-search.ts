@@ -9,6 +9,7 @@ import { locations } from "../db/schema/locations.js";
 import { getVisibleCalendarIds } from "./calendar-visibility.js";
 import { atLeast, folderLevel, globalLevel, loadFolderIndex, type DocumentPrincipal } from "./document-access.js";
 import { BadRequestError } from "./errors.js";
+import { stripControlChars } from "./search-text.js";
 import { todayBerlin } from "./member-lifecycle.js";
 import { visibleStatusCondition } from "./member-read-scope.js";
 
@@ -34,9 +35,9 @@ export interface SearchResult {
   locations: Array<{ id: string; name: string }>;
 }
 
-/** Trims the query and rejects anything shorter than two characters (`400 QUERY_TOO_SHORT`). */
+/** Strips control characters, trims and rejects anything shorter than two characters (`400 QUERY_TOO_SHORT`). */
 export function normalizeQuery(raw: string | undefined): string {
-  const q = (raw ?? "").trim().slice(0, SEARCH_MAX_LENGTH).trim();
+  const q = stripControlChars(raw ?? "").trim().slice(0, SEARCH_MAX_LENGTH).trim();
   if (q.length < SEARCH_MIN_LENGTH) throw new BadRequestError(`Search text needs at least ${SEARCH_MIN_LENGTH} characters`, { code: "QUERY_TOO_SHORT", details: { code: "query_too_short", min: SEARCH_MIN_LENGTH } });
   return q;
 }
