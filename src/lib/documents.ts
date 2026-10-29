@@ -117,7 +117,16 @@ export async function addUploadedVersion(doc: DocumentRow, file: File, userId: s
  */
 export async function purgeDocuments(executor: DbExecutor, docs: Array<Pick<DocumentRow, "id" | "clubId">>, afterCommit: Array<() => Promise<void>>): Promise<number> {
   if (docs.length === 0) return 0;
-  const ids = docs.map((d) => d.id);
+  // Re-checked under a row lock INSIDE the transaction: a legal hold or retention date set after the caller selected the
+  // documents (a board member clicking at the same moment) wins, the document is simply not part of this purge.
+  const today = new Date().toISOString().slice(0, 10);
+  const locked = await executor
+    .select({ id: documents.id })
+    .from(documents)
+    .where(and(inArray(documents.id, docs.map((d) => d.id)), eq(documents.legalHold, false), or(isNull(documents.retentionUntil), lt(documents.retentionUntil, today))))
+    .for("update");
+  const ids = locked.map((l) => l.id);
+  if (ids.length === 0) return 0;
   const versions = await executor.select({ storageKey: documentVersions.storageKey, clubId: documentVersions.clubId }).from(documentVersions).where(inArray(documentVersions.documentId, ids));
   for (const v of versions) {
     if (await markMediaDeleted(v.storageKey, executor, v.clubId)) afterCommit.push(() => purgeMediaFile(v.storageKey));

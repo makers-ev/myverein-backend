@@ -475,7 +475,9 @@ documentRoutes.delete("/:id/permanent", async (c) => {
   const [ok] = await db.select({ id: documents.id }).from(documents).where(and(eq(documents.id, doc.id), purgeableCondition(new Date(), null))).limit(1);
   if (!ok) throw new ConflictError("The document is under legal hold or retention", { code: "CONFLICT", details: { code: "retention" } });
   const afterCommit: Array<() => Promise<void>> = [];
-  await db.transaction((tx) => purgeDocuments(tx, [doc], afterCommit));
+  const removedNow = await db.transaction((tx) => purgeDocuments(tx, [doc], afterCommit));
+  // A hold or date set between the check above and the lock inside the purge wins.
+  if (removedNow === 0) throw new ConflictError("The document is under legal hold or retention", { code: "CONFLICT", details: { code: "retention" } });
   for (const run of afterCommit) await run();
   await writeAudit(db, { eventType: "document.purge", subjectId: doc.id, payload: { clubId: p.clubId, documentId: doc.id, count: 1, source: "manual" } });
   return c.body(null, 204);

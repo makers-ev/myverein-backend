@@ -197,7 +197,8 @@ async function removeForGood(doc: DocumentRow): Promise<void> {
   const [ok] = await db.select({ id: documents.id }).from(documents).where(and(eq(documents.id, doc.id), purgeableCondition(new Date(), null, true))).limit(1);
   if (!ok) throw new ConflictError("The document is under legal hold or retention", { code: "CONFLICT", details: { code: "retention" } });
   const afterCommit: Array<() => Promise<void>> = [];
-  await db.transaction((tx) => purgeDocuments(tx, [doc], afterCommit));
+  const removed = await db.transaction((tx) => purgeDocuments(tx, [doc], afterCommit));
+  if (removed === 0) throw new ConflictError("The document is under legal hold or retention", { code: "CONFLICT", details: { code: "retention" } });
   for (const run of afterCommit) await run();
 }
 

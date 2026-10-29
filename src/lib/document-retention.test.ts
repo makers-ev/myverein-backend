@@ -13,6 +13,7 @@ import { mediaFiles } from "../db/schema/media-files.js";
 import { documentRoutes } from "../routes/documents.js";
 import { createClub, dropClubs, installErrorHandler, requester } from "../routes/forms-test-support.js";
 import { memberDocumentRoutes } from "../routes/member-documents.js";
+import { purgeDocuments } from "./documents.js";
 import { runDocumentRetention } from "./document-retention.js";
 import { storageUsage } from "./media-quota.js";
 import { PDF_BYTES } from "./media-fixtures.js";
@@ -148,6 +149,23 @@ describe("document retention", () => {
       await db.update(documents).set({ updatedAt: new Date(Date.now() - 30 * 86_400_000) }).where(eq(documents.id, doc.id));
       expect((await runDocumentRetention(new Date(), { dryRun: false, clubId: id() })).deleted).toBe(0);
       expect(await row(doc.id)).toBeDefined();
+    });
+  });
+
+  describe("purge re-check", () => {
+    it("a hold or retention date set after the documents were selected keeps them out of the purge", async () => {
+      const held = await addDoc({ scope: "verein", docType: "upload", retentionUntil: null });
+      const dated = await addDoc({ scope: "verein", docType: "upload", retentionUntil: "2999-01-01" });
+      const free = await addDoc({ scope: "verein", docType: "upload", retentionUntil: null });
+      const selected = [held, dated, free].map((d) => ({ id: d.id, clubId: id() }));
+      await db.update(documents).set({ legalHold: true }).where(eq(documents.id, held.id));
+      const after: Array<() => Promise<void>> = [];
+      const n = await db.transaction((tx) => purgeDocuments(tx, selected, after));
+      for (const run of after) await run();
+      expect(n).toBe(1);
+      expect(await row(held.id)).toBeDefined();
+      expect(await row(dated.id)).toBeDefined();
+      expect(await row(free.id)).toBeUndefined();
     });
   });
 
