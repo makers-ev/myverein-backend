@@ -3,14 +3,14 @@ import { and, eq, inArray, lt } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { documents } from "../db/schema/documents.js";
 import { writeAudit } from "./audit.js";
-import type { DbExecutor } from "./club-members.js";
 import { roleTypesWithPermission } from "./club-permissions.js";
 import { purgeDocuments } from "./documents.js";
 import { logger } from "./logger.js";
 import { notifySafely } from "./notify/dispatcher.js";
 import { BOARD_CATEGORY } from "./notify/types.js";
 import { todayBerlin } from "./member-lifecycle.js";
-import { DOCUMENT_RETENTION_CLASSES, addYears } from "./retention/document-classes.js";
+import { DOCUMENT_RETENTION_CLASSES } from "./retention/document-classes.js";
+export { syncExitRetention } from "./document-retention-sync.js";
 import { retentionDryRun, retentionNoticeDays } from "./retention/sweep.js";
 
 /**
@@ -27,17 +27,6 @@ export interface DocumentRetentionResult {
   marked: number;
   deleted: number;
   dryRun: boolean;
-}
-
-/** Sets `retention_until` for the exit-based documents of a person once the exit is booked, clears it when the person returns. */
-export async function syncExitRetention(tx: DbExecutor, clubMemberId: string, leftAt: string | null): Promise<void> {
-  const exitClasses = DOCUMENT_RETENTION_CLASSES.filter((c) => c.startsOn === "exit");
-  for (const cls of exitClasses) {
-    await tx
-      .update(documents)
-      .set({ retentionUntil: leftAt ? addYears(leftAt, cls.years) : null })
-      .where(and(eq(documents.ownerClubMemberId, clubMemberId), eq(documents.scope, "person"), eq(documents.docType, cls.docType)));
-  }
 }
 
 export async function runDocumentRetention(now: Date = new Date(), options: { dryRun?: boolean; clubId?: string } = {}): Promise<DocumentRetentionResult> {

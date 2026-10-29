@@ -12,7 +12,7 @@ import { and, eq } from "drizzle-orm";
 import { clubMembers, clubMemberStatusHistory, LEFT_STATUSES, type ClubMemberRow, type MemberCategoryRow, type MemberStatus } from "../db/schema/club-members.js";
 import type { DbExecutor } from "./club-members.js";
 import { ConflictError, NotFoundError, ValidationError } from "./errors.js";
-import { syncExitRetention } from "./document-retention.js";
+import { syncExitRetention } from "./document-retention-sync.js";
 import { syncCardWithStatus } from "./member-cards.js";
 
 /**
