@@ -27,12 +27,18 @@ export const CARD_TOKEN_PREFIX = "mc1";
 /** Lifetime of a freshly signed token; the card itself may end earlier (`valid_until`, exit, revocation). */
 export const CARD_TOKEN_TTL_DAYS = 400;
 
+export const MIN_SECRET_LENGTH = 32;
+
 let warned = false;
 
 /** `MEMBER_CARD_SECRET`; falls back to `BETTER_AUTH_SECRET` (domain-separated HMAC), with a warning in production. */
 function secret(): string {
   const dedicated = process.env.MEMBER_CARD_SECRET;
-  if (dedicated) return dedicated;
+  if (dedicated) {
+    // A short key makes the 128-bit signature pointless: refuse it where it matters (startup calls `assertCardSecret`).
+    if (process.env.NODE_ENV === "production" && dedicated.length < MIN_SECRET_LENGTH) throw new Error(`MEMBER_CARD_SECRET must be at least ${MIN_SECRET_LENGTH} characters in production (openssl rand -hex 32)`);
+    return dedicated;
+  }
   const fallback = process.env.BETTER_AUTH_SECRET;
   if (!fallback) throw new Error("MEMBER_CARD_SECRET or BETTER_AUTH_SECRET must be set to sign membership cards");
   if (process.env.NODE_ENV === "production" && !warned) {

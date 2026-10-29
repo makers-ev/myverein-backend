@@ -209,6 +209,8 @@ export const documentAcknowledgements = pgTable(
     uniqueIndex("document_ack_version_member_uidx").on(table.versionId, table.clubMemberId),
     index("document_ack_club_status_idx").on(table.clubId, table.status),
     index("document_ack_member_idx").on(table.clubMemberId),
+    // `abgelaufen` is derived at read time and never stored.
+    check("document_ack_status_chk", sql`${table.status} IN ('offen', 'bestaetigt', 'abgelehnt')`),
     check("document_ack_given_by_chk", sql`${table.givenBy} IS NULL OR ${table.givenBy} IN ('self', 'guardian', 'board_paper')`),
     check("document_ack_paper_proof_chk", sql`${table.givenBy} IS DISTINCT FROM 'board_paper' OR (${table.proofDate} IS NOT NULL AND ${table.proofSource} IS NOT NULL)`),
   ],

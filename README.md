@@ -1290,7 +1290,7 @@ Shared fixture `src/routes/event-test-support.ts` (club with two departments, bo
 
 Known limits: (1) the self check-in by event code (B10, P2) is not built; (2) attendance rosters do not pre-list registered guests (add them by name); (3) a waitlisted guest is only told by mail, the organiser cannot message guests directly; (4) guest registration data is deleted by the retention category `event_guests`, which only deletes for real with `RETENTION_DRY_RUN=false` (unconfirmed sign-ups are swept hourly regardless); (5) the helper reminder reaches organisers, not a free "who is available" audience -- the suggestions endpoint serves that need; (6) the shared database makes global counts unreliable, all new tests scope to their own club.
 
-### Migrations 0014-0057 (Wave 7 to Wave 13)
+### Migrations 0014-0058 (Wave 7 to Wave 13)
 
 Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runtime` (Docker boot) or `npm run db:migrate`.
 
@@ -1340,6 +1340,7 @@ Committed in `src/db/migrations/`, applied in order by `npm run db:migrate:runti
 | `0055_documents-foundation` | Wave 13 B2, additive: tables `documents`, `document_versions`, `document_folders`, `document_permissions`, `document_acknowledgements`, `club_info_page_versions`, `member_cards`, `render_jobs`; new columns of `club_info_pages` and `club_settings` (branding, quota). **Backfill:** every existing info page becomes version 1 (test `src/db/migration-documents.test.ts`: count and content check before/after) |
 | `0056_acknowledgement-proof` | Wave 13 B11, additive: `document_acknowledgements.given_by` (`self` / `guardian` / `board_paper`), `proof_date`, `proof_source` (CHECK: a paper proof needs date and source, same structure as `consent_records`), `requires_reauth`, `reminded_at` |
 | `0057_document-legal-hold-reason` | Wave 13 review, additive: `documents.legal_hold_reason` (board note, max 200 characters) |
+| `0058_acknowledgement-status-check` | Wave 13 review, additive: CHECK on `document_acknowledgements.status` (`offen`, `bestaetigt`, `abgelehnt`; `abgelaufen` is derived and never stored) |
 
 #### Verifying the Wave 7 migrations (B12)
 
@@ -1370,6 +1371,7 @@ Wave 13 adds document handling: versioned club documents (`club_info`), the docu
 - Limits (`DEFAULT_PDF_LIMITS`): 20 s timeout (checked between blocks and table rows), 200 pages, 20 MiB; the result must start with `%PDF-`. Errors are `PdfRenderError` with a fixed code (`timeout`, `page_limit`, `size_limit`, `engine_error`) and never contain user data.
 - Spike (ADR-010): receipt 1 page about 10 ms, member list with 400 rows 10 pages about 100 ms / 12 MiB RSS, ID card with QR about 20 ms; dependency size about 14 MB.
 - Limits of the engine: no PDF/A, no tagged PDF, standard fonts only (see ADR-010, E2/E3).
+- **In-process, cooperative limits.** pdfkit runs inside the API/worker process (no sandbox, no separate render container). The time limit is checked between blocks and table rows, the page and size limits while writing; a single very large image decode cannot be interrupted (bounded by the 2 MiB logo and photo caps). Input is declarative text only (no template language, no file or network access). A render container behind `PdfEngine` is the planned hardening if the volume or the risk grows.
 
 ### Data model of documents (Wave 13 B2)
 
@@ -2328,7 +2330,7 @@ All variables live in `.env.example`. Wave 10 B1/B2 (privacy foundation, audit l
 | `MEMBER_CSV_RATE_LIMIT_PER_MINUTE` | no | Per-user rate limit shared by the member CSV template/import/export routes; default `10` |
 | `MEDIA_URL_TTL_SECONDS` | no | Validity of signed media URLs in seconds (default `1800`, clamped 30–86400; `src/lib/media-url.ts`) |
 | `MEDIA_URL_SECRET` | no | HMAC key for signed media URLs. Unset falls back to `BETTER_AUTH_SECRET`; set a separate value to rotate media links independently of sessions |
-| `MEMBER_CARD_SECRET` | no (recommended) | HMAC key for the QR token of the membership card (`src/lib/member-cards.ts`, Wave 13 B12). Unset falls back to `BETTER_AUTH_SECRET` (a warning is logged in production); set a dedicated value (`openssl rand -hex 32`). **Changing it invalidates every issued card token**, the apps fetch a fresh token on the next online look |
+| `MEMBER_CARD_SECRET` | no (recommended) | HMAC key for the QR token of the membership card (`src/lib/member-cards.ts`, Wave 13 B12). Unset falls back to `BETTER_AUTH_SECRET` (a warning is logged in production); set a dedicated value (`openssl rand -hex 32`). **In production a dedicated value must be at least 32 characters (startup fails otherwise)**. **Changing it invalidates every issued card token**, the apps fetch a fresh token on the next online look |
 | `MEMBER_DOCUMENT_MAX_BYTES` | no | Bytes one member may keep in the personal storage, all versions counted (default `209715200` = 200 MiB, minimum 1 000 000); beyond it `409 details.code member_document_bytes`. The document cap is 500 (`member_document_limit`). Both are checked inside the upload transaction under a per-member lock, so parallel uploads cannot overshoot |
 | `MEDIA_QUOTA_BYTES_PER_CLUB` | no | Platform default storage quota per club in bytes over live `media_files` (default `1073741824` = 1 GiB; a platform admin can set a club's own quota, `PATCH /admin/club-storage/:clubId`, stored in `club_settings.storage_quota_bytes`; Wave 13 adds no other variable yet); exceeding it is `422 QUOTA_EXCEEDED` with `details.code = club_quota` |
 | `WORKER_ENABLED` | no | Runs the job worker inside the API process (default on; only the exact value `false` disables it, then run `npm run start:worker` / `dist/worker.js` separately) |

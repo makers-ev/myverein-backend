@@ -98,6 +98,25 @@ describe("membership card", () => {
       expect(parseCardToken([...parts.slice(0, 4), flipped + parts[4]!.slice(1)].join("."))).toBeNull();
     });
 
+    it("refuses a too short MEMBER_CARD_SECRET in production, accepts a long one", () => {
+      const keep = { secret: process.env.MEMBER_CARD_SECRET, env: process.env.NODE_ENV };
+      const card = { id: "6f1c2f6e-3a9b-4c64-8d54-0a1f6a2b9c10", tokenVersion: 1, validUntil: null };
+      try {
+        process.env.NODE_ENV = "production";
+        process.env.MEMBER_CARD_SECRET = "too-short";
+        expect(() => signCardToken(card)).toThrow(/at least 32/);
+        process.env.MEMBER_CARD_SECRET = "x".repeat(32);
+        expect(() => signCardToken(card)).not.toThrow();
+        process.env.NODE_ENV = "test";
+        process.env.MEMBER_CARD_SECRET = "short-is-fine-outside-production";
+        expect(() => signCardToken(card)).not.toThrow();
+      } finally {
+        process.env.NODE_ENV = keep.env;
+        if (keep.secret === undefined) delete process.env.MEMBER_CARD_SECRET;
+        else process.env.MEMBER_CARD_SECRET = keep.secret;
+      }
+    });
+
     it("is signed with MEMBER_CARD_SECRET: another key rejects it, and the end date of the card limits the lifetime", () => {
       const card = { id: "6f1c2f6e-3a9b-4c64-8d54-0a1f6a2b9c10", tokenVersion: 1, validUntil: null };
       const { token } = signCardToken(card);

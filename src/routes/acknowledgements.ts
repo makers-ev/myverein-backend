@@ -14,6 +14,8 @@ import { isUuid } from "../lib/club-members.js";
 import { cleanText } from "../lib/text-policy.js";
 import { recipientsForClubMember } from "../lib/decision-notify.js";
 import { atLeast, buildPrincipal, canAccessDocument, documentLevel, folderLevel, globalLevel, loadFolderIndex, type DocumentPrincipal, type FolderIndex } from "../lib/document-access.js";
+import { endOfLocalDay } from "../lib/club-time.js";
+import { clubTimezone } from "../lib/event-notify.js";
 import { SITE_URL } from "../lib/emailTemplate.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { activeWardLinks } from "../lib/guardian-scope.js";
@@ -93,7 +95,8 @@ acknowledgementRoutes.post("/requests", requestLimiter, zValidator("json", reque
   if (!version) throw new ConflictError("The document has no file", { details: { code: "document_not_available" } });
   const personIds = await resolveAudience(p.clubId, body.audience);
   const wording = body.wording ?? defaultWording(doc.title);
-  const dueAt = body.dueAt ? new Date(`${body.dueAt}T23:59:59+01:00`) : null;
+  // The due day ends at 23:59:59 in the CLUB's time zone (summer or winter time alike).
+  const dueAt = body.dueAt ? endOfLocalDay(body.dueAt, await clubTimezone(p.clubId)) : null;
 
   const result = await db.transaction(async (tx) => {
     // One request per version at a time: the unique key (version, person) is the last line of defence against a double submit.

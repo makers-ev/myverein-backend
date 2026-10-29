@@ -207,6 +207,27 @@ describe("acknowledgements", () => {
     });
   });
 
+  describe("due date and constraints", () => {
+    it("ends the due day at 23:59:59 in the club time zone, summer and winter time", async () => {
+      const { endOfLocalDay } = await import("../lib/club-time.js");
+      expect(endOfLocalDay("2026-07-15", "Europe/Berlin").toISOString()).toBe("2026-07-15T21:59:59.000Z");
+      expect(endOfLocalDay("2026-12-15", "Europe/Berlin").toISOString()).toBe("2026-12-15T22:59:59.000Z");
+      expect(endOfLocalDay("2026-03-28", "Europe/Berlin").toISOString()).toBe("2026-03-28T22:59:59.000Z");
+      expect(endOfLocalDay("2026-03-29", "Europe/Berlin").toISOString()).toBe("2026-03-29T21:59:59.000Z");
+      expect(endOfLocalDay("2026-07-15", "America/New_York").toISOString()).toBe("2026-07-16T03:59:59.000Z");
+    });
+
+    it("stores a request with that deadline and never stores the derived status abgelaufen", async () => {
+      const day = new Date(Date.now() + 20 * 86_400_000).toISOString().slice(0, 10);
+      const target = minorCm; // still open: the request is renewed with the deadline
+      const res = await send(club.founder, "/acknowledgements/requests", "POST", { documentId: docId, audience: { clubMemberIds: [target] }, dueAt: day });
+      expect(res.status).toBe(201);
+      const { endOfLocalDay } = await import("../lib/club-time.js");
+      expect((await ackOf(target)).dueAt!.toISOString()).toBe(endOfLocalDay(day, "Europe/Berlin").toISOString());
+      await expect(db.update(documentAcknowledgements).set({ status: "abgelaufen" }).where(eq(documentAcknowledgements.id, (await ackOf(target)).id))).rejects.toThrow();
+    });
+  });
+
   describe("board side", () => {
     it("records a paper proof for a person without account (date and source required, no future date), strangers get 404", async () => {
       const ackId = (await ackOf(paperCm)).id;
