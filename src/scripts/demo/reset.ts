@@ -6,7 +6,7 @@ import { auditLog } from "../../db/schema/audit-log.js";
 import { consentRecords } from "../../db/schema/privacy.js";
 import { formSubmissions } from "../../db/schema/forms.js";
 import { mediaFiles } from "../../db/schema/media-files.js";
-import { deleteObject } from "../../lib/storage.js";
+import { purgeMediaFile } from "../../lib/media.js";
 import { jobs } from "../../db/schema/jobs.js";
 import { DEMO_MARKER, type DemoOptions } from "./context.js";
 
@@ -65,7 +65,7 @@ export async function resetDemoClub(opts: DemoOptions, club: FoundClub | null): 
     await db.delete(auditLog).where(eq(auditLog.clubId, club.id));
     await db.delete(organization).where(eq(organization.id, club.id));
     // The registry rows went with the club; remove the files themselves (a failure leaves an orphan the daily sweep removes).
-    for (const key of storedKeys) await deleteObject(key).catch(() => undefined);
+    for (const key of storedKeys) await purgeMediaFile(key);
   }
   if (userIds.length > 0) {
     // A demo account that also belongs to a club that is not ours stays (and is reported); the seed never touches other clubs.
