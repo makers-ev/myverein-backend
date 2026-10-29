@@ -116,6 +116,8 @@ export const documents = pgTable(
     trashedBy: text("trashed_by").references(() => user.id, { onDelete: "set null" }),
     retentionUntil: date("retention_until", { mode: "string" }),
     legalHold: boolean("legal_hold").notNull().default(false),
+    // Why the hold was set (board note, max 200 characters); cleared with the hold. Shown to managers only, never in the audit log.
+    legalHoldReason: text("legal_hold_reason"),
     createdBy: text("created_by").references(() => user.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

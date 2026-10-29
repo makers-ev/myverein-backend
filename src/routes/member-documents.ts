@@ -66,7 +66,7 @@ function shape(doc: DocumentRow, version: DocumentVersionRow | null, relation: P
     // The member side removes its own uploads and hides the rest; the board removes with a reason.
     canDelete: relation === "board" || ownUpload,
     canHide: relation !== "board" && !ownUpload,
-    ...(relation === "board" ? { retentionUntil: doc.retentionUntil, legalHold: doc.legalHold } : {}),
+    ...(relation === "board" ? { retentionUntil: doc.retentionUntil, legalHold: doc.legalHold, legalHoldReason: doc.legalHoldReason } : {}),
   };
 }
 
@@ -247,12 +247,12 @@ memberDocumentRoutes.put("/:memberId/:docId/legal-hold", zValidator("json", lega
   const { owner, relation } = await resolvePersonalSubject(c, p, c.req.param("memberId"));
   if (relation !== "board" || !hasClubPermission(c.get("clubRoleTypes"), "documents:manage")) throw new ForbiddenError("Missing documents:manage permission");
   const doc = await loadPersonalDocument(p.clubId, owner.id, c.req.param("docId"));
-  const { active } = c.req.valid("json");
+  const { active, reason } = c.req.valid("json");
   const [updated] = await db
     .update(documents)
-    .set({ legalHold: active, ...(active && doc.status === "zur_loeschung" ? { status: "aktiv" } : {}), updatedAt: new Date() })
+    .set({ legalHold: active, legalHoldReason: active ? (reason ?? null) : null, ...(active && doc.status === "zur_loeschung" ? { status: "aktiv" } : {}), updatedAt: new Date() })
     .where(eq(documents.id, doc.id))
     .returning();
   await writeAudit(db, { eventType: "document.legal_hold", subjectId: doc.id, actorUserId: p.userId, clubId: p.clubId, payload: { clubId: p.clubId, documentId: doc.id, active } });
-  return c.json({ data: { id: updated!.id, legalHold: updated!.legalHold, status: updated!.status } });
+  return c.json({ data: { id: updated!.id, legalHold: updated!.legalHold, legalHoldReason: updated!.legalHoldReason, status: updated!.status } });
 });

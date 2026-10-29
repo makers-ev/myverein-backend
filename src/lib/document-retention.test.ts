@@ -198,12 +198,18 @@ describe("document retention", () => {
       expect((await call(club.members.plain!, `/documents/${doc.id}/legal-hold`, { method: "PUT", body: { active: true }, clubId: id() })).status).toBe(404);
       expect((await call(other.founder, `/documents/${doc.id}/legal-hold`, { method: "PUT", body: { active: true }, clubId: other.clubId })).status).toBe(404);
       expect((await call(club.founder, `/documents/${doc.id}/legal-hold`, { method: "PUT", body: { active: "yes" }, clubId: id() })).status).toBe(422);
-      expect((await call(club.founder, `/documents/${doc.id}/legal-hold`, { method: "PUT", body: { active: true }, clubId: id() })).status).toBe(200);
+      const held = await call(club.founder, `/documents/${doc.id}/legal-hold`, { method: "PUT", body: { active: true, reason: "Streit mit Herrn Geheim" }, clubId: id() });
+      expect(held.status).toBe(200);
+      expect((await body(held)).data).toMatchObject({ legalHold: true, legalHoldReason: "Streit mit Herrn Geheim" });
+      expect((await body(await call(club.founder, `/documents/${doc.id}`, { clubId: id() }))).data).toMatchObject({ legalHold: true, legalHoldReason: "Streit mit Herrn Geheim" });
+      const audits = await db.select().from(auditLog).where(and(eq(auditLog.eventType, "document.legal_hold"), eq(auditLog.subjectId, doc.id)));
+      expect(JSON.stringify(audits)).not.toContain("Geheim");
       await call(club.founder, `/documents/${doc.id}`, { method: "DELETE", clubId: id() });
       const blocked = await call(club.founder, `/documents/${doc.id}/permanent`, { method: "DELETE", clubId: id() });
       expect(blocked.status).toBe(409);
       expect((await body(blocked)).error.details.code).toBe("retention");
-      expect((await call(club.founder, `/documents/${doc.id}/legal-hold`, { method: "PUT", body: { active: false }, clubId: id() })).status).toBe(200);
+      const lifted = await call(club.founder, `/documents/${doc.id}/legal-hold`, { method: "PUT", body: { active: false, reason: "ignoriert" }, clubId: id() });
+      expect((await body(lifted)).data).toMatchObject({ legalHold: false, legalHoldReason: null });
       expect((await call(club.founder, `/documents/${doc.id}/permanent`, { method: "DELETE", clubId: id() })).status).toBe(204);
     });
 

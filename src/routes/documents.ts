@@ -73,7 +73,7 @@ function shapeDocument(p: DocumentPrincipal, index: FolderIndex, doc: DocumentRo
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
     level,
-    ...(manager ? { retentionUntil: doc.retentionUntil, legalHold: doc.legalHold } : {}),
+    ...(manager ? { retentionUntil: doc.retentionUntil, legalHold: doc.legalHold, legalHoldReason: doc.legalHoldReason } : {}),
     currentVersion: version ? { versionNo: version.versionNo, mimeType: version.mimeType, sizeBytes: version.sizeBytes, originalFilename: version.originalFilename, createdAt: version.createdAt } : null,
   };
 }
@@ -374,14 +374,14 @@ documentRoutes.put("/:id/legal-hold", zValidator("json", legalHoldSchema, invali
   const p = await buildPrincipal(c);
   const index = await loadFolderIndex(p.clubId);
   const doc = await loadDocument(c, p, index, c.req.param("id"), "verwalten");
-  const { active } = c.req.valid("json");
+  const { active, reason } = c.req.valid("json");
   const [updated] = await db
     .update(documents)
-    .set({ legalHold: active, ...(active && doc.status === "zur_loeschung" ? { status: "aktiv" } : {}), updatedAt: new Date() })
+    .set({ legalHold: active, legalHoldReason: active ? (reason ?? null) : null, ...(active && doc.status === "zur_loeschung" ? { status: "aktiv" } : {}), updatedAt: new Date() })
     .where(eq(documents.id, doc.id))
     .returning();
   await writeAudit(db, { eventType: "document.legal_hold", subjectId: doc.id, actorUserId: p.userId, clubId: p.clubId, payload: { clubId: p.clubId, documentId: doc.id, active } });
-  return c.json({ data: { id: updated!.id, legalHold: updated!.legalHold, status: updated!.status } });
+  return c.json({ data: { id: updated!.id, legalHold: updated!.legalHold, legalHoldReason: updated!.legalHoldReason, status: updated!.status } });
 });
 
 documentRoutes.get("/:id", async (c) => {
