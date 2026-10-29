@@ -101,7 +101,13 @@ export async function requestRender(req: RenderRequest): Promise<RenderJobRow> {
         .from(renderJobs)
         .where(and(eq(renderJobs.clubId, req.clubId), eq(renderJobs.templateId, template.id), sql`${renderJobs.params}->>'idempotencyKey' = ${req.idempotencyKey}`))
         .limit(1);
-      if (existing) return existing;
+      if (existing) {
+        // The key only returns the job it was created for: same requester, same parameters. Anything else is a client mistake
+        // (or an attempt to read somebody else's job through a guessed key) and never hands out that job.
+        const same = existing.requestedBy === (req.actor?.userId ?? null) && stableStringify(stripInternal(existing.params)) === stableStringify(parsed.data) && (existing.params.replaceDocumentId ?? null) === (req.replaceDocumentId ?? null);
+        if (!same) throw new ConflictError("This idempotency key was used for a different request", { details: { code: "idempotency_key_mismatch" } });
+        return existing;
+      }
     }
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`render-active:${req.clubId}`}, 0))`);
     const [{ n }] = await tx.select({ n: count() }).from(renderJobs).where(and(eq(renderJobs.clubId, req.clubId), inArray(renderJobs.status, ["wartet", "rendert"])));

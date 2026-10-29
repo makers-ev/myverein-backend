@@ -333,6 +333,15 @@ describe("render pipeline", () => {
       expect(stored.filter((j) => (j.params as Json).idempotencyKey === key)).toHaveLength(1);
     });
 
+    it("never returns a job for a key used with other parameters or by somebody else (409)", async () => {
+      const key = `mismatch-${randomUUID()}`;
+      const first = await requestRender({ clubId: id(), templateId: "test-report", params: { heading: "A" }, actor: null, idempotencyKey: key, wait: false });
+      await expect(requestRender({ clubId: id(), templateId: "test-report", params: { heading: "B" }, actor: null, idempotencyKey: key, wait: false })).rejects.toMatchObject({ status: 409, details: { code: "idempotency_key_mismatch" } });
+      const res = await generate(club.founder, { templateId: "test-report", params: { heading: "A" }, idempotencyKey: key });
+      expect(res.status).toBe(409);
+      expect((await requestRender({ clubId: id(), templateId: "test-report", params: { heading: "A" }, actor: null, idempotencyKey: key, wait: false })).id).toBe(first.id);
+    });
+
     it("caps the jobs that wait or run at the same time per club with 429", async () => {
       await db.delete(renderJobs).where(and(eq(renderJobs.clubId, other.clubId)));
       const make = () => requestRender({ clubId: other.clubId, templateId: "test-flaky", params: {}, actor: null, wait: false });
