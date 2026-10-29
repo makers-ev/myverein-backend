@@ -6,7 +6,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 import { auth } from "./auth/auth.js";
 import { closeDatabase } from "./db/client.js";
-import { AppError, toAppError } from "./lib/errors.js";
+import { AppError, NotFoundError, toAppError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
 import { registerAllJobs, startJobWorker, workerEnabled } from "./lib/jobs/index.js";
 import { startMediaSweeper } from "./lib/media.js";
@@ -112,6 +112,9 @@ app.onError((err, c) => {
   }
   return c.json(appError.toJSON(), appError.status as ContentfulStatusCode);
 });
+
+// Unknown routes answer in the same JSON error shape as every other error.
+app.notFound((c) => c.json(new NotFoundError("Not found").toJSON(), 404));
 
 // Better Auth owns everything under /api/auth/* -- sign-up, sign-in,
 // session management, 2FA, organization, admin, and the OpenAPI reference

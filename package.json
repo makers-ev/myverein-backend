@@ -17,7 +17,8 @@
     "db:verify-counts": "tsx src/scripts/verify-counts.ts",
     "auth:generate": "better-auth generate --config src/auth/auth.ts --output src/auth/auth-schema.ts -y",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "docs:error-codes": "tsx src/scripts/error-codes.ts"
   },
   "dependencies": {
     "@better-auth/expo": "^1.6.25",
