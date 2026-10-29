@@ -59,7 +59,10 @@ function eventSpecs(ctx: DemoCtx): EventSpec[] {
   // The next Tuesday's training is cancelled, one in the past as well.
   const nextTue = nextWeekday(shiftDays(t, 1), 2);
   const cancelled = out.find((e) => e.date === nextTue);
-  if (cancelled) cancelled.cancelled = "Platz wegen Sturmschaden gesperrt.";
+  if (cancelled) {
+    cancelled.cancelled = "Platz wegen Sturmschaden gesperrt.";
+    cancelled.key = "training_cancelled";
+  }
   const pastTue = out.find((e) => e.date < t && isoWeekday(e.date) === 4);
   if (pastTue) pastTue.cancelled = "Trainer erkrankt, kein Ersatz.";
   for (let w = 0; w < 4; w++) {
@@ -77,6 +80,10 @@ function eventSpecs(ctx: DemoCtx): EventSpec[] {
     { key: "saisonstart", cal: "tennis", title: "Saisoneröffnung Tennis", date: sat(2), from: "11:00", to: "15:00", category: "Fest", capacity: 24, loc: "tennis" },
     { key: "weihnacht", cal: "verein", title: "Weihnachtsfeier", description: "Jahresabschluss mit Ehrungen.", date: shiftDays(t, 60), from: "18:00", to: "22:30", category: "Fest", capacity: 80, loc: "heim" },
     { key: "mv_event", cal: "verein", title: "Außerordentliche Mitgliederversammlung", description: "Einladung und Tagesordnung unter Sitzungen.", date: shiftDays(t, 35), from: "19:00", to: "21:30", category: "Versammlung", loc: "heim" },
+    // Within the next 14 days and without any answer yet / cancelled after an answer: what the "Heute" view of the demo logins shows.
+    { key: "stammtisch", cal: "verein", title: "Mitglieder-Stammtisch", description: "Offener Abend im Vereinsheim, alle sind willkommen.", date: shiftDays(t, 6), from: "19:00", to: "21:30", category: "Fest", loc: "heim" },
+    { key: "wanderung", cal: "verein", title: "Familienwanderung", description: "Rundweg um den Wiesbacher See, ca. 8 km.", date: shiftDays(t, 11), from: "10:00", to: "14:00", category: "Fest" },
+    { key: "kegeln", cal: "verein", title: "Kegelabend", description: "Gemeinsamer Abend auf der Kegelbahn.", date: shiftDays(t, 4), from: "19:00", to: "22:00", category: "Fest", cancelled: "Kegelbahn kurzfristig nicht verfügbar." },
     { key: "vorstand_event", cal: "vorstand", title: "Vorstandssitzung", date: shiftDays(t, 9), from: "19:30", to: "21:30", category: "Vorstandssitzung", loc: "heim" },
     { key: "vorstand_past", cal: "vorstand", title: "Vorstandssitzung", date: shiftDays(t, -20), from: "19:30", to: "21:30", category: "Vorstandssitzung", loc: "heim" },
   );
@@ -122,6 +129,10 @@ export async function seedEvents(ctx: DemoCtx): Promise<void> {
   // Regular training: a few answers on the next session.
   for (const w of ["trainer", "abtleit"]) await rsvp("training_next", w, "angemeldet", 1);
   await rsvp("training_next", "mitglied", "abgesagt", 1);
+  // Answered before the event was cancelled.
+  await rsvp("kegeln", "mitglied", "angemeldet", 4);
+  await rsvp("kegeln", "vorsitz", "angemeldet", 4);
+  await rsvp("training_cancelled", "trainer", "angemeldet", 3);
   // Kids' trial class (capacity 4): Emma helps, Petra and Lukas answer for their children (accounts-less wards), the fourth child waits.
   await rsvp("schnupper", "jugend", "angemeldet", 3);
   const ward = async (who: string, status: "angemeldet" | "abgesagt" | "warteliste", guardian: string) => {

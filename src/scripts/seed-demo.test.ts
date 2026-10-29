@@ -121,6 +121,30 @@ describe("seed:demo", () => {
     expect(first.deliveries).toBeGreaterThan(0);
     expect(first.notification_preferences).toBeGreaterThan(0);
     expect(first.audit_entries).toBeGreaterThan(0);
+    // documents and PDF (Wave 13)
+    expect(first.branding_logo).toBe(1);
+    expect(first.document_folders).toBeGreaterThanOrEqual(4);
+    expect(first.document_permissions).toBeGreaterThan(0);
+    expect(first.documents_archive).toBeGreaterThanOrEqual(5);
+    expect(first.documents_personal).toBeGreaterThanOrEqual(2);
+    expect(first.documents_generated).toBeGreaterThanOrEqual(4);
+    expect(first.render_jobs_done).toBeGreaterThanOrEqual(4);
+    expect(first.documents_with_retention).toBeGreaterThanOrEqual(1);
+    expect(first.documents_trashed).toBeGreaterThanOrEqual(1);
+    expect(first.documents_legal_hold).toBeGreaterThanOrEqual(1);
+    expect(first.document_versions).toBeGreaterThan(first.documents_archive! + first.documents_personal! - 1);
+    expect(first.info_page_versions).toBeGreaterThan(first.info_pages!);
+    expect(first.media_files).toBeGreaterThanOrEqual(first.document_versions!);
+    expect(first.acknowledgements_confirmed).toBeGreaterThanOrEqual(3);
+    expect(first.acknowledgements_guardian).toBeGreaterThanOrEqual(1);
+    expect(first.acknowledgements_paper).toBeGreaterThanOrEqual(1);
+    expect(first.acknowledgements_expired).toBeGreaterThanOrEqual(1);
+    expect(first.member_cards).toBeGreaterThanOrEqual(5);
+    expect(first.member_cards_revoked).toBeGreaterThanOrEqual(1);
+    expect(first.member_cards_reissued).toBeGreaterThanOrEqual(1);
+    expect(first.card_checks).toBeGreaterThanOrEqual(3);
+    // "Heute" needs events in the next 14 days (open and cancelled) and an own overdue loan
+    expect(first.events_cancelled).toBeGreaterThanOrEqual(3);
   }, 120_000);
 
   it("creates the demo accounts with the shared password and the intended roles", async () => {

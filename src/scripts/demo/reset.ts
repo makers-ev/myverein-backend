@@ -5,6 +5,8 @@ import { db } from "../../db/client.js";
 import { auditLog } from "../../db/schema/audit-log.js";
 import { consentRecords } from "../../db/schema/privacy.js";
 import { formSubmissions } from "../../db/schema/forms.js";
+import { mediaFiles } from "../../db/schema/media-files.js";
+import { deleteObject } from "../../lib/storage.js";
 import { jobs } from "../../db/schema/jobs.js";
 import { DEMO_MARKER, type DemoOptions } from "./context.js";
 
@@ -45,7 +47,9 @@ export async function resetDemoClub(opts: DemoOptions, club: FoundClub | null): 
     throw new Error(`The club "${club.name}" (slug ${opts.slug}) was not created by seed:demo (no ${DEMO_MARKER} marker). Refusing to delete it.`);
   }
   const userIds = await demoUserIds(opts);
+  let storedKeys: string[];
   if (club) {
+    storedKeys = (await db.select({ key: mediaFiles.storageKey }).from(mediaFiles).where(eq(mediaFiles.clubId, club.id))).map((r) => r.key);
     await db.delete(consentRecords).where(eq(consentRecords.clubId, club.id));
     await db.delete(formSubmissions).where(eq(formSubmissions.clubId, club.id));
     // Queued jobs of this club: they carry ids of its ballots, announcements and deliveries (never personal data).
@@ -60,6 +64,8 @@ export async function resetDemoClub(opts: DemoOptions, club: FoundClub | null): 
     );
     await db.delete(auditLog).where(eq(auditLog.clubId, club.id));
     await db.delete(organization).where(eq(organization.id, club.id));
+    // The registry rows went with the club; remove the files themselves (a failure leaves an orphan the daily sweep removes).
+    for (const key of storedKeys) await deleteObject(key).catch(() => undefined);
   }
   if (userIds.length > 0) {
     // A demo account that also belongs to a club that is not ours stays (and is reported); the seed never touches other clubs.

@@ -129,6 +129,8 @@ export async function seedInventory(ctx: DemoCtx): Promise<void> {
     { itemId: ids.beamer!, memberId: accountOf(ctx, "schrift").memberId, borrowedAt: at(-3), dueAt: at(4), status: "ausgeliehen" },
     { itemId: ids.zelt!, memberId: accountOf(ctx, "abtleit").memberId, borrowedAt: at(-30), dueAt: at(-5), status: "ausgeliehen" },
     { itemId: ids.mikro!, memberId: accountOf(ctx, "mitglied").memberId, borrowedAt: at(-10), dueAt: at(1), status: "ausgeliehen" },
+    // Lukas has a second loan that is overdue: "Heute" shows one due soon and one overdue.
+    { itemId: ids.baelle!, memberId: accountOf(ctx, "mitglied").memberId, borrowedAt: at(-12), dueAt: at(-2), status: "ausgeliehen" },
     { itemId: ids.ballmaschine!, memberId: accountOf(ctx, "trainer2").memberId, borrowedAt: at(-60), dueAt: at(-50), returnedAt: at(-51), status: "zurueckgegeben" },
     { itemId: ids.baelle!, memberId: accountOf(ctx, "trainer").memberId, borrowedAt: at(-14), dueAt: at(-8), returnedAt: at(-7), status: "zurueckgegeben" },
     { itemId: ids.pokale!, memberId: accountOf(ctx, "stellv").memberId, borrowedAt: at(-120), dueAt: at(-100), returnedAt: at(-99), status: "zurueckgegeben" },
@@ -139,5 +141,5 @@ export async function seedInventory(ctx: DemoCtx): Promise<void> {
     { itemId: ids.trikots!, reportedBy: accountOf(ctx, "abtleit").memberId, description: "Zwei Trikots sind eingerissen.", status: "gemeldet", createdAt: at(-20) },
     { itemId: ids.beamer!, reportedBy: accountOf(ctx, "schrift").memberId, description: "HDMI-Kabel hatte einen Wackelkontakt, wurde ersetzt.", status: "behoben", createdAt: at(-90), resolvedAt: at(-80) },
   ]);
-  ctx.log(`${ITEMS.length} Inventargegenstände, 6 Ausleihen (offen/fällig/überfällig/zurückgegeben), 4 Schadensmeldungen`);
+  ctx.log(`${ITEMS.length} Inventargegenstände, 7 Ausleihen (offen/fällig/überfällig/zurückgegeben), 4 Schadensmeldungen`);
 }

@@ -19,7 +19,9 @@ import {
   type DemoCtx,
   type DemoOptions,
 } from "./demo/context.js";
+import { seedAcknowledgements, seedMemberCards } from "./demo/acknowledgements.js";
 import { seedAssembly } from "./demo/assembly.js";
+import { seedArchive, seedBranding, seedGeneratedAndPersonal } from "./demo/documents.js";
 import { demoCounts } from "./demo/counts.js";
 import { seedAnnouncements, seedNotificationPreferences } from "./demo/communication.js";
 import { seedRequests } from "./demo/forms.js";
@@ -46,7 +48,8 @@ import { seedRoles } from "./demo/roles.js";
  *   minutes, invitations, consents, announcements), so hashes, snapshots, audit entries and invariants hold.
  * - Environment: DEMO_PASSWORD (shared password of all demo logins, default below), DEMO_CLUB_SLUG, DEMO_CLUB_NAME,
  *   DEMO_EMAIL_DOMAIN.
- * - Skipped on purpose: file uploads (profile photos, location photos, documents, proofs). They need real files in the media layer.
+ * - Files: documents, the club logo and the personal storage are real uploads through the media layer (PDFs made by the render engine,
+ *   a generated PNG logo). Skipped on purpose: profile photos, location photos and form proofs.
  */
 
 export interface SeedResult {
@@ -85,6 +88,11 @@ const STEPS: Step[] = [
   { name: "Anträge, Austritte und Einladungen", run: seedRequests },
   { name: "Benachrichtigungseinstellungen", run: seedNotificationPreferences },
   { name: "Mitteilungen", run: seedAnnouncements },
+  { name: "Branding und Speicher", run: seedBranding },
+  { name: "Dokumentenarchiv", run: seedArchive },
+  { name: "Persönliche Ablage und erzeugte PDFs", run: seedGeneratedAndPersonal },
+  { name: "Bestätigungen", run: seedAcknowledgements },
+  { name: "Mitgliedsausweise", run: seedMemberCards },
   { name: "Versand abschließen", run: async (ctx) => void (await neutralizeOutbound(ctx)) },
 ];
 
