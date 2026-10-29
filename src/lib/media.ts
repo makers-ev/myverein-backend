@@ -574,6 +574,9 @@ export async function streamSensitiveMedia(c: Context, row: MediaFileRow, access
   await writeAudit(db, {
     eventType: "media.sensitive_access",
     subjectId: access.subjectId ?? row.id,
+    // Explicit, not taken from the request context: who looked at which club's file is the whole point of this entry.
+    actorUserId: access.accessedBy,
+    clubId: row.clubId,
     payload: { mediaId: row.id, ownerType: row.ownerType, ownerId: row.ownerId, accessedBy: access.accessedBy, ...(access.reason ? { reason: access.reason } : {}) },
   });
   const body = await streamOrNotFound(row);

@@ -1,8 +1,9 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { closeDatabase, db } from "../db/client.js";
+import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import { documents } from "../db/schema/documents.js";
@@ -64,6 +65,18 @@ describe("personal storage limits", () => {
     expect(results.filter((r) => r.status === 201)).toHaveLength(2);
     expect((await body(results.find((r) => r.status === 409)!)).error.details.code).toBe("member_document_limit");
     expect((await db.select().from(documents).where(eq(documents.ownerClubMemberId, other!.id))).length).toBe(500);
+  });
+
+  it("writes the actor and the club explicitly into the audit entries of sensitive reads and board access", async () => {
+    const list = await body(await call(club.members.plain!, "/member-documents/me", { clubId: id() }));
+    const docId = list.data[0].id as string;
+    expect((await call(club.members.plain!, `/member-documents/me/${docId}/download`, { clubId: id() })).status).toBe(200);
+    const read = await db.select().from(auditLog).where(and(eq(auditLog.eventType, "media.sensitive_access"), eq(auditLog.subjectId, docId)));
+    expect(read[0]).toMatchObject({ actorUserId: club.members.plain!.userId, clubId: id() });
+    await call(club.founder, `/member-documents/${cm}`, { clubId: id() });
+    const board = await db.select().from(auditLog).where(and(eq(auditLog.eventType, "member_document.board_access"), eq(auditLog.subjectId, cm)));
+    expect(board.length).toBeGreaterThan(0);
+    expect(board.every((b) => b.actorUserId === club.founder.userId && b.clubId === id())).toBe(true);
   });
 
   it("keeps a reserve of the club quota for the board: members stop at 95 percent, the board can still write", async () => {

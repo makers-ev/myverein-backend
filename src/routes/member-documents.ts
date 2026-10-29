@@ -81,9 +81,9 @@ async function loadPersonalDocument(clubId: string, ownerId: string, rawId: stri
   return doc;
 }
 
-async function logBoardAccess(clubId: string, ownerId: string, relation: PersonalRelation, action: "list" | "download" | "upload" | "delete", documentId?: string): Promise<void> {
+async function logBoardAccess(actorUserId: string, clubId: string, ownerId: string, relation: PersonalRelation, action: "list" | "download" | "upload" | "delete", documentId?: string): Promise<void> {
   if (relation !== "board") return;
-  await writeAudit(db, { eventType: "member_document.board_access", subjectId: ownerId, payload: { clubId, clubMemberId: ownerId, documentId, action } });
+  await writeAudit(db, { eventType: "member_document.board_access", subjectId: ownerId, actorUserId, clubId, payload: { clubId, clubMemberId: ownerId, documentId, action } });
 }
 
 const listQuery = z.object({ includeHidden: z.enum(["0", "1"]).default("0") });
@@ -100,7 +100,7 @@ memberDocumentRoutes.get("/:memberId", zValidator("query", listQuery, invalid), 
     .where(and(eq(documents.clubId, p.clubId), eq(documents.scope, "person"), eq(documents.ownerClubMemberId, owner.id), eq(documents.status, "aktiv")))
     .orderBy(desc(documents.createdAt), desc(documents.id))
     .limit(MAX_DOCUMENTS_PER_MEMBER);
-  await logBoardAccess(p.clubId, owner.id, relation, "list");
+  await logBoardAccess(p.userId, p.clubId, owner.id, relation, "list");
   return c.json({
     data: rows.filter((r) => includeHidden || !r.d.hiddenByOwner).map((r) => shape(r.d, r.v, relation)),
     relation,
@@ -158,8 +158,8 @@ memberDocumentRoutes.post("/:memberId", uploadLimiter, uploadBody, async (c) => 
     note: textField(body["note"], 500, "note"),
     selfService: relation !== "board",
   });
-  await writeAudit(db, { eventType: "member_document.upload", subjectId: owner.id, payload: { clubId: p.clubId, clubMemberId: owner.id, documentId: document.id, sizeBytes: version.sizeBytes, via: relation } });
-  await logBoardAccess(p.clubId, owner.id, relation, "upload", document.id);
+  await writeAudit(db, { eventType: "member_document.upload", subjectId: owner.id, actorUserId: p.userId, clubId: p.clubId, payload: { clubId: p.clubId, clubMemberId: owner.id, documentId: document.id, sizeBytes: version.sizeBytes, via: relation } });
+  await logBoardAccess(p.userId, p.clubId, owner.id, relation, "upload", document.id);
   return c.json({ data: shape(document, version, relation) }, 201);
 });
 
@@ -173,7 +173,7 @@ memberDocumentRoutes.get("/:memberId/:docId/download", async (c) => {
   const [version] = await db.select().from(documentVersions).where(eq(documentVersions.id, doc.currentVersionId)).limit(1);
   const media = version ? await mediaOfVersion(version) : null;
   if (!media) throw new NotFoundError("File not found");
-  await logBoardAccess(p.clubId, owner.id, relation, "download", doc.id);
+  await logBoardAccess(p.userId, p.clubId, owner.id, relation, "download", doc.id);
   return streamSensitiveMedia(c, media, { accessedBy: p.userId, subjectId: doc.id });
 });
 
@@ -187,7 +187,7 @@ memberDocumentRoutes.post("/:memberId/:docId/versions", uploadLimiter, uploadBod
   const file = body["file"];
   if (!(file instanceof File)) throw new ValidationError("Missing file upload (field name: file)");
   const { document, version } = await addUploadedVersion(doc, file, p.userId, textField(body["note"], 500, "note"), { selfService: relation !== "board" });
-  await logBoardAccess(p.clubId, owner.id, relation, "upload", doc.id);
+  await logBoardAccess(p.userId, p.clubId, owner.id, relation, "upload", doc.id);
   return c.json({ data: shape(document, version, relation) }, 201);
 });
 
@@ -219,8 +219,8 @@ memberDocumentRoutes.delete("/:memberId/:docId", async (c) => {
     throw new ConflictError("Receipts and generated documents cannot be deleted, only hidden", { code: "CONFLICT", details: { code: "not_deletable" } });
   }
   await removeForGood(doc);
-  await writeAudit(db, { eventType: "member_document.delete", subjectId: owner.id, payload: { clubId: p.clubId, clubMemberId: owner.id, documentId: doc.id, reason, via: relation } });
-  await logBoardAccess(p.clubId, owner.id, relation, "delete", doc.id);
+  await writeAudit(db, { eventType: "member_document.delete", subjectId: owner.id, actorUserId: p.userId, clubId: p.clubId, payload: { clubId: p.clubId, clubMemberId: owner.id, documentId: doc.id, reason, via: relation } });
+  await logBoardAccess(p.userId, p.clubId, owner.id, relation, "delete", doc.id);
   return c.body(null, 204);
 });
 
@@ -230,7 +230,7 @@ async function setHidden(c: Parameters<typeof buildPrincipal>[0], hidden: boolea
   if (relation === "board") throw new NotFoundError("Member not found");
   const doc = await loadPersonalDocument(p.clubId, owner.id, c.req.param("docId") ?? "");
   const [updated] = await db.update(documents).set({ hiddenByOwner: hidden, updatedAt: new Date() }).where(eq(documents.id, doc.id)).returning();
-  await writeAudit(db, { eventType: "member_document.hide", subjectId: owner.id, payload: { clubId: p.clubId, clubMemberId: owner.id, documentId: doc.id, hidden, via: relation } });
+  await writeAudit(db, { eventType: "member_document.hide", subjectId: owner.id, actorUserId: p.userId, clubId: p.clubId, payload: { clubId: p.clubId, clubMemberId: owner.id, documentId: doc.id, hidden, via: relation } });
   const [version] = updated!.currentVersionId ? await db.select().from(documentVersions).where(eq(documentVersions.id, updated!.currentVersionId)).limit(1) : [];
   return c.json({ data: shape(updated!, version ?? null, relation) });
 }
