@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, or } from "drizzle-orm";
 import { createMiddleware } from "hono/factory";
 
 import { db } from "../db/client.js";
@@ -9,6 +9,7 @@ import { events, type EventRow } from "../db/schema/events.js";
 import { isCalendarVisible } from "./calendar-visibility.js";
 import { hasClubPermission, type ClubPermission } from "./club-permissions.js";
 import { ForbiddenError, NotFoundError } from "./errors.js";
+import { todayBerlin } from "./member-lifecycle.js";
 import { isUuid } from "./club-members.js";
 import type { ClubEnv } from "../middleware/club-guard.js";
 
@@ -41,7 +42,7 @@ export const DEPARTMENT_SCOPED_ROLES = ["trainer", "abteilungsleitung"] as const
 export async function ownDepartmentIds(accountMemberId: string, roleTypes: readonly string[]): Promise<string[]> {
   const scoped = DEPARTMENT_SCOPED_ROLES.filter((r) => roleTypes.includes(r));
   if (scoped.length === 0) return [];
-  const rows = await db.select({ departmentId: clubRoles.departmentId }).from(clubRoles).where(and(eq(clubRoles.memberId, accountMemberId), inArray(clubRoles.roleType, scoped)));
+  const rows = await db.select({ departmentId: clubRoles.departmentId }).from(clubRoles).where(and(eq(clubRoles.memberId, accountMemberId), inArray(clubRoles.roleType, scoped), or(isNull(clubRoles.termEndsAt), gte(clubRoles.termEndsAt, todayBerlin()))));
   return [...new Set(rows.map((r) => r.departmentId).filter((v): v is string => v !== null))];
 }
 

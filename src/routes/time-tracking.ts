@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 
@@ -15,10 +15,11 @@ import { isUuid } from "../lib/club-members.js";
 import { CLUB_ROLE_TYPES, hasClubPermission } from "../lib/club-permissions.js";
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { needsPermission, ownClubMemberRow } from "../lib/event-access.js";
-import { isCalendarVisible } from "../lib/calendar-visibility.js";
+import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibility.js";
 import { buildCsv } from "../lib/member-csv.js";
+import { buildXlsx, type XlsxCell } from "../lib/xlsx.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
-import { assertEntryWindow, assertNoOverlap, buildReport, inScope, minutesOf, requireTracking, timeScopeOf, TIME_STATUSES } from "../lib/time-tracking.js";
+import { assertEntryWindow, berlinDayStart, mayTrackTime, assertNoOverlap, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -33,10 +34,30 @@ const hook = (result: { success: boolean; error?: { issues: unknown } }) => {
   if (!result.success) throw new ValidationError("Invalid request body", { details: result.error?.issues });
 };
 
+type OwnRow = Awaited<ReturnType<typeof ownClubMemberRow>>;
+const ownCache = new WeakMap<object, Promise<OwnRow>>();
+/** The caller's club member row, looked up once per request. */
+function ownOrNull(c: Context<ClubEnv>): Promise<OwnRow> {
+  let p = ownCache.get(c);
+  if (!p) {
+    p = ownClubMemberRow(c.get("clubId"), c.get("membership").id);
+    ownCache.set(c, p);
+  }
+  return p;
+}
+
 async function ownMember(c: Context<ClubEnv>) {
-  const own = await ownClubMemberRow(c.get("clubId"), c.get("membership").id);
+  const own = await ownOrNull(c);
   if (!own) throw new ForbiddenError("Only club members can track time");
   return own;
+}
+
+/** Trainers/leads/`time:write` as before; everybody else needs an applicable hourly rate (403 `no_rate`). */
+async function requireTrackingOf(c: Context<ClubEnv>): Promise<void> {
+  const roles = c.get("clubRoleTypes");
+  if (mayTrackTime(roles)) return;
+  const own = await ownOrNull(c);
+  await requireTracking(c.get("clubId"), own?.id ?? null, roles);
 }
 
 function shapeEntry(row: TimeEntryRow, extra: { displayName?: string | null; eventTitle?: string | null } = {}) {
@@ -74,7 +95,7 @@ const listQuery = z.object({
 /** Own entries, or - `scope=team` / `clubMemberId` - those of the members the caller may confirm (`time:write`). */
 timeEntryRoutes.get("/", zValidator("query", listQuery, hook), async (c) => {
   const roles = c.get("clubRoleTypes");
-  requireTracking(roles);
+  await requireTrackingOf(c);
   const clubId = c.get("clubId");
   const q = c.req.valid("query");
   const to = q.to ?? todayBerlin();
@@ -99,7 +120,7 @@ timeEntryRoutes.get("/", zValidator("query", listQuery, hook), async (c) => {
     .from(timeEntries)
     .innerJoin(clubMembers, eq(clubMembers.id, timeEntries.clubMemberId))
     .leftJoin(events, eq(events.id, timeEntries.eventId))
-    .where(and(eq(timeEntries.clubId, clubId), gte(timeEntries.startedAt, new Date(`${from}T00:00:00Z`)), lte(timeEntries.startedAt, new Date(`${to}T23:59:59Z`)), q.status ? eq(timeEntries.status, q.status) : undefined, memberFilter))
+    .where(and(eq(timeEntries.clubId, clubId), gte(timeEntries.startedAt, berlinDayStart(from)), lt(timeEntries.startedAt, berlinDayStart(addDays(to, 1))), q.status ? eq(timeEntries.status, q.status) : undefined, memberFilter))
     .orderBy(desc(timeEntries.startedAt))
     .limit(500);
   return c.json({ data: rows.map((r) => shapeEntry(r.entry, { displayName: r.name, eventTitle: r.eventTitle })) });
@@ -107,7 +128,7 @@ timeEntryRoutes.get("/", zValidator("query", listQuery, hook), async (c) => {
 
 /** The running entry of the caller, if any (for the stamp button). */
 timeEntryRoutes.get("/current", async (c) => {
-  requireTracking(c.get("clubRoleTypes"));
+  // No rate check: a running entry must stay visible (and stoppable) even after the rate lapsed.
   const own = await ownMember(c);
   const [row] = await db.select({ entry: timeEntries, eventTitle: events.title }).from(timeEntries).leftJoin(events, eq(events.id, timeEntries.eventId)).where(and(eq(timeEntries.clubMemberId, own.id), isNull(timeEntries.endedAt)));
   return c.json({ data: row ? shapeEntry(row.entry, { eventTitle: row.eventTitle }) : null });
@@ -137,14 +158,17 @@ timeEntryRoutes.post("/clock-in", needsTracking(), zValidator("json", clockInSch
   return c.json({ data: shapeEntry(row) }, 201);
 });
 
-timeEntryRoutes.post("/clock-out", needsTracking(), async (c) => {
+timeEntryRoutes.post("/clock-out", async (c) => {
+  // No rate check: a running entry must be stoppable even after the rate lapsed.
   const own = await ownMember(c);
   const clubId = c.get("clubId");
   const row = await db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`time:${own.id}`}, 0))`);
     const [running] = await tx.select().from(timeEntries).where(and(eq(timeEntries.clubMemberId, own.id), isNull(timeEntries.endedAt))).for("update");
     if (!running) throw new ConflictError("No time entry is running", { details: { code: "none_running" } });
-    const [done] = await tx.update(timeEntries).set({ endedAt: new Date() }).where(eq(timeEntries.id, running.id)).returning();
+    const endedAt = new Date();
+    assertEntryWindow(running.startedAt, endedAt);
+    const [done] = await tx.update(timeEntries).set({ endedAt }).where(eq(timeEntries.id, running.id)).returning();
     await writeAudit(tx, { eventType: "time_entry.clock_out", subjectId: own.id, payload: { clubId, entryId: running.id, clubMemberId: own.id } });
     return done!;
   });
@@ -194,7 +218,7 @@ async function proposals(c: Context<ClubEnv>, ownId: string, from: Date, to: Dat
     .select({ id: events.id, title: events.title, startsAt: events.startsAt, endsAt: events.endsAt })
     .from(events)
     .innerJoin(calendars, eq(calendars.id, events.calendarId))
-    .where(and(eq(calendars.clubId, clubId), inArray(events.id, free), isNull(events.cancelledAt), gte(events.startsAt, from), lte(events.startsAt, to), lte(events.startsAt, new Date())))
+    .where(and(eq(calendars.clubId, clubId), inArray(events.id, free), isNull(events.cancelledAt), gte(events.startsAt, from), lt(events.startsAt, to), lte(events.startsAt, new Date())))
     .orderBy(desc(events.startsAt))
     .limit(100);
   return rows.map((e) => ({ eventId: e.id, title: e.title, startsAt: e.startsAt, endsAt: e.endsAt ?? new Date(e.startsAt.getTime() + 3_600_000), supervisor: supervised.some((s) => s.eventId === e.id) }));
@@ -205,7 +229,7 @@ timeEntryRoutes.get("/suggestions", needsTracking(), zValidator("query", z.objec
   const q = c.req.valid("query");
   const to = q.to ?? todayBerlin();
   const from = q.from ?? addDays(to, -30);
-  return c.json({ data: await proposals(c, own.id, new Date(`${from}T00:00:00Z`), new Date(`${to}T23:59:59Z`)) });
+  return c.json({ data: await proposals(c, own.id, berlinDayStart(from), berlinDayStart(addDays(to, 1))) });
 });
 
 /** The person takes over a proposal (explicit action; the times are those of the event). */
@@ -213,7 +237,7 @@ timeEntryRoutes.post("/from-event", needsTracking(), zValidator("json", z.object
   const own = await ownMember(c);
   const { eventId } = c.req.valid("json");
   const clubId = c.get("clubId");
-  const list = await proposals(c, own.id, new Date(0), new Date());
+  const list = await proposals(c, own.id, new Date(0), new Date(Date.now() + 1000));
   const proposal = list.find((p) => p.eventId === eventId);
   if (!proposal) {
     const [existing] = await db.select({ id: timeEntries.id }).from(timeEntries).where(and(eq(timeEntries.clubMemberId, own.id), eq(timeEntries.eventId, eventId)));
@@ -260,7 +284,7 @@ timeEntryRoutes.patch("/:id", needsTracking(), zValidator("json", manualSchema.p
   return c.json({ data: shapeEntry(row) });
 });
 
-timeEntryRoutes.delete("/:id", needsTracking(), async (c) => {
+timeEntryRoutes.delete("/:id", async (c) => {
   const clubId = c.get("clubId");
   await db.transaction(async (tx) => {
     const entry = await ownOpenEntry(c, tx, true);
@@ -297,7 +321,7 @@ timeEntryRoutes.post("/:id/reject", needsPermission("time:write"), decide("abgel
 
 function needsTracking() {
   return async (c: Context<ClubEnv>, next: () => Promise<void>) => {
-    requireTracking(c.get("clubRoleTypes"));
+    await requireTrackingOf(c);
     await next();
   };
 }
@@ -330,6 +354,14 @@ rateCardRoutes.get("/", async (c) => {
   return c.json({ data: rows.map((r) => shapeCard(r.card, r.name)) });
 });
 
+/** One card per target (person or role type) at a time: a new or changed validity must not overlap another card of the same target. */
+async function assertNoRateOverlap(tx: Pick<typeof db, "select">, clubId: string, target: { clubMemberId: string | null; roleType: string | null }, validFrom: string, validUntil: string | null, exceptId?: string): Promise<void> {
+  const same = target.clubMemberId ? eq(rateCards.clubMemberId, target.clubMemberId) : eq(rateCards.roleType, target.roleType ?? "");
+  const rows = await tx.select({ id: rateCards.id }).from(rateCards).where(and(eq(rateCards.clubId, clubId), same, validUntil ? lte(rateCards.validFrom, validUntil) : undefined, or(isNull(rateCards.validUntil), gte(rateCards.validUntil, validFrom))));
+  const clash = rows.find((r) => r.id !== exceptId);
+  if (clash) throw new ConflictError("Another rate card of the same target overlaps this period", { details: { code: "rate_overlap", cardId: clash.id } });
+}
+
 rateCardRoutes.post("/", zValidator("json", cardSchema, hook), async (c) => {
   const clubId = c.get("clubId");
   const body = c.req.valid("json");
@@ -337,9 +369,14 @@ rateCardRoutes.post("/", zValidator("json", cardSchema, hook), async (c) => {
     const [m] = await db.select({ id: clubMembers.id }).from(clubMembers).where(and(eq(clubMembers.id, body.clubMemberId), eq(clubMembers.clubId, clubId)));
     if (!m) throw new NotFoundError("Member not found");
   }
-  const [row] = await db.insert(rateCards).values({ clubId, clubMemberId: body.clubMemberId ?? null, roleType: body.roleType ?? null, hourlyRateCents: body.hourlyRateCents, validFrom: body.validFrom, validUntil: body.validUntil ?? null, createdBy: c.get("membership").id }).returning();
-  await writeAudit(db, { eventType: "rate_card.create", subjectId: body.clubMemberId ?? null, payload: { clubId, cardId: row!.id } });
-  return c.json({ data: shapeCard(row!) }, 201);
+  const row = await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`rates:${clubId}`}, 0))`);
+    await assertNoRateOverlap(tx, clubId, { clubMemberId: body.clubMemberId ?? null, roleType: body.roleType ?? null }, body.validFrom, body.validUntil ?? null);
+    const [created] = await tx.insert(rateCards).values({ clubId, clubMemberId: body.clubMemberId ?? null, roleType: body.roleType ?? null, hourlyRateCents: body.hourlyRateCents, validFrom: body.validFrom, validUntil: body.validUntil ?? null, createdBy: c.get("membership").id }).returning();
+    await writeAudit(tx, { eventType: "rate_card.create", subjectId: body.clubMemberId ?? null, payload: { clubId, cardId: created!.id } });
+    return created!;
+  });
+  return c.json({ data: shapeCard(row) }, 201);
 });
 
 async function loadCard(c: Context<ClubEnv>) {
@@ -356,9 +393,15 @@ rateCardRoutes.patch("/:id", zValidator("json", z.object({ hourlyRateCents: z.nu
   const validFrom = body.validFrom ?? existing.validFrom;
   const validUntil = body.validUntil === undefined ? existing.validUntil : body.validUntil;
   if (validUntil && validUntil < validFrom) throw new ValidationError("validUntil must not be before validFrom");
-  const [row] = await db.update(rateCards).set({ ...(body.hourlyRateCents !== undefined ? { hourlyRateCents: body.hourlyRateCents } : {}), validFrom, validUntil }).where(eq(rateCards.id, existing.id)).returning();
-  await writeAudit(db, { eventType: "rate_card.update", subjectId: existing.clubMemberId, payload: { clubId: c.get("clubId"), cardId: existing.id } });
-  return c.json({ data: shapeCard(row!) });
+  const clubId = c.get("clubId");
+  const row = await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`rates:${clubId}`}, 0))`);
+    await assertNoRateOverlap(tx, clubId, existing, validFrom, validUntil, existing.id);
+    const [updated] = await tx.update(rateCards).set({ ...(body.hourlyRateCents !== undefined ? { hourlyRateCents: body.hourlyRateCents } : {}), validFrom, validUntil }).where(eq(rateCards.id, existing.id)).returning();
+    await writeAudit(tx, { eventType: "rate_card.update", subjectId: existing.clubMemberId, payload: { clubId, cardId: existing.id } });
+    return updated!;
+  });
+  return c.json({ data: shapeCard(row) });
 });
 
 rateCardRoutes.delete("/:id", async (c) => {
@@ -375,32 +418,104 @@ timeReportRoutes.use("*", rateLimit({ windowMs: 60_000, max: 30 }));
 timeReportRoutes.use("*", sessionGuard);
 timeReportRoutes.use("*", clubGuard);
 
-const reportQuery = z.object({ from: z.iso.date().optional(), to: z.iso.date().optional(), departmentId: z.uuid().optional(), format: z.enum(["json", "csv"]).optional() });
+const csvList = <T extends z.ZodType<string, string>>(max: number, item: T) =>
+  z
+    .string()
+    .max(4000)
+    .transform((v) => v.split(",").map((x) => x.trim()).filter((x) => x.length > 0))
+    .pipe(z.array(item).max(max))
+    .optional();
 
-/**
- * Hours (and, with `time:read_rates`, hours x rate) of CONFIRMED entries. `time:write` sees the hours of its scope without
- * any amount; `time:read_rates` additionally sees amounts. A report is a calculation basis, not a payment: nothing is booked.
- */
-timeReportRoutes.get("/", zValidator("query", reportQuery, hook), async (c) => {
-  const roles = c.get("clubRoleTypes");
-  const withRates = hasClubPermission(roles, "time:read_rates");
-  if (!withRates && !hasClubPermission(roles, "time:write")) throw new ForbiddenError("Missing time:write or time:read_rates permission");
-  const clubId = c.get("clubId");
-  const q = c.req.valid("query");
+const reportQuery = z.object({
+  from: z.iso.date().optional(),
+  to: z.iso.date().optional(),
+  departmentId: z.uuid().optional(),
+  clubMemberIds: csvList(100, z.uuid()),
+  roleTypes: csvList(20, z.enum(CLUB_ROLE_TYPES)),
+  eventId: z.uuid().optional(),
+  groupBy: z.enum(REPORT_GROUPS).optional(),
+  format: z.enum(["json", "csv", "xlsx"]).optional(),
+});
+
+function reportPeriod(q: { from?: string | undefined; to?: string | undefined }) {
   const to = q.to ?? todayBerlin();
   const from = q.from ?? addDays(to, -30);
   if (to < from) throw new ValidationError("`to` must not be before `from`");
   if (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`) > 366 * 86_400_000) throw new ValidationError("The range covers at most 366 days");
-  // Amounts need time:read_rates (board-wide); a department lead with time:write only reads hours of their own departments.
-  const scope = withRates ? { clubMemberIds: null } : await timeScopeOf(clubId, roles, c.get("membership").id);
-  const report = await buildReport(clubId, { from: new Date(`${from}T00:00:00Z`), to: new Date(`${to}T23:59:59Z`), scope, withRates, departmentId: q.departmentId });
-  if (q.format === "csv") {
-    const header = withRates ? ["Name", "Einträge", "Stunden", "Satz (EUR/h)", "Betrag (EUR)", "Satz fehlt"] : ["Name", "Einträge", "Stunden"];
-    const eur = (cents: number | null) => (cents === null ? "" : (cents / 100).toFixed(2).replace(".", ","));
-    const rows = report.people.map((p) => (withRates ? [p.displayName, p.entries, String(p.hours).replace(".", ","), eur(p.rateCents), eur(p.amountCents), p.rateMissing ? "ja" : ""] : [p.displayName, p.entries, String(p.hours).replace(".", ",")]));
-    await writeAudit(db, { eventType: "time_report.export", subjectId: null, payload: { clubId, rows: rows.length, withRates } });
-    return c.body(buildCsv(header, rows), 200, { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="stundenreport.csv"', "Cache-Control": "private, no-store" });
+  return { from, to, fromDate: berlinDayStart(from), toDate: berlinDayStart(addDays(to, 1)) };
+}
+
+/** `time:read_rates` sees the whole club and amounts; `time:write` alone sees hours of its scope (department leads: own departments). */
+async function reportAccess(c: Context<ClubEnv>) {
+  const roles = c.get("clubRoleTypes");
+  const withRates = hasClubPermission(roles, "time:read_rates");
+  if (!withRates && !hasClubPermission(roles, "time:write")) throw new ForbiddenError("Missing time:write or time:read_rates permission");
+  const scope = withRates ? { clubMemberIds: null } : await timeScopeOf(c.get("clubId"), roles, c.get("membership").id);
+  const visibleCalendarIds = new Set(await getVisibleCalendarIds(c.get("clubId"), c.get("membership").id, roles));
+  return { withRates, scope, visibleCalendarIds };
+}
+
+const eur = (cents: number | null) => (cents === null ? "" : (cents / 100).toFixed(2).replace(".", ","));
+const germanDate = (iso: string | null) => (iso ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : "");
+const dec = (n: number) => String(n).replace(".", ",");
+const REPORT_NOTE = "Berechnungsgrundlage, keine Abrechnung";
+
+function exportHeader(withRates: boolean): string[] {
+  return withRates ? ["Name", "Rolle(n)", "Termin", "Datum", "Stunden", "Satz (EUR/h)", "Betrag (EUR)", "Satz fehlt"] : ["Name", "Rolle(n)", "Termin", "Datum", "Stunden"];
+}
+
+function csvRow(r: ReportRow, withRates: boolean): Array<string | number> {
+  const base = [r.displayName ?? "", r.roleTypes.join(", "), r.eventTitle ?? "", germanDate(r.eventDate), dec(r.hours)];
+  return withRates ? [...base, eur(r.rateCents), eur(r.amountCents), r.rateMissing ? "ja" : ""] : base;
+}
+
+/**
+ * Hours (and, with `time:read_rates`, hours x rate) of CONFIRMED entries, filterable by people, role types, event and department
+ * and groupable by person / event / person+event. `format=csv|xlsx` exports the same rows (calculation basis, not a payment).
+ */
+timeReportRoutes.get("/", zValidator("query", reportQuery, hook), async (c) => {
+  const { withRates, scope, visibleCalendarIds } = await reportAccess(c);
+  const clubId = c.get("clubId");
+  const q = c.req.valid("query");
+  const { from, to, fromDate, toDate } = reportPeriod(q);
+  const report = await buildReport(clubId, { from: fromDate, to: toDate, scope, withRates, visibleCalendarIds, departmentId: q.departmentId, clubMemberIds: q.clubMemberIds, roleTypes: q.roleTypes, eventId: q.eventId, groupBy: q.groupBy });
+  if (q.format === "csv" || q.format === "xlsx") {
+    await writeAudit(db, { eventType: "time_report.export", subjectId: null, payload: { clubId, rows: report.rows.length, withRates, format: q.format } });
+    const headers = { "Cache-Control": "private, no-store" };
+    const header = exportHeader(withRates);
+    if (q.format === "csv") {
+      const lines = report.rows.map((r) => csvRow(r, withRates));
+      const total: Array<string | number> = ["Summe", "", "", "", dec(report.totals.hours)];
+      if (withRates) total.push("", eur(report.totals.amountCents), "");
+      return c.body(buildCsv(header, [...lines, total]), 200, { ...headers, "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="stundenbericht.csv"' });
+    }
+    const bold = (text: string): XlsxCell => ({ text, bold: true });
+    const sheet: XlsxCell[][] = [
+      [bold("Stundenbericht")],
+      [REPORT_NOTE],
+      [`Zeitraum: ${germanDate(from)} bis ${germanDate(to)}`],
+      [],
+      header.map(bold),
+      ...report.rows.map((r): XlsxCell[] => {
+        const base: XlsxCell[] = [r.displayName, r.roleTypes.join(", "), r.eventTitle, germanDate(r.eventDate), r.hours];
+        return withRates ? [...base, r.rateCents === null ? null : r.rateCents / 100, r.amountCents === null ? null : r.amountCents / 100, r.rateMissing ? "ja" : null] : base;
+      }),
+      withRates
+        ? [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }, null, report.totals.amountCents === null ? null : { number: report.totals.amountCents / 100, bold: true }]
+        : [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }],
+    ];
+    const bytes = buildXlsx("Stundenbericht", sheet, withRates ? [28, 24, 32, 12, 10, 14, 14, 12] : [28, 24, 32, 12, 10]);
+    return c.body(bytes as unknown as ArrayBuffer, 200, { ...headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Content-Disposition": 'attachment; filename="stundenbericht.xlsx"' });
   }
+  c.header("Cache-Control", "private, no-store");
   return c.json({ data: { range: { from, to }, includesRates: withRates, note: "Calculation basis only: no payout, no booking, no payment status.", ...report } });
 });
 
+/** Selector data for the report: people with confirmed hours in the period (or, with `time:read_rates`, an applicable rate), their role types, events with hours. */
+timeReportRoutes.get("/people", zValidator("query", z.object({ from: z.iso.date().optional(), to: z.iso.date().optional() }), hook), async (c) => {
+  const { withRates, scope, visibleCalendarIds } = await reportAccess(c);
+  const { from, to, fromDate, toDate } = reportPeriod(c.req.valid("query"));
+  const data = await reportPeople(c.get("clubId"), { from: fromDate, to: toDate, scope, withRates, visibleCalendarIds });
+  c.header("Cache-Control", "private, no-store");
+  return c.json({ data: { range: { from, to }, includesRates: withRates, ...data } });
+});

@@ -66,7 +66,7 @@ curl http://localhost:3000/health
 | `npm run db:verify-counts` | Read-only count/integrity report against `DATABASE_URL` (Wave 7 B12, see [Verifying the Wave 7 migrations](#verifying-the-wave-7-migrations-b12)); prints table names and numbers only, exit code 1 if a check fails |
 | `npm run seed:admin` | Create or promote the admin user from `ADMIN_EMAIL`/`ADMIN_PASSWORD` |
 | `npm run seed:club` | Bootstrap a demo club and make `ADMIN_EMAIL` its "vorsitz" — needed for local dev. Also creates the club's standard calendar ("Vereinskalender"). Real users create clubs through the Wave 6 registration + review flow (`/club-registrations`, [Club registration](#club-registration)); `organization/create` is closed for end users, `seed:club` and the approval call `auth.api.createOrganization` server-side, which is still allowed. See `src/scripts/seed-club.ts` |
-| `npm run seed:demo` | Build ONE fully populated demo club ("Demo Sportverein Wiesbach e.V.") with 17 demo logins, 47 members, calendar, material, assemblies, privacy, communication, documents, acknowledgements and membership card data — see [Demo club](#demo-club-npm-run-seeddemo). Idempotent, `--reset` rebuilds only that club, refuses `NODE_ENV=production` without `--force`. See `src/scripts/seed-demo.ts` |
+| `npm run seed:demo` | Build ONE fully populated demo club ("Demo Sportverein Wiesbach e.V.") with 18 demo logins, 48 members, calendar, time tracking and hourly rates, material, assemblies, privacy, communication, documents, acknowledgements and membership card data — see [Demo club](#demo-club-npm-run-seeddemo). Idempotent, `--reset` rebuilds only that club, refuses `NODE_ENV=production` without `--force`. See `src/scripts/seed-demo.ts` |
 | `npm run auth:generate` | Regenerate `src/auth/auth-schema.ts` from the Better Auth config |
 | `npm run lint` | ESLint |
 | `npm test` | Vitest (unit + integration) |
@@ -93,19 +93,20 @@ npm run seed:demo -- --force       # allow NODE_ENV=production (never use on a r
 | Login | Account | Club role(s) | What it demonstrates |
 |---|---|---|---|
 | `admin@` | platform `admin` | - | Platform admin views: open club registration (`gruender@`), jobs, mail log, DPA draft |
-| `vorsitz@` | owner | `vorsitz` | Everything the board may do; chairs the assemblies |
+| `vorsitz@` | owner | `vorsitz` | Everything the board may do; chairs the assemblies; time report with amounts, rate cards, confirms time entries |
 | `stellv.vorsitz@` | admin | `stellv_vorsitz` | Same rights as the chair |
-| `kassenwart@` | member | `kassenwart` | Sensitive member data and KPIs only; **term ends in 21 days** |
+| `kassenwart@` | member | `kassenwart` | Sensitive member data and KPIs only; **term ends in 21 days**; time report with amounts (`time:read_rates`), cannot confirm |
 | `schriftfuehrer@` | member | `schriftfuehrer` | Meetings, minutes, forms, announcements, assembly management |
 | `beisitzer@` | member | `beisitzer`, `abteilungsleitung` Turnen | Re-elected in the demo assembly (24 month term), leads Turnen |
-| `trainer@` | member | `trainer` Fußball | Department announcements, absences of the own department, qualifications |
+| `trainer@` | member | `trainer` Fußball | Department announcements, absences of the own department, qualifications; time tracking with a personal rate (20 EUR/h lapsed, 25 EUR/h now) |
+| `trainer3@` | member | `trainer` Schwimmen | Time tracking at the role rate trainer (18 EUR/h), open entries; Schwimmen has no lead, so only the board sees these hours |
 | `trainer2@` | member | `trainer` Tennis | **Term expired 12 days ago** (the statute suspends the role's rights) |
-| `abteilungsleitung@` | member | `abteilungsleitung` Fußball | Calendars, locations, material |
-| `abteilungsleitung2@` | member | `abteilungsleitung` Tennis | **Term ends in 45 days** |
-| `mitglied@` | member | (implicit `mitglied`) | Plain member, read rights only; has **not yet voted** in the open circular resolution; father of Finn |
+| `abteilungsleitung@` | member | `abteilungsleitung` Fußball | Calendars, locations, material; time report **hours only** and only of the own department (Marco, Ute), confirms their entries (not her own) |
+| `abteilungsleitung2@` | member | `abteilungsleitung` Tennis | **Term ends in 45 days**; time report hours only, department Tennis (Lukas, Lena) |
+| `mitglied@` | member | (implicit `mitglied`) | Plain member, read rights only; tracks time through the rate for all members (8 EUR/h), **clock is running**; has **not yet voted** in the open circular resolution; father of Finn |
 | `jugend@` | member | (implicit `mitglied`) | 16-year-old youth member with an account, no voting right (category `jugend`) |
 | `erziehungsberechtigt@` | guest | `erziehungsberechtigt` | External guardian: wards Noah and Mia (valid), Lina (**not confirmed**, grants nothing), Tim (**expired**, turned 18) |
-| `gast@` | guest | - | External guest (association referee): sees only guest-level content |
+| `gast@` | guest | - | External guest (association referee): sees only guest-level content; no hourly rate, so time tracking answers `403 no_rate` |
 | `bewerber@` / `eltern.bewerber@` | no membership | - | Applicants with an open admission application (the second one for a child) |
 | `gruender@` | no membership | - | Wants to found a club: open registration for the platform review |
 
@@ -114,7 +115,7 @@ npm run seed:demo -- --force       # allow NODE_ENV=production (never use on a r
 | Area | Content |
 |---|---|
 | Club | Verified club (approved registration), 6 info pages (statute, vision, history, fee schedule, house rules, external link), settings: reminders, mail template + text blocks, consent age limit 16, privacy contact/controller, **complete statute parameters of the general assembly** (14 + 3 days notice, quorum 25 %, majorities per topic, proxies, hybrid, circular resolutions, digital secret ballots, voting age 16, term warnings) |
-| Members | 47 members (13 with account): categories Aktiv, Passiv, Fördernd, Ehrenmitglied, Jugend, Kinder, Studierende (with and without voting right, age rules for the age transition); statuses interessent, probe, aktiv, ruhend, **scheduled exit** (aktiv + future `left_at`), ausgetreten, ausgeschlossen (with legal hold), verstorben; entry/exit dates, status and category history, contact data, emergency contacts, organisations as sponsors, siblings sharing one e-mail address, members without any address (post list) |
+| Members | 48 members (14 with account): categories Aktiv, Passiv, Fördernd, Ehrenmitglied, Jugend, Kinder, Studierende (with and without voting right, age rules for the age transition); statuses interessent, probe, aktiv, ruhend, **scheduled exit** (aktiv + future `left_at`), ausgetreten, ausgeschlossen (with legal hold), verstorben; entry/exit dates, status and category history, contact data, emergency contacts, organisations as sponsors, siblings sharing one e-mail address, members without any address (post list) |
 | Structure | 4 departments (Schwimmen without a lead), leads, department assignments (one ended), club roles with terms (expiring soon, expired), term history |
 | Guardians | Links in every state: valid, second guardian without custody (cannot consent), unconfirmed, expired; minors Leon, Hannah, Sophie, Jonas **without** a guardian |
 | Member data | 7 custom fields (select, textarea, checkbox, multiselect, sensitive, 2 credentials), 34 values, qualifications valid / expiring (25–38 days) / expired, per-member visibility of phone, e-mail, address, photo |
@@ -127,12 +128,27 @@ npm run seed:demo -- --force       # allow NODE_ENV=production (never use on a r
 | Communication (Wave 9) | 9 announcements (pinned, urgent, department, category + guardians, scheduled, draft, expired, cancelled) with delivery rows incl. read marks and `skipped_optout`; notification preferences (global, per club, for a member without account) |
 | Documents and PDF (Wave 13) | **Branding:** logo (a real generated PNG through the media layer), brand colours, letterhead, storage quota 256 MB. **Archive:** 4 folders with rights (role and department entries, `Verträge` inherits `Vorstand`, board only), 6 uploaded PDFs, a second version, 1 document in the trash, 1 under legal hold with reason, 2 club info pages with a second version (statute with the archive PDF attached). **Personal storage:** an upload of `mitglied@`, one of the guardian for Noah, an access-log entry of the board. **Generated by the real render service:** membership confirmation, admission receipt (person storage), member list and annual report (system folder, retention date set by the class), acknowledgement proof. |
 | Acknowledgements and cards (Wave 13) | 9 requests on two documents: house rules (confirmed by themselves, confirmed on paper by the board, one **expired**, open) and holiday camp consent for children (re-authentication required, answered by the guardian for Noah, two open). 11 membership cards: one re-issued (old QR invalid), one revoked by the board, one revoked by an exit; 4 card checks in the audit log. |
+| Time tracking and rates (Wave 12 B20) | 6 rate cards (EUR/h): `mitglied` 8 ("Alle Mitglieder", from 1 January of last year), `trainer` 18, `abteilungsleitung` 22 until the end of this month and **24 from the first of next month** (future dated), Marco's personal 20 (**lapsed** 31 days ago) and 25 (since 30 days ago); no two cards of the same target overlap. 37 time entries of the last 8 weeks for 6 people (Marco, Nina, Ute, Lukas, Jan, Lena): 28 confirmed (by `vorsitz@` or `stellv.vorsitz@`, never by the person themselves), 7 open, 1 rejected, **1 running** (Lukas, started 90 minutes before the seed), 1 over Berlin midnight (Jan); sources `stempeln` 17 / `aus_termin` 9 (tied to the Vereinsputztag and the finished football trainings) / `manuell` 11. Confirmed entries give a report of about 72 h and 1,167 EUR for 6 people and 6 events, Marco with two rates in the period (`rateCents` null), no `rateMissing`. Who has no rate: external guests (`gast@`, `erziehungsberechtigt@`), they have no entries and get `403 no_rate`. Running clock: stopping works for 16 h, later delete it and enter it by hand. |
 | Heute and search (Wave 14) | `mitglied@` and `trainer@` see unanswered events in the next 14 days, a cancelled event they had answered, unread announcements, own loans due soon and overdue, an open ballot; `vorsitz@` sees open applications and exits and maintenance-due items |
 | Audit | One entry per seeded member, role, field, calendar and every service call (ballots, elections, minutes, invitations, consents) |
 
+**Time tracking: which login for what.**
+
+| Login | Use it for |
+|---|---|
+| `vorsitz@`, `stellv.vorsitz@` | Time report **with amounts** (filter, group by person / event / person+event, CSV and XLSX export), rate cards, confirm or reject open entries |
+| `kassenwart@` | Time report with amounts and rate cards (`time:read_rates`); cannot confirm (no `time:write`) |
+| `abteilungsleitung@` | Report **hours only** for the own department Fußball (Marco, Ute); confirms entries of the department but not her own (`no_self_decision`) |
+| `abteilungsleitung2@` | Report hours only for Tennis (Lukas, Lena) |
+| `trainer@`, `trainer3@` | Tracking: personal rate (two rates over time) and role rate; suggestions from events |
+| `mitglied@` | Tracking without a trainer role (rate for all members), running clock |
+| `gast@` | The "no rate" case: tracking is refused with `403 no_rate` |
+
+Because the card "Alle Mitglieder" covers every member with an account, a plain member always has a rate; the no-rate case is therefore tried with an external guest.
+
 **Skipped on purpose.** Profile photos, location and damage photos, registration proofs and form attachments (member cards therefore show initials, not photos). Documents, the logo and the personal storage are real uploads through the media layer (files under `UPLOADS_DIR`, removed again by `--reset`); no mail or notification is sent for acknowledgement requests. Billing is out of scope of MyVerein. The ballots of the Jahreshauptversammlung are dated to the evening of the meeting (their timestamps and result hash are re-sealed); the audit entries of the service calls carry the seed time.
 
-**Tests.** `src/scripts/seed-demo.test.ts` runs the seed against the test database with its own slug and e-mail domain, asserts the counts per area (`src/scripts/demo/counts.ts`), idempotency (second run changes nothing, `--reset` rebuilds identical counts), that another club is untouched, that a foreign club with the same slug is refused, and the production guard.
+**Tests.** `src/scripts/seed-demo.test.ts` runs the seed against the test database with its own slug and e-mail domain, asserts the counts per area (`src/scripts/demo/counts.ts`), idempotency (second run changes nothing, `--reset` rebuilds identical counts), that another club is untouched, that a foreign club with the same slug is refused, and the production guard, and it calls the real report routes with the demo logins (JSON, CSV, XLSX: totals, lead scope without amounts, no `rateMissing`, `no_rate` for the guest).
 
 ## Architecture
 
@@ -1285,7 +1301,7 @@ Data: `event_attendance_sheets` (one per event, closable), `event_attendance` (o
 
 ### Time tracking (Wave 12 B20, P2)
 
-`src/lib/time-tracking.ts`, routes `src/routes/time-tracking.ts` (`/time-entries`, `/rate-cards`, `/time-report`). Tables `time_entries` (club member, optional event, `started_at`/`ended_at` -- `NULL` while the clock runs --, source `stempeln|aus_termin|manuell`, status `offen|bestaetigt|abgelehnt`) and `rate_cards` (person **or** role, hourly rate in cents, validity). **Delimitation:** *availability* = a wish for planning, *attendance* = taking part in an event (every member, no remuneration), *time tracking* = worked, remunerable time of single trainers. The attendance of a trainer may **propose** an entry, never create one. Only trainers / department leads (and people who confirm) may track; entries are `offen` until `time:write` confirms (department leads: members of their own departments; nobody confirms their own entry). The report is hours x rate for **confirmed** entries -- explicitly **no payout, no booking, no payment status** (billing stays outside MyVerein); amounts and rates are confidential (`time:read_rates`). Time entries and rates are kept on erasure of a member (statutory retention of remunerated work), see the `event_participation` contributor.
+`src/lib/time-tracking.ts`, routes `src/routes/time-tracking.ts` (`/time-entries`, `/rate-cards`, `/time-report`, `/time-report/people`), `src/lib/xlsx.ts` (minimal XLSX writer on `fflate`). The report can be filtered by people, role types, event and department, grouped by person / event / person+event and exported as CSV or XLSX (export is a website feature; the mobile app only reads the JSON). Tables `time_entries` (club member, optional event, `started_at`/`ended_at` -- `NULL` while the clock runs --, source `stempeln|aus_termin|manuell`, status `offen|bestaetigt|abgelehnt`) and `rate_cards` (person **or** role, hourly rate in cents, validity). **Delimitation:** *availability* = a wish for planning, *attendance* = taking part in an event (every member, no remuneration), *time tracking* = worked, remunerable time of single trainers. The attendance of a trainer may **propose** an entry, never create one. Trainers / department leads / `time:write` holders may track, and so may **any club member with an applicable hourly rate today** (a personal rate card or one for one of their club role types, including the implicit `mitglied`, valid today); everybody else gets `403` with `error.details.code = no_rate`. `GET /club-members/me` exposes `canTrack` and `hasRate` next to `permissions`, so clients show the stamp UI only when `canTrack` (the rate gives no right to confirm, to read the report or to see rates). Stopping the clock, `GET /time-entries/current` and deleting an own open entry never need a rate, so a lapsed rate cannot strand a running entry; clock-out keeps the 16 h cap (`too_long`: delete the entry and enter it by hand). **Known limit:** rates for role types resolve with the person's roles **today** (`club_roles` has no start date), so a historic report prices past hours with today's roles; use personal rate cards where history matters. Rate cards of the same target (person or role type) must not overlap (`409 rate_overlap`); `roleTypes=mitglied` matches every member with an account; entries are `offen` until `time:write` confirms (department leads: members of their own departments; nobody confirms their own entry). The report is hours x rate for **confirmed** entries -- explicitly **no payout, no booking, no payment status** (billing stays outside MyVerein); amounts and rates are confidential (`time:read_rates`). Time entries and rates are kept on erasure of a member (statutory retention of remunerated work), see the `event_participation` contributor.
 
 ### Tests and known limits of the events part (Wave 12 B21)
 
@@ -1844,6 +1860,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `no_proxy` | 403 | `lib/ballots.ts` |
 | `no_published_notice` | 409 | `routes/member-privacy.ts` |
 | `no_published_text` | 409 | `routes/consent-purposes.ts` |
+| `no_rate` | 403 | `lib/time-tracking.ts` |
 | `no_self_decision` | 403 | `routes/time-tracking.ts` |
 | `no_tie` | 422 | `lib/elections.ts` |
 | `none_running` | 409 | `routes/time-tracking.ts` |
@@ -1873,10 +1890,12 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `proxy_not_allowed` | 403 | `lib/ballots.ts` |
 | `proxy_not_supported` | 422 | `routes/meeting-assembly.ts` |
 | `query_too_short` | 400 | `lib/club-search.ts` |
+| `rate_overlap` | 409 | `routes/time-tracking.ts` |
 | `reason_required` | 409, 422 | `lib/ballots.ts`, `routes/data-subject-requests.ts`, `routes/event-attendance.ts`, `routes/member-privacy.ts` |
 | `reauth_failed` | 403 | `routes/acknowledgements.ts` |
 | `reauth_required` | 403 | `routes/acknowledgements.ts` |
 | `registration_closed` | 409 | `lib/event-guests.ts`, `lib/event-registration.ts` |
+| `report_too_large` | 422 | `lib/time-tracking.ts` |
 | `request_exists` | 409 | `routes/event-rides.ts` |
 | `reset_needs_club` | 422 | `routes/notification-preferences.ts` |
 | `resolution_ballot_missing` | 422 | `lib/minutes.ts` |
@@ -2162,7 +2181,8 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `/time-entries/:id` | PATCH, DELETE | same | Change or delete an own **open** entry (`409 entry_decided` afterwards, `409 running` for a running one) |
 | `/time-entries/:id/confirm`, `/time-entries/:id/reject` | POST | session + `clubGuard` (`time:write`, checked first; department leads only for members of their departments, others `404`) | Decide about a finished open entry. **Nobody decides about their own entry** (`403 no_self_decision`); `409 entry_decided`. Audit `time_entry.confirm|reject` |
 | `/rate-cards` | GET, POST, `/:id` PATCH, DELETE | session + `clubGuard` (`time:read_rates` for everything, confidential) | Hourly rates: `{ clubMemberId \| roleType, hourlyRateCents, validFrom, validUntil? }` (exactly one target, `validUntil >= validFrom`). A personal card beats a role card; the newest `validFrom` wins |
-| `/time-report` | GET | session + `clubGuard` (`time:write` for hours of the scope, `time:read_rates` for amounts) | Hours of **confirmed** entries per person for `from`/`to` (default 30 days, max 366), optional `departmentId`, `format=csv`. With `time:read_rates`: `rateCents` (when constant), `amountCents` = sum of `round(minutes x rate / 60)` per entry, `rateMissing`; department leads get hours only, never amounts. Audit `time_report.export` for CSV. A calculation basis, not a payment |
+| `/time-report` | GET | session + `clubGuard` (`time:write` for hours of the scope, `time:read_rates` for amounts) | Hours of **confirmed** entries for `from`/`to` (Europe/Berlin calendar days, default 30 days, max 366). All filters run in SQL; a report over more than 20,000 entries is refused with `422 report_too_large` (all formats, never truncated), narrow the period or selection. Event titles of calendars the viewer cannot see show as `Termin`. Responses are `Cache-Control: private, no-store`. Filters: `departmentId`, `clubMemberIds` (comma list, max 100), `roleTypes` (comma list), `eventId`; `groupBy=person\|event\|person_event` (default `person`); `format=json\|csv\|xlsx`. JSON: `rows` (grouped, with `eventTitle`/`eventDate` for event groupings), `people` (always per person), `totals` (`minutes`, `hours`, `amountCents`). With `time:read_rates`: `rateCents` (when constant), `amountCents` = sum of `round(minutes x rate / 60)` per entry, `rateMissing`; department leads get hours of their own departments only, never amounts (ids outside the scope or club just yield no rows). CSV `stundenbericht.csv` and XLSX `stundenbericht.xlsx` (sheet "Stundenbericht", note "Berechnungsgrundlage, keine Abrechnung", columns Name, Rolle(n), Termin, Datum, Stunden, plus Satz (EUR/h) and Betrag (EUR) and Satz fehlt only with `time:read_rates`, totals row) are formula-escaped, `Cache-Control: private, no-store`; audit `time_report.export` (format and row count, no names). XLSX is generated server-side with `fflate` (no template, no network). A calculation basis, not a payment |
+| `/time-report/people` | GET | same as `/time-report` | Selector data for the report (`from`/`to` as above): `truncated` (list cut at 1,000 people / 300 events), `people` (in-scope members with confirmed hours in the period; with `time:read_rates` also members with an applicable rate today), `roleTypes` present among them, `events` with confirmed hours |
 | `/events.ics` | GET | session + `clubGuard` | iCal feed (`text/calendar`) of events on calendars visible to the caller, with series as `RRULE` (see [iCal export](#data-model)); `Cache-Control: private, no-cache`, weak `ETag` / `304`. The token link for calendar apps is `GET /feeds/:token.ics` |
 | `/calendar-feeds` | POST | session + `clubGuard` (account members; external guests `403`) | Wave 12 B8. Creates a subscription link of the caller. Body: `calendarId?` (limit to one visible calendar, else `404`), `label?` (≤ 60). `201 { data: { id, label, calendarId, calendarName, createdAt, lastUsedAt, token, url, webcalUrl } }` -- **`token` and the URLs are returned only here and on rotation**; only the SHA-256 is stored. `url` = `BACKEND_URL` + `/feeds/<token>.ics`, `webcalUrl` the same with `webcal://`. At most 10 active links per member (`409`) |
 | `/calendar-feeds` | GET | session + `clubGuard` (external guests `403`) | The caller's own active links: `{ id, label, calendarId, calendarName, createdAt, lastUsedAt }` (no token, no hash) |

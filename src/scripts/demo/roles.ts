@@ -27,6 +27,7 @@ const ROLES: RoleSpec[] = [
   { who: "beisitz", roleType: "abteilungsleitung", dept: "turnen", termDays: 200, sinceYears: 1 },
   { who: "trainer", roleType: "trainer", dept: "fussball", termDays: null, sinceYears: 4 },
   { who: "trainer2", roleType: "trainer", dept: "tennis", termDays: -12, sinceYears: 2 },
+  { who: "trainer3", roleType: "trainer", dept: "schwimmen", termDays: null, sinceYears: 2 },
   { who: "abtleit", roleType: "abteilungsleitung", dept: "fussball", termDays: 300, sinceYears: 3 },
   { who: "abtleit2", roleType: "abteilungsleitung", dept: "tennis", termDays: 45, sinceYears: 2 },
 ];

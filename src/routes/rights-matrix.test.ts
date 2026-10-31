@@ -196,6 +196,8 @@ const SELF_SERVICE: Record<string, string> = {
   "POST /notifications/:id/read": "own notifications",
   "POST /notifications/:id/unread": "own notifications",
   "DELETE /notifications/:id": "own notifications",
+  "POST /time-entries/clock-out": "stops the caller's own running entry; deliberately no rate check so a lapsed rate cannot strand it (nothing running: 409), asserted in time-report.test.ts",
+  "DELETE /time-entries/:id": "deletes an own open entry only (other callers 404); no rate check so nothing is stranded, asserted in time-report.test.ts",
   "POST /events/:id/rsvp": "own RSVP",
   "DELETE /events/:id/rsvp": "own RSVP",
   "POST /public/events/:token/registrations": "public guest registration: no session, the secret event link is the credential (unknown tokens are 404, rate limited per IP / token / address, honeypot)",
@@ -305,6 +307,9 @@ const GUEST_DENIED_READS: Array<[string, string]> = [
   ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}`],
   ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}/loans`],
   ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}/damage-reports`],
+  ["GET", "/time-entries"],
+  ["GET", "/time-report"],
+  ["GET", "/time-report/people"],
   ["GET", "/departments"],
   ["GET", `/departments/${"00000000-0000-4000-8000-000000000001"}`],
 ];

@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 
 import { eq, inArray, like } from "drizzle-orm";
+import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { organization, user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
+import { toAppError } from "../lib/errors.js";
+import { timeEntryRoutes, timeReportRoutes } from "../routes/time-tracking.js";
 import { demoCounts } from "./demo/counts.js";
 import { findClubBySlug, resetDemoClub } from "./demo/reset.js";
 import { DEFAULT_DEMO_PASSWORD, DEMO_MARKER, type DemoOptions } from "./demo/context.js";
@@ -143,6 +146,21 @@ describe("seed:demo", () => {
     expect(first.member_cards_revoked).toBeGreaterThanOrEqual(1);
     expect(first.member_cards_reissued).toBeGreaterThanOrEqual(1);
     expect(first.card_checks).toBeGreaterThanOrEqual(3);
+    // time tracking, rates and the report
+    expect(first.rate_cards_person).toBeGreaterThanOrEqual(2);
+    expect(first.rate_cards_role).toBeGreaterThanOrEqual(3);
+    expect(first.rate_cards_lapsed).toBeGreaterThanOrEqual(1);
+    expect(first.rate_cards_future).toBeGreaterThanOrEqual(1);
+    expect(first.time_people).toBeGreaterThanOrEqual(6);
+    expect(first.time_events).toBeGreaterThanOrEqual(3);
+    expect(first.time_entries_confirmed).toBeGreaterThan(first.time_entries_open! + first.time_entries_rejected!);
+    expect(first.time_entries_open).toBeGreaterThanOrEqual(1);
+    expect(first.time_entries_rejected).toBe(1);
+    expect(first.time_entries_running).toBe(1);
+    expect(first.time_entries_over_midnight).toBe(1);
+    expect(first.time_entries_stempeln).toBeGreaterThan(0);
+    expect(first.time_entries_aus_termin).toBeGreaterThan(0);
+    expect(first.time_entries_manuell).toBeGreaterThan(0);
     // "Heute" needs events in the next 14 days (open and cancelled) and an own overdue loan
     expect(first.events_cancelled).toBeGreaterThanOrEqual(3);
   }, 120_000);
@@ -175,6 +193,68 @@ describe("seed:demo", () => {
     const accounts = await db.select({ id: user.id }).from(user).where(like(user.email, `%@${opts.emailDomain}`));
     expect(accounts.length).toBeGreaterThanOrEqual(14);
   }, 120_000);
+
+  it("serves a meaningful time report (JSON, CSV, XLSX), lead scope without amounts and the no-rate case", async () => {
+    const { auth } = await import("../auth/auth.js");
+    const app = new Hono();
+    app.route("/time-report", timeReportRoutes);
+    app.route("/time-entries", timeEntryRoutes);
+    app.onError((err, c) => {
+      const appError = toAppError(err);
+      return c.json(appError.toJSON(), appError.status as 400 | 403 | 404 | 409 | 422 | 429 | 500);
+    });
+    const call = async (login: string, path: string, init: RequestInit = {}) => {
+      const email = `${login}@${opts.emailDomain}`;
+      const signIn = await auth.api.signInEmail({ body: { email, password: opts.password }, asResponse: true });
+      const cookie = (signIn.headers.get("set-cookie") ?? "").split(";")[0]!;
+      return app.request(path, { ...init, headers: { cookie, "x-club-id": clubId, "content-type": "application/json" } });
+    };
+    const from = new Date(Date.now() - 70 * 86_400_000).toISOString().slice(0, 10);
+    const q = `?from=${from}&groupBy=person`;
+
+    const board = await (await call("vorsitz", `/time-report${q}`)).json() as { data: { includesRates: boolean; rows: Array<{ displayName: string; hours: number; rateCents: number | null; amountCents: number; rateMissing: boolean }>; totals: { hours: number; amountCents: number } } };
+    expect(board.data.includesRates).toBe(true);
+    expect(board.data.rows.map((r) => r.displayName).sort()).toEqual(["Jan Köhler", "Lena Wolff", "Lukas Fischer", "Marco Vogel", "Nina Hoffmeister", "Ute Hartmann"]);
+    expect(board.data.totals.hours).toBeGreaterThan(50);
+    expect(board.data.totals.amountCents).toBeGreaterThan(50_000);
+    expect(board.data.rows.some((r) => r.rateMissing)).toBe(false);
+    const byName = Object.fromEntries(board.data.rows.map((r) => [r.displayName, r]));
+    expect(byName["Marco Vogel"]!.rateCents).toBeNull(); // two rates in the period (20 and 25 EUR/h)
+    expect(byName["Nina Hoffmeister"]!.rateCents).toBe(1800);
+    expect(byName["Ute Hartmann"]!.rateCents).toBe(2200);
+    expect(byName["Lukas Fischer"]!.rateCents).toBe(800);
+    // the accountant sees amounts as well, the running and the open entries do not count
+    const treasurer = await (await call("kassenwart", `/time-report${q}`)).json() as { data: { totals: { amountCents: number } } };
+    expect(treasurer.data.totals.amountCents).toBe(board.data.totals.amountCents);
+
+    // a department lead: hours only, only the own department
+    const lead = await (await call("abteilungsleitung", `/time-report${q}`)).json() as { data: { includesRates: boolean; rows: Array<{ displayName: string }>; totals: { hours: number; amountCents: number | null } } };
+    expect(lead.data.includesRates).toBe(false);
+    expect(lead.data.totals.amountCents).toBeNull();
+    expect(lead.data.rows.map((r) => r.displayName).sort()).toEqual(["Marco Vogel", "Ute Hartmann"]);
+
+    // events: several events and persons
+    const byEvent = await (await call("vorsitz", `/time-report${q.replace("person", "event")}`)).json() as { data: { rows: Array<{ eventTitle: string | null }> } };
+    expect(byEvent.data.rows.length).toBeGreaterThanOrEqual(4);
+
+    const csv = await call("vorsitz", `/time-report${q}&format=csv`);
+    expect(csv.headers.get("content-type")).toContain("text/csv");
+    const csvText = await csv.text();
+    expect(csvText).toContain("Summe");
+    expect(csvText).toContain("Nina Hoffmeister");
+    const xlsx = await call("vorsitz", `/time-report${q}&format=xlsx`);
+    expect(xlsx.headers.get("content-type")).toContain("spreadsheetml");
+    const bytes = new Uint8Array(await xlsx.arrayBuffer());
+    expect(bytes.length).toBeGreaterThan(500);
+    expect(String.fromCharCode(bytes[0]!, bytes[1]!)).toBe("PK");
+
+    // lukas's clock is running; an external guest has no rate
+    const current = await (await call("mitglied", "/time-entries/current")).json() as { data: { running: boolean } | null };
+    expect(current.data?.running).toBe(true);
+    const noRate = await call("gast", "/time-entries/clock-in", { method: "POST", body: "{}" });
+    expect(noRate.status).toBe(403);
+    expect(JSON.stringify(await noRate.json())).toContain("no_rate");
+  }, 60_000);
 
   it("never touches other clubs", async () => {
     const bystander = await findClubBySlug(bystanderSlug);
