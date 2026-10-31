@@ -4,6 +4,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
+import { calendarVisibility } from "../db/schema/calendar-visibility.js";
+import { calendars } from "../db/schema/calendars.js";
+import { clubRoles } from "../db/schema/club-roles.js";
+import { ownDepartmentIds } from "../lib/event-access.js";
+import { berlinDayStart, REPORT_LIMITS } from "../lib/time-tracking.js";
+import { todayBerlin } from "../lib/member-lifecycle.js";
+import { addDays } from "../lib/absences.js";
 import { clubMemberDepartments, clubMembers } from "../db/schema/club-members.js";
 import { rateCards, timeEntries } from "../db/schema/event-extras.js";
 import { clubMemberRoutes } from "./club-members.js";
@@ -46,11 +53,14 @@ describe("time tracking by rate and the extended report", () => {
     expect(await me(fx.users.member1)).toMatchObject({ canTrack: false, hasRate: false });
     expect(await me(fx.users.trainerA)).toMatchObject({ canTrack: true, hasRate: true });
     expect(await me(fx.users.leaderA)).toMatchObject({ canTrack: true, hasRate: false });
-    for (const [path, method] of [["/time-entries", "GET"], ["/time-entries/current", "GET"], ["/time-entries/suggestions", "GET"], ["/time-entries/clock-in", "POST"], ["/time-entries/clock-out", "POST"], ["/time-entries", "POST"], ["/time-entries/from-event", "POST"]] as const) {
+    for (const [path, method] of [["/time-entries", "GET"], ["/time-entries/suggestions", "GET"], ["/time-entries/clock-in", "POST"], ["/time-entries", "POST"], ["/time-entries/from-event", "POST"]] as const) {
       const res = await call(fx.users.member1, path, method, method === "POST" ? {} : undefined);
       expect(res.status, `${method} ${path}`).toBe(403);
       expect((await fx.json(res)).error.details.code).toBe("no_rate");
     }
+    // Stopping, looking at and deleting what is running never needs a rate (nothing gets stranded): nothing runs for member1 here.
+    expect((await fx.json(await call(fx.users.member1, "/time-entries/current"))).data).toBeNull();
+    expect((await call(fx.users.member1, "/time-entries/clock-out", "POST")).status).toBe(409);
     // A rate for the implicit role mitglied, not yet valid / already expired: still no.
     const future = await db.insert(rateCards).values({ clubId: fx.clubId, roleType: "mitglied", hourlyRateCents: 800, validFrom: "2999-01-01" }).returning();
     const expired = await db.insert(rateCards).values({ clubId: fx.clubId, roleType: "mitglied", hourlyRateCents: 800, validFrom: "2000-01-01", validUntil: "2001-01-01" }).returning();
@@ -207,6 +217,144 @@ describe("time tracking by rate and the extended report", () => {
     const before = (await db.select().from(auditLog).where(and(eq(auditLog.clubId, fx.clubId), eq(auditLog.eventType, "time_report.export")))).length;
     await call(fx.users.board, "/time-report");
     expect((await db.select().from(auditLog).where(and(eq(auditLog.clubId, fx.clubId), eq(auditLog.eventType, "time_report.export")))).length).toBe(before);
+  });
+  it("uses Europe/Berlin day bounds (summer and winter) for the period and the rate day", async () => {
+    expect(berlinDayStart("2026-07-15").toISOString()).toBe("2026-07-14T22:00:00.000Z");
+    expect(berlinDayStart("2026-01-15").toISOString()).toBe("2026-01-14T23:00:00.000Z");
+    expect(berlinDayStart("2026-03-29").toISOString()).toBe("2026-03-28T23:00:00.000Z");
+    expect(berlinDayStart("2026-10-25").toISOString()).toBe("2026-10-24T22:00:00.000Z");
+    const member = fx.users.member2.clubMemberId;
+    for (const day of ["2026-07-15", "2026-01-15"]) {
+      const start = berlinDayStart(day);
+      const next = berlinDayStart(addDays(day, 1));
+      await db.insert(timeEntries).values([
+        { clubId: fx.clubId, clubMemberId: member, startedAt: new Date(start.getTime() - 60_000), endedAt: new Date(start.getTime() + 60_000 - 60_000), source: "manuell", status: "bestaetigt" }, // 23:59 the day before
+        { clubId: fx.clubId, clubMemberId: member, startedAt: start, endedAt: new Date(start.getTime() + 30 * 60_000), source: "manuell", status: "bestaetigt" }, // 00:00 exactly
+        { clubId: fx.clubId, clubMemberId: member, startedAt: new Date(next.getTime() - 60_000), endedAt: next, source: "manuell", status: "bestaetigt" }, // 23:59
+        { clubId: fx.clubId, clubMemberId: member, startedAt: next, endedAt: new Date(next.getTime() + 45 * 60_000), source: "manuell", status: "bestaetigt" }, // 00:00 the day after
+      ]);
+      const body = (await fx.json(await call(fx.users.board, `/time-report?from=${day}&to=${day}&clubMemberIds=${member}`))).data;
+      expect(body.totals.minutes, day).toBe(30 + 1);
+    }
+    // The rate of an entry is the one of its Berlin day: valid until 2026-07-14 (inclusive) does not cover 00:10 Berlin on 07-15.
+    await db.insert(rateCards).values([
+      { clubId: fx.clubId, clubMemberId: member, hourlyRateCents: 600, validFrom: "2020-01-01", validUntil: "2026-07-14" },
+      { clubId: fx.clubId, clubMemberId: member, hourlyRateCents: 1200, validFrom: "2026-07-15" },
+    ]);
+    const priced = (await fx.json(await call(fx.users.board, `/time-report?from=2026-07-15&to=2026-07-15&clubMemberIds=${member}`))).data;
+    expect(priced.rows[0]).toMatchObject({ rateCents: 1200, amountCents: 600 + 20 });
+    await db.delete(rateCards).where(and(eq(rateCards.clubId, fx.clubId), eq(rateCards.clubMemberId, member)));
+  });
+
+  it("applies validUntil inclusively and prefers a personal card over a role card", async () => {
+    const m = fx.users.member2;
+    const me = async () => (await fx.json(await call(m, "/club-members/me"))).data;
+    const today = todayBerlin();
+    const [card] = await db.insert(rateCards).values({ clubId: fx.clubId, clubMemberId: m.clubMemberId, hourlyRateCents: 700, validFrom: "2020-01-01", validUntil: today }).returning();
+    expect(await me()).toMatchObject({ canTrack: true, hasRate: true });
+    await db.update(rateCards).set({ validUntil: addDays(today, -1) }).where(eq(rateCards.id, card!.id));
+    expect(await me()).toMatchObject({ canTrack: false, hasRate: false });
+    await db.update(rateCards).set({ validUntil: null, validFrom: addDays(today, 1) }).where(eq(rateCards.id, card!.id));
+    expect(await me()).toMatchObject({ canTrack: false, hasRate: false });
+    await db.update(rateCards).set({ validFrom: today }).where(eq(rateCards.id, card!.id));
+    expect(await me()).toMatchObject({ canTrack: true, hasRate: true });
+    await db.delete(rateCards).where(eq(rateCards.id, card!.id));
+  });
+
+  it("never strands a running entry: stop, look at and delete work without a rate; clock-out keeps the 16 h cap", async () => {
+    const m = fx.users.member2;
+    const [card] = await db.insert(rateCards).values({ clubId: fx.clubId, clubMemberId: m.clubMemberId, hourlyRateCents: 700, validFrom: "2020-01-01" }).returning();
+    expect((await call(m, "/time-entries/clock-in", "POST", {})).status).toBe(201);
+    await db.delete(rateCards).where(eq(rateCards.id, card!.id)); // the rate lapses while the clock runs
+    const current = (await fx.json(await call(m, "/time-entries/current"))).data;
+    expect(current).toMatchObject({ running: true });
+    expect((await call(m, "/time-entries", "POST", { startedAt: hoursAgo(3).toISOString(), endedAt: hoursAgo(2).toISOString() })).status).toBe(403);
+    expect((await call(m, "/time-entries/clock-out", "POST")).status).toBe(200);
+    // A second running entry that is older than 16 h cannot be closed (422 too_long), but can be deleted.
+    const [old] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: m.clubMemberId, startedAt: hoursAgo(40), source: "stempeln", status: "offen" }).returning();
+    const stop = await call(m, "/time-entries/clock-out", "POST");
+    expect(stop.status).toBe(422);
+    expect((await fx.json(stop)).error.details.code).toBe("too_long");
+    expect((await call(m, `/time-entries/${old!.id}`, "DELETE")).status).toBe(204);
+    const [mine] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: m.clubMemberId, startedAt: hoursAgo(5), endedAt: hoursAgo(4), source: "manuell", status: "offen" }).returning();
+    expect((await call(m, `/time-entries/${mine!.id}`, "DELETE")).status).toBe(204);
+  });
+
+  it("refuses a too large report instead of truncating, and filters in SQL so a small selection is not crowded out", async () => {
+    const before = REPORT_LIMITS.entries;
+    REPORT_LIMITS.entries = 3;
+    try {
+      for (const format of ["json", "csv", "xlsx"]) {
+        const res = await call(fx.users.board, `/time-report?format=${format}`);
+        expect(res.status, format).toBe(422);
+        expect((await fx.json(res)).error.details.code).toBe("report_too_large");
+      }
+      // One person with one entry in a club that holds many more: still complete.
+      const one = (await fx.json(await call(fx.users.board, `/time-report?clubMemberIds=${fx.users.leaderA.clubMemberId}`))).data;
+      expect(one.totals.minutes).toBe(30);
+      expect((await fx.json(await call(fx.users.leaderA, `/time-report?clubMemberIds=${fx.users.leaderA.clubMemberId}`))).data.totals.minutes).toBe(30);
+    } finally {
+      REPORT_LIMITS.entries = before;
+    }
+    const peopleBefore = REPORT_LIMITS.people;
+    REPORT_LIMITS.people = 2;
+    try {
+      const data = (await fx.json(await call(fx.users.board, "/time-report/people"))).data;
+      expect(data.people).toHaveLength(2);
+      expect(data.truncated).toBe(true);
+    } finally {
+      REPORT_LIMITS.people = peopleBefore;
+    }
+    expect((await fx.json(await call(fx.users.board, "/time-report/people"))).data.truncated).toBe(false);
+  });
+
+  it("matches the implicit role mitglied, shows hidden events as Termin, and flags missing rates in the exports", async () => {
+    const members = (await fx.json(await call(fx.users.board, "/time-report?roleTypes=mitglied"))).data.rows.map((r: any) => r.displayName); // eslint-disable-line @typescript-eslint/no-explicit-any
+    expect(members).toEqual(expect.arrayContaining(["Trainer A", "Leiter A"]));
+    expect(members).not.toContain("=1+1"); // no account
+    const [secret] = await db.insert(calendars).values({ clubId: fx.clubId, name: "Geheim", createdBy: fx.users.board.userId }).returning();
+    await db.insert(calendarVisibility).values({ calendarId: secret!.id, roleType: "vorsitz" });
+    const kassenwart = await fx.addAccount("Kassenwart");
+    await db.insert(clubRoles).values({ memberId: kassenwart.memberId, roleType: "kassenwart" });
+    const hidden = await fx.addEvent({ calendarId: secret!.id, startsAt: hoursAgo(6), endsAt: hoursAgo(5), title: "Geheimtreffen" });
+    await confirmed(fx.users.trainerA.clubMemberId, 6, 60, hidden.id);
+    const titles = async (who: TestUser) => (await fx.json(await call(who, `/time-report?groupBy=event&eventId=${hidden.id}`))).data.rows.map((r: any) => r.eventTitle); // eslint-disable-line @typescript-eslint/no-explicit-any
+    expect(await titles(kassenwart)).toEqual(["Termin"]);
+    expect(await titles(fx.users.board)).toEqual(["Geheimtreffen"]);
+    const peopleEvents = (await fx.json(await call(kassenwart, "/time-report/people"))).data.events.find((e: any) => e.eventId === hidden.id); // eslint-disable-line @typescript-eslint/no-explicit-any
+    expect(peopleEvents.title).toBe("Termin");
+    const csv = await (await call(fx.users.board, "/time-report")).text().then(() => call(fx.users.board, "/time-report?format=csv").then((r) => r.text()));
+    expect(csv).toContain("Betrag (EUR);Satz fehlt");
+    expect(csv).toMatch(/Leiter A;[^\r\n]*;ja\r\n/);
+    const sheet = sheetOf(new Uint8Array(await (await call(fx.users.board, "/time-report?format=xlsx")).arrayBuffer()));
+    expect(sheet).toContain("Satz fehlt");
+    expect(sheet).toContain("<t xml:space=\"preserve\">ja</t>");
+    const jsonRes = await call(fx.users.board, "/time-report");
+    expect(jsonRes.headers.get("cache-control")).toBe("private, no-store");
+    expect((await call(fx.users.board, "/time-report/people")).headers.get("cache-control")).toBe("private, no-store");
+    // The department lead's XLSX carries a totals row (hours only).
+    const leadSheet = sheetOf(new Uint8Array(await (await call(fx.users.leaderA, "/time-report?format=xlsx")).arrayBuffer()));
+    expect(leadSheet).toContain("Summe");
+    expect(leadSheet).toMatch(/Summe[\s\S]*<v>5\.5<\/v>/);
+  });
+
+  it("rejects overlapping rate cards of the same target and ignores expired department roles", async () => {
+    const post = (body: object) => call(fx.users.board, "/rate-cards", "POST", body);
+    const first = await post({ roleType: "beisitzer", hourlyRateCents: 1000, validFrom: "2024-01-01", validUntil: "2024-12-31" });
+    expect(first.status).toBe(201);
+    const overlap = await post({ roleType: "beisitzer", hourlyRateCents: 1100, validFrom: "2024-12-31" });
+    expect(overlap.status).toBe(409);
+    expect((await fx.json(overlap)).error.details.code).toBe("rate_overlap");
+    expect((await post({ roleType: "beisitzer", hourlyRateCents: 1100, validFrom: "2025-01-01" })).status).toBe(201); // adjacent is fine
+    expect((await post({ roleType: "kassenwart", hourlyRateCents: 1100, validFrom: "2024-06-01" })).status).toBe(201); // other target
+    const id = (await fx.json(first)).data.id;
+    expect((await call(fx.users.board, `/rate-cards/${id}`, "PATCH", { validUntil: null })).status).toBe(409);
+    expect((await call(fx.users.board, `/rate-cards/${id}`, "PATCH", { hourlyRateCents: 1010 })).status).toBe(200);
+    // An expired department role no longer widens the scope.
+    const expired = await fx.addAccount("Ehemaliger Leiter");
+    await db.insert(clubRoles).values({ memberId: expired.memberId, roleType: "abteilungsleitung", departmentId: fx.deptA, termEndsAt: "2020-01-01" });
+    expect(await ownDepartmentIds(expired.memberId, ["abteilungsleitung"])).toEqual([]);
+    expect(await ownDepartmentIds(fx.users.leaderA.memberId, ["abteilungsleitung"])).toEqual([fx.deptA]);
   });
 });
 

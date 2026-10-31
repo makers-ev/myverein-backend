@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, isNull, lte, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import { clubMemberDepartments, clubMembers } from "../db/schema/club-members.js";
@@ -45,9 +45,16 @@ async function accountRoleTypes(accountIds: string[]): Promise<Map<string, strin
  * `canTrack`: trainers, department leads and `time:write` holders as before, or anybody with an applicable rate.
  */
 export async function trackingCapability(clubId: string, clubMemberId: string | null, roleTypes: readonly string[]): Promise<{ canTrack: boolean; hasRate: boolean }> {
-  const cards = await db.select().from(rateCards).where(eq(rateCards.clubId, clubId));
-  const hasRate = clubMemberId !== null && rateOn(cards, clubMemberId, roleTypes, todayBerlin()) !== null;
+  const hasRate = clubMemberId !== null && (await todaysRate(clubId, clubMemberId, roleTypes)) !== null;
   return { canTrack: hasRate || mayTrackTime(roleTypes), hasRate };
+}
+
+/** Today's applicable rate of a person: only their personal and role-type cards that are valid today are read (in SQL). */
+async function todaysRate(clubId: string, clubMemberId: string, roleTypes: readonly string[]): Promise<number | null> {
+  const today = todayBerlin();
+  const target = roleTypes.length > 0 ? or(eq(rateCards.clubMemberId, clubMemberId), inArray(rateCards.roleType, [...roleTypes])) : eq(rateCards.clubMemberId, clubMemberId);
+  const cards = await db.select().from(rateCards).where(and(eq(rateCards.clubId, clubId), lte(rateCards.validFrom, today), or(isNull(rateCards.validUntil), gte(rateCards.validUntil, today)), target));
+  return rateOn(cards, clubMemberId, roleTypes, today);
 }
 
 /** Deny by default: 403 `no_rate` unless the caller may track (see `trackingCapability`). */
@@ -104,6 +111,19 @@ export function rateOn(cards: readonly RateCardRow[], clubMemberId: string, role
   return pick(cards.filter((c) => c.roleType !== null && roleTypes.includes(c.roleType)))?.hourlyRateCents ?? null;
 }
 
+/** Start of a Europe/Berlin calendar day as an instant (DST aware). Period bounds are `[berlinDayStart(from), berlinDayStart(to + 1 day))`. */
+export function berlinDayStart(day: string): Date {
+  const utcMidnight = Date.parse(`${day}T00:00:00Z`);
+  for (const offsetHours of [2, 1]) {
+    const t = new Date(utcMidnight - offsetHours * 3_600_000);
+    if (todayBerlin(t) === day && todayBerlin(new Date(t.getTime() - 1)) !== day) return t;
+  }
+  return new Date(utcMidnight - 3_600_000);
+}
+
+/** Maximum number of entries one report (or export) may cover; larger reports are refused with 422 `report_too_large`, never truncated. Mutable for tests. */
+export const REPORT_LIMITS = { entries: 20_000, people: 1_000, events: 300 };
+
 export const REPORT_GROUPS = ["person", "event", "person_event"] as const;
 export type ReportGroup = (typeof REPORT_GROUPS)[number];
 
@@ -123,10 +143,14 @@ export interface ReportRow {
 }
 
 export interface ReportOptions {
+  /** Inclusive start instant. */
   from: Date;
+  /** EXCLUSIVE end instant (start of the day after the last day). */
   to: Date;
   scope: TimeScope;
   withRates: boolean;
+  /** Calendars whose event titles the viewer may see; `null` = all. Other events show the title "Termin". */
+  visibleCalendarIds?: Set<string> | null | undefined;
   departmentId?: string | undefined;
   clubMemberIds?: string[] | undefined;
   roleTypes?: string[] | undefined;
@@ -135,34 +159,58 @@ export interface ReportOptions {
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
+const IMPLICIT_ROLE = "mitglied";
 
-/** Confirmed entries of a period, filtered and grouped; amounts only when `withRates`. `people` is always the per-person sum. */
+/** SQL condition: the club member holds one of `types` (explicit roles in term; the implicit `mitglied` = any member with an account). */
+function holdsRole(types: readonly string[]) {
+  const explicit = types.filter((t) => t !== IMPLICIT_ROLE);
+  const today = todayBerlin();
+  const parts = [] as ReturnType<typeof sql>[];
+  if (explicit.length > 0) parts.push(sql`${clubMembers.memberId} IN (SELECT ${clubRoles.memberId} FROM ${clubRoles} WHERE ${inArray(clubRoles.roleType, explicit)} AND (${clubRoles.termEndsAt} IS NULL OR ${clubRoles.termEndsAt} >= ${today}))`);
+  if (types.includes(IMPLICIT_ROLE)) parts.push(sql`${clubMembers.memberId} IS NOT NULL`);
+  return parts.length === 0 ? sql`false` : sql`(${sql.join(parts, sql` OR `)})`;
+}
+
+function tooLarge(): never {
+  throw new ValidationError("The report is too large. Narrow the period or the selection.", { details: { code: "report_too_large" } });
+}
+
+/** Confirmed entries of a period, filtered (all filters in SQL) and grouped; amounts only when `withRates`. `people` is always the per-person sum. */
 export async function buildReport(clubId: string, opts: ReportOptions): Promise<{ groupBy: ReportGroup; rows: ReportRow[]; people: ReportRow[]; totals: { minutes: number; hours: number; amountCents: number | null } }> {
   const groupBy = opts.groupBy ?? "person";
-  const wanted = opts.clubMemberIds && opts.clubMemberIds.length > 0 ? new Set(opts.clubMemberIds) : null;
+  const empty = { groupBy, rows: [], people: [], totals: { minutes: 0, hours: 0, amountCents: opts.withRates ? 0 : null } };
+  if (opts.scope.clubMemberIds !== null && opts.scope.clubMemberIds.size === 0) return empty;
+  const conditions = [
+    eq(timeEntries.clubId, clubId),
+    eq(timeEntries.status, "bestaetigt"),
+    isNotNull(timeEntries.endedAt),
+    gte(timeEntries.startedAt, opts.from),
+    lt(timeEntries.startedAt, opts.to),
+    opts.scope.clubMemberIds !== null ? inArray(timeEntries.clubMemberId, [...opts.scope.clubMemberIds]) : undefined,
+    opts.clubMemberIds && opts.clubMemberIds.length > 0 ? inArray(timeEntries.clubMemberId, opts.clubMemberIds) : undefined,
+    opts.eventId ? eq(timeEntries.eventId, opts.eventId) : undefined,
+    opts.departmentId
+      ? inArray(
+          timeEntries.clubMemberId,
+          db
+            .select({ id: clubMemberDepartments.clubMemberId })
+            .from(clubMemberDepartments)
+            .where(and(eq(clubMemberDepartments.departmentId, opts.departmentId), lte(clubMemberDepartments.since, todayBerlin()), or(isNull(clubMemberDepartments.until), gte(clubMemberDepartments.until, todayBerlin())))),
+        )
+      : undefined,
+    opts.roleTypes && opts.roleTypes.length > 0 ? holdsRole(opts.roleTypes) : undefined,
+  ];
   const rows = await db
-    .select({ entry: timeEntries, name: clubMembers.displayName, accountId: clubMembers.memberId, eventTitle: events.title, eventStartsAt: events.startsAt })
+    .select({ entry: timeEntries, name: clubMembers.displayName, accountId: clubMembers.memberId, eventTitle: events.title, eventStartsAt: events.startsAt, calendarId: events.calendarId })
     .from(timeEntries)
     .innerJoin(clubMembers, eq(clubMembers.id, timeEntries.clubMemberId))
     .leftJoin(events, eq(events.id, timeEntries.eventId))
-    .where(and(eq(timeEntries.clubId, clubId), eq(timeEntries.status, "bestaetigt"), gte(timeEntries.startedAt, opts.from), lte(timeEntries.startedAt, opts.to), opts.eventId ? eq(timeEntries.eventId, opts.eventId) : undefined))
-    .limit(20_000);
-  let inReport = rows.filter((r) => r.entry.endedAt !== null && inScope(opts.scope, r.entry.clubMemberId) && (wanted === null || wanted.has(r.entry.clubMemberId)));
-  if (opts.departmentId) {
-    const today = todayBerlin();
-    const members = await db
-      .select({ id: clubMemberDepartments.clubMemberId })
-      .from(clubMemberDepartments)
-      .where(and(eq(clubMemberDepartments.departmentId, opts.departmentId), lte(clubMemberDepartments.since, today), or(isNull(clubMemberDepartments.until), gte(clubMemberDepartments.until, today))));
-    const set = new Set(members.map((m) => m.id));
-    inReport = inReport.filter((r) => set.has(r.entry.clubMemberId));
-  }
-  const accounts = [...new Set(inReport.flatMap((r) => (r.accountId ? [r.accountId] : [])))];
+    .where(and(...conditions))
+    .orderBy(asc(timeEntries.startedAt), asc(timeEntries.id))
+    .limit(REPORT_LIMITS.entries + 1);
+  if (rows.length > REPORT_LIMITS.entries) tooLarge();
+  const accounts = [...new Set(rows.flatMap((r) => (r.accountId ? [r.accountId] : [])))];
   const rolesByAccount = await accountRoleTypes(accounts);
-  if (opts.roleTypes && opts.roleTypes.length > 0) {
-    const want = new Set(opts.roleTypes);
-    inReport = inReport.filter((r) => r.accountId !== null && (rolesByAccount.get(r.accountId) ?? []).some((t) => want.has(t)));
-  }
   const cards = opts.withRates ? await db.select().from(rateCards).where(eq(rateCards.clubId, clubId)) : [];
 
   type Acc = ReportRow & { rates: Set<number> };
@@ -185,14 +233,16 @@ export async function buildReport(clubId: string, opts: ReportOptions): Promise<
     }
     map.set(key, acc);
   };
-  for (const { entry, name, accountId, eventTitle, eventStartsAt } of inReport) {
+  for (const { entry, name, accountId, eventTitle, eventStartsAt, calendarId } of rows) {
     const minutes = minutesOf(entry)!;
     const explicit = accountId ? (rolesByAccount.get(accountId) ?? []).filter((t, i, a) => a.indexOf(t) === i).sort() : [];
-    const rate = opts.withRates ? rateOn(cards, entry.clubMemberId, accountId ? ["mitglied", ...explicit] : [], entry.startedAt.toISOString().slice(0, 10)) : null;
-    const eventDate = eventStartsAt ? eventStartsAt.toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" }) : null;
+    // The rate is the one of the entry's Berlin day; the roles are today's (club_roles has no start date).
+    const rate = opts.withRates ? rateOn(cards, entry.clubMemberId, accountId ? [IMPLICIT_ROLE, ...explicit] : [], todayBerlin(entry.startedAt)) : null;
+    const eventDate = eventStartsAt ? todayBerlin(eventStartsAt) : null;
+    const title = eventTitle === null ? null : opts.visibleCalendarIds === null || opts.visibleCalendarIds === undefined || (calendarId !== null && opts.visibleCalendarIds.has(calendarId)) ? eventTitle : "Termin";
     const person = () => make({ memberId: entry.clubMemberId, name, roles: explicit, eventId: null, title: null, date: null });
-    const eventRow = () => make({ memberId: null, name: null, roles: [], eventId: entry.eventId, title: eventTitle, date: eventDate });
-    const both = () => make({ memberId: entry.clubMemberId, name, roles: explicit, eventId: entry.eventId, title: eventTitle, date: eventDate });
+    const eventRow = () => make({ memberId: null, name: null, roles: [], eventId: entry.eventId, title, date: eventDate });
+    const both = () => make({ memberId: entry.clubMemberId, name, roles: explicit, eventId: entry.eventId, title, date: eventDate });
     add(perPerson, entry.clubMemberId, person, minutes, rate);
     if (groupBy === "person") continue;
     if (groupBy === "event") add(grouped, entry.eventId ?? "none", eventRow, minutes, rate);
@@ -208,30 +258,45 @@ export async function buildReport(clubId: string, opts: ReportOptions): Promise<
   return { groupBy, rows: out, people, totals: { minutes, hours: round2(minutes / 60), amountCents: opts.withRates ? people.reduce((n, p) => n + (p.amountCents ?? 0), 0) : null } };
 }
 
-/** People (members with confirmed entries in the period, or with an applicable rate) and role types for the report selector. */
-export async function reportPeople(clubId: string, opts: { from: Date; to: Date; scope: TimeScope; withRates: boolean }) {
-  const entryRows = await db
-    .select({ id: timeEntries.clubMemberId, eventId: timeEntries.eventId })
-    .from(timeEntries)
-    .where(and(eq(timeEntries.clubId, clubId), eq(timeEntries.status, "bestaetigt"), gte(timeEntries.startedAt, opts.from), lte(timeEntries.startedAt, opts.to)))
-    .limit(20_000);
-  const ids = new Set(entryRows.filter((r) => inScope(opts.scope, r.id)).map((r) => r.id));
-  const eventIds = new Set(entryRows.filter((r) => inScope(opts.scope, r.id) && r.eventId).map((r) => r.eventId!));
-  const members = await db.select({ id: clubMembers.id, name: clubMembers.displayName, accountId: clubMembers.memberId }).from(clubMembers).where(eq(clubMembers.clubId, clubId));
-  const rolesByAccount = await accountRoleTypes(members.flatMap((m) => (m.accountId ? [m.accountId] : [])));
+/** People (members with confirmed entries in the period, or with an applicable rate today), role types and events for the report selector. Bounded; `truncated` flags a cut list. */
+export async function reportPeople(clubId: string, opts: { from: Date; to: Date; scope: TimeScope; withRates: boolean; visibleCalendarIds?: Set<string> | null | undefined }) {
+  const none = { people: [], roleTypes: [], events: [], truncated: false };
+  if (opts.scope.clubMemberIds !== null && opts.scope.clubMemberIds.size === 0) return none;
+  const entryWhere = and(
+    eq(timeEntries.clubId, clubId),
+    eq(timeEntries.status, "bestaetigt"),
+    isNotNull(timeEntries.endedAt),
+    gte(timeEntries.startedAt, opts.from),
+    lt(timeEntries.startedAt, opts.to),
+    opts.scope.clubMemberIds !== null ? inArray(timeEntries.clubMemberId, [...opts.scope.clubMemberIds]) : undefined,
+  );
+  const withHours = (await db.selectDistinct({ id: timeEntries.clubMemberId }).from(timeEntries).where(entryWhere).limit(REPORT_LIMITS.people + 1)).map((r) => r.id);
+  const ids = new Set(withHours);
   if (opts.withRates) {
-    const cards = await db.select().from(rateCards).where(eq(rateCards.clubId, clubId));
     const today = todayBerlin();
-    for (const m of members) if (rateOn(cards, m.id, m.accountId ? ["mitglied", ...(rolesByAccount.get(m.accountId) ?? [])] : [], today) !== null) ids.add(m.id);
+    const valid = await db.select().from(rateCards).where(and(eq(rateCards.clubId, clubId), lte(rateCards.validFrom, today), or(isNull(rateCards.validUntil), gte(rateCards.validUntil, today))));
+    for (const c of valid) if (c.clubMemberId) ids.add(c.clubMemberId);
+    const types = [...new Set(valid.flatMap((c) => (c.roleType ? [c.roleType] : [])))];
+    if (types.length > 0) {
+      const byRole = await db.select({ id: clubMembers.id }).from(clubMembers).where(and(eq(clubMembers.clubId, clubId), holdsRole(types))).limit(REPORT_LIMITS.people + 1);
+      for (const m of byRole) ids.add(m.id);
+    }
   }
-  const people = members
-    .filter((m) => ids.has(m.id))
+  const members = ids.size === 0 ? [] : await db.select({ id: clubMembers.id, name: clubMembers.displayName, accountId: clubMembers.memberId }).from(clubMembers).where(and(eq(clubMembers.clubId, clubId), inArray(clubMembers.id, [...ids]))).orderBy(asc(clubMembers.displayName)).limit(REPORT_LIMITS.people + 1);
+  let truncated = members.length > REPORT_LIMITS.people;
+  const shown = members.slice(0, REPORT_LIMITS.people);
+  const rolesByAccount = await accountRoleTypes(shown.flatMap((m) => (m.accountId ? [m.accountId] : [])));
+  const people = shown
     .map((m) => ({ clubMemberId: m.id, displayName: m.name, roleTypes: [...new Set(m.accountId ? (rolesByAccount.get(m.accountId) ?? []) : [])].sort() }))
-    .sort((a, b) => a.displayName.localeCompare(b.displayName, "de"))
-    .slice(0, 1000);
+    .sort((a, b) => a.displayName.localeCompare(b.displayName, "de"));
   const roleTypes = [...new Set(people.flatMap((p) => p.roleTypes))].sort();
-  const eventList = eventIds.size
-    ? await db.select({ id: events.id, title: events.title, startsAt: events.startsAt }).from(events).where(inArray(events.id, [...eventIds])).orderBy(desc(events.startsAt)).limit(300)
-    : [];
-  return { people, roleTypes, events: eventList.map((e) => ({ eventId: e.id, title: e.title, startsAt: e.startsAt })) };
+  const eventRows = await db
+    .select({ id: events.id, title: events.title, startsAt: events.startsAt, calendarId: events.calendarId })
+    .from(events)
+    .where(inArray(events.id, db.select({ id: timeEntries.eventId }).from(timeEntries).where(and(entryWhere, isNotNull(timeEntries.eventId)))))
+    .orderBy(desc(events.startsAt))
+    .limit(REPORT_LIMITS.events + 1);
+  if (eventRows.length > REPORT_LIMITS.events) truncated = true;
+  const eventList = eventRows.slice(0, REPORT_LIMITS.events).map((e) => ({ eventId: e.id, title: opts.visibleCalendarIds === null || opts.visibleCalendarIds === undefined || opts.visibleCalendarIds.has(e.calendarId) ? e.title : "Termin", startsAt: e.startsAt }));
+  return { people, roleTypes, events: eventList, truncated };
 }
