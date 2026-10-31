@@ -25,6 +25,12 @@ COPY --from=builder --chown=hono:nodejs /app/assets ./assets
 COPY --chown=hono:nodejs docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
 
+# Uploads (damage photos, club registration proofs) are written at runtime by the non-root `hono` user. /app is
+# root-owned, so the default ./uploads cannot be created there (EACCES -> 500) -- use a dedicated, hono-owned dir
+# that compose mounts as a named volume so files also survive redeploys.
+RUN mkdir -p /data/uploads && chown -R hono:nodejs /data
+ENV UPLOADS_DIR=/data/uploads
+
 USER hono
 EXPOSE 3000
 

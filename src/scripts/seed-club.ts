@@ -4,8 +4,9 @@ import { and, eq } from "drizzle-orm";
 import { auth } from "../auth/auth.js";
 import { user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
-import { clubMemberships } from "../db/schema/club-memberships.js";
 import { clubRoles } from "../db/schema/club-roles.js";
+import { ensureDefaultCalendar } from "../lib/calendar-defaults.js";
+import { ensureClubMember } from "../lib/club-members.js";
 
 /**
  * Idempotent demo-club bootstrap, same pattern as seed-admin.ts. Creates one
@@ -64,15 +65,10 @@ async function main() {
     console.log(`[seed-club] added ${email} as member (id=${membershipId})`);
   }
 
-  const existingClubMembership = await db.query.clubMemberships.findFirst({ where: eq(clubMemberships.memberId, membershipId) });
-  if (!existingClubMembership) {
-    await db.insert(clubMemberships).values({
-      memberId: membershipId,
-      category: "aktiv",
-      joinedAt: new Date().toISOString().slice(0, 10),
-    });
-    console.log("[seed-club] created club_memberships row");
-  }
+  // Every account member needs a club_members row (ADR-003); the Better Auth hook creates it, this repairs older seeds.
+  const memberRow = await db.query.member.findFirst({ where: (m, { eq }) => eq(m.id, membershipId) });
+  const clubMember = await ensureClubMember(db, memberRow!, { user: adminUser });
+  console.log(`[seed-club] club member ${clubMember.id} (${clubMember.memberNumber ?? "no number"})`);
 
   const existingRole = await db.query.clubRoles.findFirst({
     where: and(eq(clubRoles.memberId, membershipId), eq(clubRoles.roleType, "vorsitz")),
@@ -81,6 +77,9 @@ async function main() {
     await db.insert(clubRoles).values({ memberId: membershipId, roleType: "vorsitz" });
     console.log("[seed-club] assigned role vorsitz");
   }
+
+  const calendar = await ensureDefaultCalendar(clubId, { createdBy: adminUser.id, source: "club_creation" });
+  console.log(`[seed-club] default calendar ${calendar?.id ?? "none"}`);
 
   console.log(`[seed-club] done. clubId=${clubId}`);
 }

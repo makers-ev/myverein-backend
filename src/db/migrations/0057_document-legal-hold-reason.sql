@@ -1,0 +1,1 @@
+ALTER TABLE "documents" ADD COLUMN "legal_hold_reason" text;

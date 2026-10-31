@@ -57,6 +57,363 @@
       "when": 1789716499033,
       "tag": "0007_kind_reavers",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789738221957,
+      "tag": "0008_hot_jack_murdock",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1789922354515,
+      "tag": "0009_sticky_ronan",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789931225770,
+      "tag": "0010_romantic_talos",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790259864082,
+      "tag": "0011_unique-club-roles",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1791194211455,
+      "tag": "0012_club-applications",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1791199610293,
+      "tag": "0013_club-registrations",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1791735900432,
+      "tag": "0014_member-foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1791736670635,
+      "tag": "0015_member-lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1791737171404,
+      "tag": "0016_roles-scoping",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1791737365917,
+      "tag": "0017_member-search-index",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1791738714250,
+      "tag": "0018_member-invites-exit-requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1791742430860,
+      "tag": "0019_media-security-layer",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1791743766173,
+      "tag": "0020_media-legacy-photo-keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1791744078444,
+      "tag": "0021_key-history-wifi-security",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1791811775508,
+      "tag": "0022_configurable-forms",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1791812190564,
+      "tag": "0023_form-versions-one-published",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791829112761,
+      "tag": "0024_form-applicant-categories",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1791831570986,
+      "tag": "0025_form-decision-internal-note",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1791832369237,
+      "tag": "0026_child-applications",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1792226106997,
+      "tag": "0027_default-calendars",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1792228572500,
+      "tag": "0028_profile-modules",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1792229833416,
+      "tag": "0029_calendar-creator-set-null",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1792239885474,
+      "tag": "0030_guardian-entered-via",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1792316641210,
+      "tag": "0031_communication-and-job-queue",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1792317264790,
+      "tag": "0032_delivery-content",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1792321248143,
+      "tag": "0033_rate-limit-events",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1792321746983,
+      "tag": "0034_club-settings-text-blocks",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1792322597882,
+      "tag": "0035_delivery-idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1792481219884,
+      "tag": "0036_notify-board-requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1792481450420,
+      "tag": "0037_notify-meeting-invites",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1792481884239,
+      "tag": "0038_reminder-invitations-credentials",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1792482132945,
+      "tag": "0039_notify-handover",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1792484059682,
+      "tag": "0040_registration-dedupe",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1792484336565,
+      "tag": "0041_notify-age-transition",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1792484617007,
+      "tag": "0042_preferences-per-club",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1792581170067,
+      "tag": "0043_privacy-consent-foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1792584430242,
+      "tag": "0044_privacy-erasure",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1792585376631,
+      "tag": "0045_retention-notice",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1792588154703,
+      "tag": "0046_creator-references-survive-account",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1792785932784,
+      "tag": "0047_assembly-rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1792786118010,
+      "tag": "0048_assembly-schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1792786149710,
+      "tag": "0049_meetings-club-member-cutover",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1792788177094,
+      "tag": "0050_ballots-lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1792789978592,
+      "tag": "0051_minutes-approval",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1792846159527,
+      "tag": "0052_assembly-review-fixes",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1792941780503,
+      "tag": "0053_events-all-day",
+      "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1792942064349,
+      "tag": "0054_events-series-attendance-helpers",
+      "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1793190803743,
+      "tag": "0055_documents-foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1793195527704,
+      "tag": "0056_acknowledgement-proof",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1793278118081,
+      "tag": "0057_document-legal-hold-reason",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1793278280173,
+      "tag": "0058_acknowledgement-status-check",
+      "breakpoints": true
     }
   ]
 }

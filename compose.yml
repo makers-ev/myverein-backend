@@ -9,10 +9,11 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      # 5433, not 5432 -- avoids colliding with other products' Postgres
+      # 5434, not 5432 -- avoids colliding with other products' Postgres
       # containers already bound to the default host port during local dev
-      # (e.g. mycouple-backend-db-1).
-      - "5433:5432"
+      # (e.g. mycouple-backend-db-1 on 5432, an unrelated SHS-DB container
+      # on 5433).
+      - "5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-auth_backend_template}"]
       interval: 5s
@@ -39,6 +40,16 @@ services:
       # crash-loop the container. The Docker path always needs "production"
       # regardless of what a developer's .env says.
       NODE_ENV: production
+      # .env's BIND_HOST=127.0.0.1 is for host-mode `npm run dev` (direct
+      # process). Inside a container the app must bind 0.0.0.0 so Docker's
+      # published-port forwarding can reach it; the `ports:` mapping's
+      # left-hand address (which still reads .env's BIND_HOST) controls
+      # external access.
+      BIND_HOST: 0.0.0.0
+    volumes:
+      # Persistent upload storage (UPLOADS_DIR=/data/uploads, set in the Dockerfile). A named volume takes over the
+      # image directory's hono ownership on first mount.
+      - uploads:/data/uploads
     env_file:
       - .env
     ports:
@@ -59,3 +70,4 @@ services:
 
 volumes:
   pgdata:
+  uploads:

@@ -1,0 +1,90 @@
+import { bigint, boolean, integer, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+
+import { organization } from "../../auth/auth-schema.js";
+
+export const NOTICE_MODES = ["month_end", "quarter_end", "year_end", "immediate"] as const;
+/** Reusable text snippet of a club (e.g. the default cancellation text); plain text, inserted by the client into the editor. */
+export interface ClubTextBlock {
+  key: string;
+  title: string;
+  text: string;
+}
+
+export type NoticeMode = (typeof NOTICE_MODES)[number];
+
+/** Club-wide parameters (1:1 with `organization`). A missing row means "all defaults". */
+export const clubSettings = pgTable("club_settings", {
+  clubId: text("club_id")
+    .primaryKey()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  noticePeriodDays: integer("notice_period_days"),
+  // One of NOTICE_MODES (validated via Zod, free text in the DB).
+  noticeMode: text("notice_mode"),
+  memberNumberPrefix: text("member_number_prefix"),
+  allowSelfLoans: boolean("allow_self_loans").notNull().default(true),
+  // Club mail template (Wave 9). The sender ADDRESS stays EMAIL_FROM (SPF/DKIM), only name/signature/reply-to are per club.
+  senderName: text("sender_name"),
+  signature: text("signature"),
+  replyTo: text("reply_to"),
+  // Optional text blocks (Wave 9 B15): array of ClubTextBlock, validated by the route; NULL = none.
+  textBlocks: jsonb("text_blocks").$type<ClubTextBlock[]>(),
+  // IANA zone the club's time-based logic (reminders, sweeps) is computed in; instants are stored as UTC.
+  timezone: text("timezone").notNull().default("Europe/Berlin"),
+  // German federal state (ISO 3166-2:DE code without prefix, e.g. "BY") for the public holidays of series; NULL = nationwide holidays only.
+  state: text("state"),
+  reminderEventEnabled: boolean("reminder_event_enabled").notNull().default(true),
+  reminderEventLeadHours: integer("reminder_event_lead_hours").notNull().default(24),
+  reminderLoanEnabled: boolean("reminder_loan_enabled").notNull().default(true),
+  reminderLoanLeadDays: integer("reminder_loan_lead_days").notNull().default(1),
+  reminderMaintenanceEnabled: boolean("reminder_maintenance_enabled").notNull().default(true),
+  reminderMaintenanceLeadDays: integer("reminder_maintenance_lead_days").notNull().default(7),
+  reminderRsvpEnabled: boolean("reminder_rsvp_enabled").notNull().default(true),
+  reminderRsvpLeadDays: integer("reminder_rsvp_lead_days").notNull().default(3),
+  // Tell the reviewers (`members:write`) that a member invitation is about to expire / expired unaccepted.
+  reminderInvitationEnabled: boolean("reminder_invitation_enabled").notNull().default(true),
+  reminderInvitationLeadDays: integer("reminder_invitation_lead_days").notNull().default(3),
+  // Tell holders (and guardians) that a credential (custom field type `credential`, `validUntil`) is about to expire / expired.
+  reminderCredentialEnabled: boolean("reminder_credential_enabled").notNull().default(true),
+  reminderCredentialLeadDays: integer("reminder_credential_lead_days").notNull().default(30),
+  // Apply the age transition (member categories) automatically instead of only suggesting it. Default off.
+  ageTransitionAuto: boolean("age_transition_auto").notNull().default(false),
+  // Tell the members who review requests (`members:write`) about a new admission application / exit request (default on).
+  notifyBoardRequests: boolean("notify_board_requests").notNull().default(true),
+  // Tell people when they are invited to a meeting / a Terminfindung (default on).
+  notifyMeetingInvites: boolean("notify_meeting_invites").notNull().default(true),
+  // Tell members (and guardians) when the age transition moved them to another member category (default on).
+  notifyAgeTransition: boolean("notify_age_transition").notNull().default(true),
+  // Tell people when a loan or a key is handed out, returned or extended (default on).
+  notifyHandover: boolean("notify_handover").notNull().default(true),
+  // Language of the system texts around club mails and pushes (decisions, reminders, event changes, invitations): 'de' | 'en'.
+  // Text written by a person (announcements) is sent as written.
+  mailLanguage: text("mail_language").notNull().default("de"),
+  // Privacy (Wave 10): age from which a person consents alone (below: guardian or board with paper proof), whether BOTH
+  // guardians are needed, the privacy contact and the controller (Verantwortlicher) as free text for the privacy notice.
+  consentAgeLimit: integer("consent_age_limit").notNull().default(18),
+  consentBothGuardians: boolean("consent_both_guardians").notNull().default(false),
+  privacyContact: text("privacy_contact"),
+  privacyController: text("privacy_controller"),
+  // Statute parameters of the general assembly (Wave 11): validated `AssemblyRules` (lib/assembly-rules.ts). NULL = nothing set yet;
+  // the legal parameters have no defaults on purpose (the club has to state them before the first invitation).
+  assemblyRules: jsonb("assembly_rules").$type<Record<string, unknown>>(),
+  // Branding of generated documents (Wave 13 B7): logo (storage key of a validated PNG/JPEG in media_files, never a URL),
+  // colours as #RRGGBB and the plain-text letterhead. All NULL = neutral default look.
+  brandLogoKey: text("brand_logo_key"),
+  brandPrimaryColor: text("brand_primary_color"),
+  brandAccentColor: text("brand_accent_color"),
+  letterheadAddress: text("letterhead_address"),
+  letterheadRegister: text("letterhead_register"),
+  letterheadRepresentatives: text("letterhead_representatives"),
+  letterheadContact: text("letterhead_contact"),
+  letterheadFooter: text("letterhead_footer"),
+  // Storage quota in bytes (Wave 13 B3); NULL = the platform default (`MEDIA_QUOTA_BYTES_PER_CLUB`). The used amount is the
+  // sum of the live `media_files` of the club (single source of truth, read under the same lock as the quota check).
+  storageQuotaBytes: bigint("storage_quota_bytes", { mode: "number" }),
+  // Highest quota threshold already reported to the board (80 or 100); reset when usage falls below 80 %.
+  storageNoticeLevel: integer("storage_notice_level").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ClubSettingsRow = typeof clubSettings.$inferSelect;

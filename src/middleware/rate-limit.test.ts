@@ -54,4 +54,16 @@ describe("rateLimit", () => {
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
   });
+
+  it("can key buckets by a custom function (e.g. per user) instead of the client IP", async () => {
+    const app = new Hono();
+    app.use("*", rateLimit({ windowMs: 60_000, max: 1, key: (c) => c.req.header("x-user") ?? "anon" }));
+    app.get("/", (c) => c.json({ ok: true }));
+    app.onError((err, c) => c.json({ error: (err as Error).message }, 429));
+
+    // Same IP header, different users -> independent buckets; same user twice -> blocked.
+    expect((await app.request("/", { headers: { ...headers, "x-user": "u1" } })).status).toBe(200);
+    expect((await app.request("/", { headers: { ...headers, "x-user": "u2" } })).status).toBe(200);
+    expect((await app.request("/", { headers: { "x-forwarded-for": "9.9.9.9", "x-user": "u1" } })).status).toBe(429);
+  });
 });

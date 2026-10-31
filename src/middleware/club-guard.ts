@@ -4,8 +4,10 @@ import { and, eq } from "drizzle-orm";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { clubRoles } from "../db/schema/club-roles.js";
-import { BadRequestError, NotFoundError } from "../lib/errors.js";
+import { auditContext } from "../lib/audit.js";
+import { resolveClubRoleTypes } from "../lib/club-access.js";
+import { BadRequestError, ForbiddenError, NotFoundError } from "../lib/errors.js";
+import { dpaGate } from "./dpa-gate.js";
 import type { SessionEnv } from "./session-guard.js";
 
 type MemberRow = typeof member.$inferSelect;
@@ -28,7 +30,8 @@ export type ClubEnv = SessionEnv & {
  * `clubId` is read from (in order) a `:clubId` route param, an
  * `X-Club-Id` header, or a `clubId` query param -- routes mounted under a
  * club-scoped path use the param, one-off lookups can use the header/query.
- * A user who isn't a member of the requested club gets 404, never 403 --
+ * `clubRoleTypes` always starts with the implicit `mitglied` role (see
+ * club-permissions.ts). A user who isn't a member of the requested club gets 404, never 403 --
  * same "don't leak existence" convention as the rest of this backend (see
  * accounts.ts's ownership-scoping precedent).
  */
@@ -48,13 +51,27 @@ export const clubGuard = createMiddleware<ClubEnv>(async (c: Context, next: Next
     throw new NotFoundError("Club not found");
   }
 
-  const roleRows = await db.query.clubRoles.findMany({
-    where: eq(clubRoles.memberId, membership.id),
-  });
+  const effective = await resolveClubRoleTypes(membership, clubId);
+  if (effective === null) {
+    throw new NotFoundError("Club not found");
+  }
 
   c.set("clubId", clubId);
+  const auditStore = auditContext.getStore();
+  if (auditStore) auditStore.clubId = clubId;
   c.set("membership", membership);
-  c.set("clubRoleTypes", roleRows.map((row) => row.roleType));
+  c.set("clubRoleTypes", effective);
+
+  // Wave 10 B10: no writing while the club has not accepted the processor agreement (DPA_REQUIRED, grace period).
+  await dpaGate(c, clubId);
 
   await next();
 });
+
+/**
+ * Read routes that hold club-wide data (inventory, departments) are closed to external guests (`member.role = guest`,
+ * e.g. guardians): they reach their ward's data through `/guardian/*` only. Call at the top of the handler.
+ */
+export function denyExternalGuests(c: Context<ClubEnv>): void {
+  if (c.get("membership").role === "guest") throw new ForbiddenError("Not available for external guests");
+}

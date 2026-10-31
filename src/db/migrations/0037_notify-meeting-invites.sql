@@ -1,0 +1,1 @@
+ALTER TABLE "club_settings" ADD COLUMN "notify_meeting_invites" boolean DEFAULT true NOT NULL;

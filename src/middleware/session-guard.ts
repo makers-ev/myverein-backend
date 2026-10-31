@@ -2,6 +2,7 @@ import type { Context, Next } from "hono";
 import { createMiddleware } from "hono/factory";
 
 import { auth } from "../auth/auth.js";
+import { auditContext } from "../lib/audit.js";
 import { UnauthorizedError } from "../lib/errors.js";
 
 type Session = typeof auth.$Infer.Session;
@@ -43,8 +44,9 @@ async function requireSession(c: Context): Promise<Session> {
 }
 
 export const sessionGuard = createMiddleware<SessionEnv>(async (c: Context, next: Next) => {
-  await requireSession(c);
-  await next();
+  const result = await requireSession(c);
+  // The actor of every audit entry written while this request runs (lib/audit.ts).
+  await auditContext.run({ userId: result.user.id }, next);
 });
 
 /** Same as sessionGuard, but only accepts users with an admin role. */
@@ -55,5 +57,5 @@ export const adminGuard = createMiddleware<SessionEnv>(async (c: Context, next: 
     throw new UnauthorizedError("Admin privileges required");
   }
 
-  await next();
+  await auditContext.run({ userId: result.user.id }, next);
 });

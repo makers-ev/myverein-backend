@@ -1,0 +1,1 @@
+ALTER TABLE "document_acknowledgements" ADD CONSTRAINT "document_ack_status_chk" CHECK ("document_acknowledgements"."status" IN ('offen', 'bestaetigt', 'abgelehnt'));

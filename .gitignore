@@ -29,3 +29,7 @@ lerna-debug.log*
 
 # misc
 .DS_Store
+graphify-out/.graphify_python
+
+# local/test upload storage (UPLOADS_DIR)
+/uploads/

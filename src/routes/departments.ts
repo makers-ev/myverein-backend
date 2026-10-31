@@ -5,13 +5,13 @@ import { z } from "zod";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
-import { auditLog } from "../db/schema/audit-log.js";
 import { departments } from "../db/schema/departments.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
-import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
+import { clubGuard, denyExternalGuests, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
+import { writeAudit } from "../lib/audit.js";
 
 export const departmentRoutes = new Hono<ClubEnv>();
 
@@ -20,6 +20,7 @@ departmentRoutes.use("*", sessionGuard);
 departmentRoutes.use("*", clubGuard);
 
 departmentRoutes.get("/", async (c) => {
+  denyExternalGuests(c);
   const clubId = c.get("clubId");
   const rows = await db.query.departments.findMany({
     where: eq(departments.clubId, clubId),
@@ -29,6 +30,7 @@ departmentRoutes.get("/", async (c) => {
 });
 
 departmentRoutes.get("/:id", async (c) => {
+  denyExternalGuests(c);
   const clubId = c.get("clubId");
   const id = c.req.param("id");
 
@@ -63,7 +65,7 @@ departmentRoutes.post(
 
     const row = await db.transaction(async (tx) => {
       const [row] = await tx.insert(departments).values({ clubId, ...body }).returning();
-      await tx.insert(auditLog).values({ eventType: "department.create", subjectId: row.id, payload: { clubId, name: row.name } });
+      await writeAudit(tx, { eventType: "department.create", subjectId: row.id, payload: { clubId, name: row.name } });
       return row;
     });
 
@@ -104,7 +106,7 @@ departmentRoutes.patch(
       .where(and(eq(departments.id, id), eq(departments.clubId, clubId)))
       .returning();
 
-    await db.insert(auditLog).values({ eventType: "department.update", subjectId: id, payload: { clubId, changes: body } });
+    await writeAudit(db, { eventType: "department.update", subjectId: id, payload: { clubId, changedFields: Object.keys(body) } });
 
     return c.json({ data: row });
   },
@@ -122,7 +124,7 @@ departmentRoutes.delete("/:id", async (c) => {
   if (!existing) throw new NotFoundError("Department not found");
 
   await db.delete(departments).where(and(eq(departments.id, id), eq(departments.clubId, clubId)));
-  await db.insert(auditLog).values({ eventType: "department.delete", subjectId: id, payload: { clubId } });
+  await writeAudit(db, { eventType: "department.delete", subjectId: id, payload: { clubId } });
 
   return c.body(null, 204);
 });

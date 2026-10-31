@@ -15,6 +15,20 @@ export default defineConfig([
     },
   },
   {
+    // The audit trail is written through writeAudit (src/lib/audit.ts) only: per-event payload whitelist, club and actor.
+    files: ["src/**/*.ts"],
+    ignores: ["src/lib/audit.ts", "src/**/*.test.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "CallExpression[callee.property.name='insert'][arguments.0.name='auditLog']",
+          message: "Write audit entries with writeAudit() from src/lib/audit.ts, not with a direct insert into audit_log.",
+        },
+      ],
+    },
+  },
+  {
     // CLI/boot scripts, not server runtime -- console output here is
     // intentional (see src/scripts/seed-admin.ts, src/db/migrate.ts).
     files: ["src/scripts/**", "src/db/migrate.ts"],

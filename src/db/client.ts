@@ -4,12 +4,44 @@ import { drizzle } from "drizzle-orm/node-postgres";
 
 import * as authSchema from "../auth/auth-schema.js";
 import { logger } from "../lib/logger.js";
+import * as absencesSchema from "./schema/absences.js";
+import * as assemblySchema from "./schema/assembly.js";
 import * as auditLogSchema from "./schema/audit-log.js";
+import * as availabilitySchema from "./schema/availability.js";
+import * as calendarVisibilitySchema from "./schema/calendar-visibility.js";
+import * as calendarsSchema from "./schema/calendars.js";
+import * as communicationSchema from "./schema/communication.js";
+import * as jobsSchema from "./schema/jobs.js";
+import * as rateLimitsSchema from "./schema/rate-limits.js";
+import * as clubApplicationsSchema from "./schema/club-applications.js";
 import * as clubInfoPagesSchema from "./schema/club-info-pages.js";
+import * as clubPrivacyNoticesSchema from "./schema/club-privacy-notices.js";
+import * as privacySchema from "./schema/privacy.js";
+import * as clubRegistrationsSchema from "./schema/club-registrations.js";
+import * as clubExitRequestsSchema from "./schema/club-exit-requests.js";
+import * as clubMemberInvitesSchema from "./schema/club-member-invites.js";
+import * as clubMembersSchema from "./schema/club-members.js";
+import * as clubSettingsSchema from "./schema/club-settings.js";
 import * as clubMembershipsSchema from "./schema/club-memberships.js";
 import * as clubRolesSchema from "./schema/club-roles.js";
 import * as departmentsSchema from "./schema/departments.js";
+import * as documentsSchema from "./schema/documents.js";
+import * as eventAttendeesSchema from "./schema/event-attendees.js";
+import * as calendarFeedTokensSchema from "./schema/calendar-feed-tokens.js";
+import * as eventAttendanceSchema from "./schema/event-attendance.js";
+import * as eventExtrasSchema from "./schema/event-extras.js";
+import * as eventHelpersSchema from "./schema/event-helpers.js";
+import * as eventSeriesExceptionsSchema from "./schema/event-series-exceptions.js";
+import * as eventSeriesSchema from "./schema/event-series.js";
+import * as eventsSchema from "./schema/events.js";
+import * as formsSchema from "./schema/forms.js";
 import * as guardianLinksSchema from "./schema/guardian-links.js";
+import * as inventorySchema from "./schema/inventory.js";
+import * as locationLinksSchema from "./schema/location-links.js";
+import * as locationWifiSchema from "./schema/location-wifi.js";
+import * as locationsSchema from "./schema/locations.js";
+import * as mediaFilesSchema from "./schema/media-files.js";
+import * as meetingsSchema from "./schema/meetings.js";
 import * as notificationsSchema from "./schema/notifications.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -44,10 +76,42 @@ export const schema = {
   ...auditLogSchema,
   ...notificationsSchema,
   ...clubMembershipsSchema,
+  ...clubMembersSchema,
+  ...clubMemberInvitesSchema,
+  ...clubSettingsSchema,
+  ...clubExitRequestsSchema,
+  ...clubApplicationsSchema,
+  ...clubRegistrationsSchema,
   ...departmentsSchema,
+  ...documentsSchema,
   ...clubRolesSchema,
   ...guardianLinksSchema,
   ...clubInfoPagesSchema,
+  ...calendarsSchema,
+  ...calendarVisibilitySchema,
+  ...eventsSchema,
+  ...eventAttendeesSchema,
+  ...eventSeriesSchema,
+  ...eventSeriesExceptionsSchema,
+  ...eventAttendanceSchema,
+  ...eventHelpersSchema,
+  ...eventExtrasSchema,
+  ...calendarFeedTokensSchema,
+  ...availabilitySchema,
+  ...mediaFilesSchema,
+  ...meetingsSchema,
+  ...locationsSchema,
+  ...locationWifiSchema,
+  ...locationLinksSchema,
+  ...inventorySchema,
+  ...formsSchema,
+  ...jobsSchema,
+  ...rateLimitsSchema,
+  ...communicationSchema,
+  ...absencesSchema,
+  ...assemblySchema,
+  ...clubPrivacyNoticesSchema,
+  ...privacySchema,
 };
 
 export const db = drizzle(pool, { schema });

@@ -2,23 +2,77 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 import { auth } from "./auth/auth.js";
 import { closeDatabase } from "./db/client.js";
-import { AppError, toAppError } from "./lib/errors.js";
+import { AppError, NotFoundError, toAppError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
+import { registerAllJobs, startJobWorker, workerEnabled } from "./lib/jobs/index.js";
+import { startMediaSweeper } from "./lib/media.js";
 import { type LoggerEnv, requestId } from "./middleware/request-id.js";
+import { adminClubRegistrationRoutes } from "./routes/admin-club-registrations.js";
 import { adminNotificationRoutes } from "./routes/admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./routes/admin-notification-templates.js";
+import { adminClubRoutes } from "./routes/admin-clubs.js";
+import { adminUserRoutes } from "./routes/admin-users.js";
+import { adminJobRoutes } from "./routes/admin-jobs.js";
+import { adminDpaAcceptanceRoutes, adminDpaVersionRoutes } from "./routes/admin-dpa.js";
+import { dpaRoutes } from "./routes/dpa.js";
+import { clubNoticeBySlugRoutes, clubPrivacyNoticeRoutes } from "./routes/club-privacy-notices.js";
+import { adminRetentionRoutes } from "./routes/admin-retention.js";
+import { retentionPolicyRoutes } from "./routes/retention-policies.js";
+import { adminStorageRoutes } from "./routes/admin-storage.js";
+import { documentGenerationRoutes } from "./routes/document-generation.js";
+import { memberDocumentRoutes } from "./routes/member-documents.js";
+import { memberCardVerifyRoutes } from "./routes/member-card-verify.js";
+import { memberCardRoutes, memberCardSheetRoutes } from "./routes/member-cards.js";
+import { acknowledgementRoutes } from "./routes/acknowledgements.js";
+import { documentRoutes } from "./routes/documents.js";
+import { clubBrandingRoutes } from "./routes/club-branding.js";
+import { clubStorageRoutes } from "./routes/club-storage.js";
 import { adminStatsRoutes } from "./routes/admin-stats.js";
 import { adminEmailRoutes } from "./routes/admin-emails.js";
+import { attendanceReportRoutes } from "./routes/attendance-report.js";
+import { availabilityRoutes } from "./routes/availability.js";
+import { calendarRoutes } from "./routes/calendars.js";
+import { clubAnnouncementRoutes, clubInboxRoutes } from "./routes/club-announcements.js";
+import { clubApplicationRoutes } from "./routes/club-applications.js";
+import { clubRegistrationRoutes } from "./routes/club-registrations.js";
+import { clubFormRoutes } from "./routes/club-forms.js";
 import { clubInfoRoutes } from "./routes/club-info.js";
+import { clubExitRequestRoutes } from "./routes/club-exit-requests.js";
 import { clubMemberRoutes } from "./routes/club-members.js";
+import { auditLogRoutes } from "./routes/audit-log.js";
+import { absenceRoutes } from "./routes/absences.js";
+import { dataSubjectRequestRoutes } from "./routes/data-subject-requests.js";
+import { guardianRoutes, myWardsRoutes } from "./routes/guardian.js";
+import { consentOverviewRoutes, consentPurposeRoutes } from "./routes/consent-purposes.js";
+import { clubSettingsRoutes } from "./routes/club-settings.js";
+import { clubStatsRoutes } from "./routes/club-stats.js";
+import { clubOverviewRoutes } from "./routes/club-overview.js";
 import { departmentRoutes } from "./routes/departments.js";
+import { calendarFeedRoutes, feedRoutes } from "./routes/calendar-feeds.js";
+import { eventSeriesRoutes } from "./routes/event-series.js";
+import { eventRoutes, icsRoutes } from "./routes/events.js";
+import { publicEventRoutes } from "./routes/public-events.js";
+import { formRoutes } from "./routes/forms.js";
+import { formSubmissionRoutes } from "./routes/form-submissions.js";
 import { healthRoutes } from "./routes/health.js";
+import { inventoryItemRoutes } from "./routes/inventory-items.js";
+import { locationRoutes } from "./routes/locations.js";
+import { mediaRoutes } from "./routes/media.js";
+import { memberFieldRoutes } from "./routes/member-fields.js";
+import { ballotRoutes } from "./routes/ballots.js";
+import { clubRoleRoutes } from "./routes/club-roles.js";
+import { electionRoutes } from "./routes/elections.js";
+import { meetingRoutes } from "./routes/meetings.js";
 import { myClubRoutes } from "./routes/my-clubs.js";
 import { internalStatsRoutes } from "./routes/internal-stats.js";
+import { notificationPreferenceRoutes, unsubscribeRoutes } from "./routes/notification-preferences.js";
 import { notificationRoutes } from "./routes/notifications.js";
+import { pushTokenRoutes } from "./routes/push-tokens.js";
+import { rateCardRoutes, timeEntryRoutes, timeReportRoutes } from "./routes/time-tracking.js";
 import { trustedOrigins } from "./lib/trusted-origins.js";
 
 const app = new Hono<LoggerEnv>();
@@ -27,14 +81,16 @@ app.use("*", requestId);
 
 // JSON API with no HTML to protect -- CSP is deliberately skipped, the
 // nonce-CSP proxy pattern in the website template is overkill/wrong here.
-app.use(
-  "*",
-  secureHeaders({
-    xContentTypeOptions: true,
-    xFrameOptions: "DENY",
-    referrerPolicy: "strict-origin-when-cross-origin",
-  }),
-);
+const baseSecureHeaders = {
+  xContentTypeOptions: true,
+  xFrameOptions: "DENY",
+  referrerPolicy: "strict-origin-when-cross-origin",
+} as const;
+const defaultSecureHeaders = secureHeaders(baseSecureHeaders);
+// Only GET /media/* (signed, or explicitly public_opt_in) is embedded cross-origin by the website (<img>, api. vs app.
+// subdomain); there the default Cross-Origin-Resource-Policy "same-origin" would block it. Everything else keeps it.
+const mediaSecureHeaders = secureHeaders({ ...baseSecureHeaders, crossOriginResourcePolicy: "cross-origin" });
+app.use("*", (c, next) => (c.req.path.startsWith("/media/") ? mediaSecureHeaders(c, next) : defaultSecureHeaders(c, next)));
 
 app.use(
   "*",
@@ -54,8 +110,11 @@ app.onError((err, c) => {
   if (!(err instanceof AppError)) {
     c.get("logger").error({ err }, "unhandled error");
   }
-  return c.json(appError.toJSON(), appError.status as 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500 | 503);
+  return c.json(appError.toJSON(), appError.status as ContentfulStatusCode);
 });
+
+// Unknown routes answer in the same JSON error shape as every other error.
+app.notFound((c) => c.json(new NotFoundError("Not found").toJSON(), 404));
 
 // Better Auth owns everything under /api/auth/* -- sign-up, sign-in,
 // session management, 2FA, organization, admin, and the OpenAPI reference
@@ -67,13 +126,75 @@ app.route("/", healthRoutes);
 app.route("/internal", internalStatsRoutes);
 app.route("/admin", adminStatsRoutes);
 app.route("/admin", adminEmailRoutes);
+app.route("/admin", adminStorageRoutes);
+app.route("/admin", adminClubRoutes);
+app.route("/admin", adminUserRoutes);
 app.route("/notifications", notificationRoutes);
+app.route("/admin/jobs", adminJobRoutes);
+app.route("/admin/retention-runs", adminRetentionRoutes);
+app.route("/admin/dpa-versions", adminDpaVersionRoutes);
+app.route("/admin/dpa-acceptances", adminDpaAcceptanceRoutes);
+app.route("/dpa", dpaRoutes);
+app.route("/club-privacy-notices", clubPrivacyNoticeRoutes);
+app.route("/clubs", clubNoticeBySlugRoutes);
+app.route("/clubs", clubOverviewRoutes);
+app.route("/retention-policies", retentionPolicyRoutes);
 app.route("/admin/notifications", adminNotificationRoutes);
 app.route("/admin/notification-templates", adminNotificationTemplateRoutes);
+app.route("/admin/club-registrations", adminClubRegistrationRoutes);
+app.route("/club-registrations", clubRegistrationRoutes);
 app.route("/my-clubs", myClubRoutes);
 app.route("/club-members", clubMemberRoutes);
+app.route("/club-members", memberCardRoutes);
+app.route("/member-cards", memberCardSheetRoutes);
+app.route("/member-cards", memberCardVerifyRoutes);
+app.route("/club-stats", clubStatsRoutes);
+app.route("/audit-log", auditLogRoutes);
+app.route("/consent-purposes", consentPurposeRoutes);
+app.route("/consents", consentOverviewRoutes);
+app.route("/absences", absenceRoutes);
+app.route("/data-subject-requests", dataSubjectRequestRoutes);
+app.route("/my-wards", myWardsRoutes);
+app.route("/guardian", guardianRoutes);
+app.route("/club-settings", clubSettingsRoutes);
+app.route("/club-storage", clubStorageRoutes);
+app.route("/club-settings/branding", clubBrandingRoutes);
+app.route("/club-exit-requests", clubExitRequestRoutes);
+app.route("/club-announcements", clubAnnouncementRoutes);
+app.route("/club-inbox", clubInboxRoutes);
+app.route("/notification-preferences", notificationPreferenceRoutes);
+app.route("/unsubscribe", unsubscribeRoutes);
+app.route("/push-tokens", pushTokenRoutes);
+app.route("/club-applications", clubApplicationRoutes);
+app.route("/forms", formRoutes);
+app.route("/member-fields", memberFieldRoutes);
+app.route("/club-forms", clubFormRoutes);
+app.route("/form-submissions", formSubmissionRoutes);
 app.route("/departments", departmentRoutes);
 app.route("/club-info", clubInfoRoutes);
+app.route("/documents", documentRoutes);
+app.route("/acknowledgements", acknowledgementRoutes);
+app.route("/document-generation", documentGenerationRoutes);
+app.route("/member-documents", memberDocumentRoutes);
+app.route("/club-roles", clubRoleRoutes);
+app.route("/calendars", calendarRoutes);
+app.route("/calendar-feeds", calendarFeedRoutes);
+app.route("/feeds", feedRoutes);
+app.route("/event-series", eventSeriesRoutes);
+app.route("/events", eventRoutes);
+app.route("/attendance", attendanceReportRoutes);
+app.route("/events.ics", icsRoutes);
+app.route("/public", publicEventRoutes);
+app.route("/time-entries", timeEntryRoutes);
+app.route("/rate-cards", rateCardRoutes);
+app.route("/time-report", timeReportRoutes);
+app.route("/availability", availabilityRoutes);
+app.route("/meetings", meetingRoutes);
+app.route("/ballots", ballotRoutes);
+app.route("/elections", electionRoutes);
+app.route("/locations", locationRoutes);
+app.route("/inventory-items", inventoryItemRoutes);
+app.route("/media", mediaRoutes);
 
 const port = Number(process.env.PORT ?? 3000);
 // Loopback-only by default -- LAN testing (a browser hitting this machine's
@@ -81,13 +202,23 @@ const port = Number(process.env.PORT ?? 3000);
 // needs an explicit opt-in, same reasoning as mycouple-backend's BIND_HOST.
 const hostname = process.env.BIND_HOST ?? "127.0.0.1";
 
+// Unused uploads (POST /media files no feature row claimed) are removed after MEDIA_UNATTACHED_TTL_HOURS.
+const stopMediaSweeper = startMediaSweeper();
+// Abandoned application drafts (and their files) are removed by the job `form_cleanup_sweep` (see registerAllJobs).
+
+// DB job queue worker (ADR-005): in-process unless WORKER_ENABLED=false (then run dist/worker.js separately).
+registerAllJobs();
+const jobWorker = workerEnabled() ? startJobWorker() : null;
+
 const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
   logger.info(`Server is running on http://${hostname}:${info.port}`);
 });
 
 async function shutdown(signal: string) {
   logger.info(`[shutdown] received ${signal}, closing server`);
+  stopMediaSweeper();
   server.close(async () => {
+    await jobWorker?.stop();
     await closeDatabase();
     process.exit(0);
   });

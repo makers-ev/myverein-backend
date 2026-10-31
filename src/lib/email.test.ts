@@ -110,4 +110,26 @@ describe("sendEmail", () => {
     expect(sendMailMock).not.toHaveBeenCalled();
     expect(resendSendMock).not.toHaveBeenCalled();
   });
+
+  it("passes club display name, reply-to and extra headers on both transports without changing the sender address", async () => {
+    process.env.EMAIL_FROM = "MyVerein <noreply@example.com>";
+    const headers = { "List-Unsubscribe": "<https://x.test/u>" };
+    process.env.SMTP_HOST = "smtp.example.com";
+    let sendEmail = await loadSendEmail();
+    await sendEmail({ to: "a@b.com", subject: "s", html: "h", fromName: 'Vorstand "TV"\r\nBcc: x@y.de', replyTo: "vorstand@x.test", headers });
+    expect(sendMailMock).toHaveBeenCalledWith({
+      from: '"Vorstand TV Bcc: x@y.de" <noreply@example.com>',
+      to: "a@b.com",
+      subject: "s",
+      html: "h",
+      replyTo: "vorstand@x.test",
+      headers,
+    });
+
+    delete process.env.SMTP_HOST;
+    process.env.RESEND_API_KEY = "re_test";
+    sendEmail = await loadSendEmail();
+    await sendEmail({ to: "a@b.com", subject: "s", html: "h", fromName: "Verein", replyTo: "r@x.test", headers });
+    expect(resendSendMock).toHaveBeenCalledWith(expect.objectContaining({ from: '"Verein" <noreply@example.com>', replyTo: "r@x.test", headers }));
+  });
 });

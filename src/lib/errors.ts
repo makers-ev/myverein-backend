@@ -7,6 +7,8 @@
  * errors, so behaviour stays consistent across every route.
  */
 
+import { HTTPException } from "hono/http-exception";
+
 export type ErrorCode =
   | "BAD_REQUEST"
   | "UNAUTHORIZED"
@@ -16,11 +18,21 @@ export type ErrorCode =
   | "UNPROCESSABLE_ENTITY"
   | "TOO_MANY_REQUESTS"
   | "INTERNAL_ERROR"
-  | "SERVICE_UNAVAILABLE";
+  | "SERVICE_UNAVAILABLE"
+  // Domain-specific codes (same HTTP status as the base class they are thrown with, see AppErrorOptions.code).
+  | "ALREADY_MEMBER"
+  | "APPLICATION_PENDING"
+  | "QUOTA_EXCEEDED"
+  | "FORM_VERSION_OUTDATED"
+  | "RECIPIENT_CONFIRMATION_REQUIRED"
+  | "DPA_REQUIRED"
+  | "QUERY_TOO_SHORT";
 
 export interface AppErrorOptions {
   cause?: unknown;
   details?: unknown;
+  /** Overrides the base class' code so clients can tell apart cases that share an HTTP status (e.g. two kinds of 409). */
+  code?: ErrorCode;
 }
 
 export class AppError extends Error {
@@ -31,7 +43,7 @@ export class AppError extends Error {
   constructor(code: ErrorCode, status: number, message: string, options: AppErrorOptions = {}) {
     super(message, { cause: options.cause });
     this.name = "AppError";
-    this.code = code;
+    this.code = options.code ?? code;
     this.status = status;
     this.details = options.details;
   }
@@ -110,11 +122,31 @@ export class InternalError extends AppError {
   }
 }
 
+const CODE_BY_CLIENT_STATUS: Record<number, ErrorCode> = {
+  400: "BAD_REQUEST",
+  401: "UNAUTHORIZED",
+  403: "FORBIDDEN",
+  404: "NOT_FOUND",
+  409: "CONFLICT",
+  422: "UNPROCESSABLE_ENTITY",
+  429: "TOO_MANY_REQUESTS",
+};
+
 /** Normalizes any thrown value into an AppError, without leaking internals. */
 export function toAppError(err: unknown): AppError {
   if (err instanceof AppError) return err;
+  // Framework errors with a client status (malformed JSON from the validator, body limits, ...) stay 4xx.
+  if (err instanceof HTTPException && err.status >= 400 && err.status < 500) {
+    return new AppError(CODE_BY_CLIENT_STATUS[err.status] ?? "BAD_REQUEST", err.status, err.message || "Bad request", { cause: err });
+  }
   if (err instanceof Error) {
     return new InternalError(err.message, { cause: err });
   }
   return new InternalError("Unknown error", { cause: err });
+}
+
+/** Postgres unique violation (23505); drizzle wraps the pg error as `.cause`, so check both. */
+export function isUniqueViolation(err: unknown): boolean {
+  const e = err as { code?: string; cause?: { code?: string } } | undefined;
+  return (e?.code ?? e?.cause?.code) === "23505";
 }
