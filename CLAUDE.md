@@ -28,13 +28,15 @@ You are the lead for this repo. Workflow for every task:
    leftovers to "Weiterhin offen", and tick the matching task package in the
    wave's `20_Products/MyVerein/PRDs/Implementation Plan - MyVerein Wave N.md`.
    Do this as part of the same piece of work (a paired vault commit on a
-   branch of the same name). Also create or update the matching training
-   material in the vault's `20_Products/MyVerein/Schulung/` (template
-   `tpl-schulung`: where to find it on website/app, how it works, who may use
-   it, FAQ) and link it from `Schulung - Übersicht und Lernpfade`. A feature
-   is not done until it is ticked off and has its Schulung entry. If
-   the vault is not available in the session, say so explicitly in the summary
-   and list the exact Feature List entries that still need to be made.
+   branch of the same name). End-user documentation (Schulung) is no longer
+   written to the vault: user documentation lives in the repo
+   `makers-ev/myverein-docs` (pages under `content/de`, Nextra; rules in its
+   `CLAUDE.md`). Every feature, fix or behaviour change needs its page there
+   created or updated (pull request in that repo, linked from the product PR).
+   The vault keeps the Feature List, plan ticks, gap analysis and ADRs;
+   archived Schulung notes in the vault are not maintained. If the vault is
+   not available in the session, say so explicitly in the summary and list
+   the exact Feature List entries that still need to be made.
 9. **All-in-one sanity check.** Before you summarize, think again about
    whether what you built actually makes sense for MyVerein as an
    **all-in-one club manager (everything digital except billing)**: Does it
