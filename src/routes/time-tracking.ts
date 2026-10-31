@@ -17,8 +17,9 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from ".
 import { needsPermission, ownClubMemberRow } from "../lib/event-access.js";
 import { isCalendarVisible } from "../lib/calendar-visibility.js";
 import { buildCsv } from "../lib/member-csv.js";
+import { buildXlsx, type XlsxCell } from "../lib/xlsx.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
-import { assertEntryWindow, assertNoOverlap, buildReport, inScope, minutesOf, requireTracking, timeScopeOf, TIME_STATUSES } from "../lib/time-tracking.js";
+import { assertEntryWindow, assertNoOverlap, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -37,6 +38,13 @@ async function ownMember(c: Context<ClubEnv>) {
   const own = await ownClubMemberRow(c.get("clubId"), c.get("membership").id);
   if (!own) throw new ForbiddenError("Only club members can track time");
   return own;
+}
+
+/** Trainers/leads/`time:write` as before; everybody else needs an applicable hourly rate (403 `no_rate`). */
+async function requireTrackingOf(c: Context<ClubEnv>): Promise<void> {
+  const roles = c.get("clubRoleTypes");
+  const own = await ownClubMemberRow(c.get("clubId"), c.get("membership").id);
+  await requireTracking(c.get("clubId"), own?.id ?? null, roles);
 }
 
 function shapeEntry(row: TimeEntryRow, extra: { displayName?: string | null; eventTitle?: string | null } = {}) {
@@ -74,7 +82,7 @@ const listQuery = z.object({
 /** Own entries, or - `scope=team` / `clubMemberId` - those of the members the caller may confirm (`time:write`). */
 timeEntryRoutes.get("/", zValidator("query", listQuery, hook), async (c) => {
   const roles = c.get("clubRoleTypes");
-  requireTracking(roles);
+  await requireTrackingOf(c);
   const clubId = c.get("clubId");
   const q = c.req.valid("query");
   const to = q.to ?? todayBerlin();
@@ -107,7 +115,7 @@ timeEntryRoutes.get("/", zValidator("query", listQuery, hook), async (c) => {
 
 /** The running entry of the caller, if any (for the stamp button). */
 timeEntryRoutes.get("/current", async (c) => {
-  requireTracking(c.get("clubRoleTypes"));
+  await requireTrackingOf(c);
   const own = await ownMember(c);
   const [row] = await db.select({ entry: timeEntries, eventTitle: events.title }).from(timeEntries).leftJoin(events, eq(events.id, timeEntries.eventId)).where(and(eq(timeEntries.clubMemberId, own.id), isNull(timeEntries.endedAt)));
   return c.json({ data: row ? shapeEntry(row.entry, { eventTitle: row.eventTitle }) : null });
@@ -297,7 +305,7 @@ timeEntryRoutes.post("/:id/reject", needsPermission("time:write"), decide("abgel
 
 function needsTracking() {
   return async (c: Context<ClubEnv>, next: () => Promise<void>) => {
-    requireTracking(c.get("clubRoleTypes"));
+    await requireTrackingOf(c);
     await next();
   };
 }
@@ -375,32 +383,101 @@ timeReportRoutes.use("*", rateLimit({ windowMs: 60_000, max: 30 }));
 timeReportRoutes.use("*", sessionGuard);
 timeReportRoutes.use("*", clubGuard);
 
-const reportQuery = z.object({ from: z.iso.date().optional(), to: z.iso.date().optional(), departmentId: z.uuid().optional(), format: z.enum(["json", "csv"]).optional() });
+const csvList = <T extends z.ZodType<string, string>>(max: number, item: T) =>
+  z
+    .string()
+    .max(4000)
+    .transform((v) => v.split(",").map((x) => x.trim()).filter((x) => x.length > 0))
+    .pipe(z.array(item).max(max))
+    .optional();
 
-/**
- * Hours (and, with `time:read_rates`, hours x rate) of CONFIRMED entries. `time:write` sees the hours of its scope without
- * any amount; `time:read_rates` additionally sees amounts. A report is a calculation basis, not a payment: nothing is booked.
- */
-timeReportRoutes.get("/", zValidator("query", reportQuery, hook), async (c) => {
-  const roles = c.get("clubRoleTypes");
-  const withRates = hasClubPermission(roles, "time:read_rates");
-  if (!withRates && !hasClubPermission(roles, "time:write")) throw new ForbiddenError("Missing time:write or time:read_rates permission");
-  const clubId = c.get("clubId");
-  const q = c.req.valid("query");
+const reportQuery = z.object({
+  from: z.iso.date().optional(),
+  to: z.iso.date().optional(),
+  departmentId: z.uuid().optional(),
+  clubMemberIds: csvList(100, z.uuid()),
+  roleTypes: csvList(20, z.enum(CLUB_ROLE_TYPES)),
+  eventId: z.uuid().optional(),
+  groupBy: z.enum(REPORT_GROUPS).optional(),
+  format: z.enum(["json", "csv", "xlsx"]).optional(),
+});
+
+function reportPeriod(q: { from?: string | undefined; to?: string | undefined }) {
   const to = q.to ?? todayBerlin();
   const from = q.from ?? addDays(to, -30);
   if (to < from) throw new ValidationError("`to` must not be before `from`");
   if (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`) > 366 * 86_400_000) throw new ValidationError("The range covers at most 366 days");
-  // Amounts need time:read_rates (board-wide); a department lead with time:write only reads hours of their own departments.
-  const scope = withRates ? { clubMemberIds: null } : await timeScopeOf(clubId, roles, c.get("membership").id);
-  const report = await buildReport(clubId, { from: new Date(`${from}T00:00:00Z`), to: new Date(`${to}T23:59:59Z`), scope, withRates, departmentId: q.departmentId });
-  if (q.format === "csv") {
-    const header = withRates ? ["Name", "Einträge", "Stunden", "Satz (EUR/h)", "Betrag (EUR)", "Satz fehlt"] : ["Name", "Einträge", "Stunden"];
-    const eur = (cents: number | null) => (cents === null ? "" : (cents / 100).toFixed(2).replace(".", ","));
-    const rows = report.people.map((p) => (withRates ? [p.displayName, p.entries, String(p.hours).replace(".", ","), eur(p.rateCents), eur(p.amountCents), p.rateMissing ? "ja" : ""] : [p.displayName, p.entries, String(p.hours).replace(".", ",")]));
-    await writeAudit(db, { eventType: "time_report.export", subjectId: null, payload: { clubId, rows: rows.length, withRates } });
-    return c.body(buildCsv(header, rows), 200, { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="stundenreport.csv"', "Cache-Control": "private, no-store" });
+  return { from, to, fromDate: new Date(`${from}T00:00:00Z`), toDate: new Date(`${to}T23:59:59Z`) };
+}
+
+/** `time:read_rates` sees the whole club and amounts; `time:write` alone sees hours of its scope (department leads: own departments). */
+async function reportAccess(c: Context<ClubEnv>) {
+  const roles = c.get("clubRoleTypes");
+  const withRates = hasClubPermission(roles, "time:read_rates");
+  if (!withRates && !hasClubPermission(roles, "time:write")) throw new ForbiddenError("Missing time:write or time:read_rates permission");
+  const scope = withRates ? { clubMemberIds: null } : await timeScopeOf(c.get("clubId"), roles, c.get("membership").id);
+  return { withRates, scope };
+}
+
+const eur = (cents: number | null) => (cents === null ? "" : (cents / 100).toFixed(2).replace(".", ","));
+const germanDate = (iso: string | null) => (iso ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : "");
+const dec = (n: number) => String(n).replace(".", ",");
+const REPORT_NOTE = "Berechnungsgrundlage, keine Abrechnung";
+
+function exportHeader(withRates: boolean): string[] {
+  return withRates ? ["Name", "Rolle(n)", "Termin", "Datum", "Stunden", "Satz (EUR/h)", "Betrag (EUR)"] : ["Name", "Rolle(n)", "Termin", "Datum", "Stunden"];
+}
+
+function csvRow(r: ReportRow, withRates: boolean): Array<string | number> {
+  const base = [r.displayName ?? "", r.roleTypes.join(", "), r.eventTitle ?? "", germanDate(r.eventDate), dec(r.hours)];
+  return withRates ? [...base, eur(r.rateCents), eur(r.amountCents)] : base;
+}
+
+/**
+ * Hours (and, with `time:read_rates`, hours x rate) of CONFIRMED entries, filterable by people, role types, event and department
+ * and groupable by person / event / person+event. `format=csv|xlsx` exports the same rows (calculation basis, not a payment).
+ */
+timeReportRoutes.get("/", zValidator("query", reportQuery, hook), async (c) => {
+  const { withRates, scope } = await reportAccess(c);
+  const clubId = c.get("clubId");
+  const q = c.req.valid("query");
+  const { from, to, fromDate, toDate } = reportPeriod(q);
+  const report = await buildReport(clubId, { from: fromDate, to: toDate, scope, withRates, departmentId: q.departmentId, clubMemberIds: q.clubMemberIds, roleTypes: q.roleTypes, eventId: q.eventId, groupBy: q.groupBy });
+  if (q.format === "csv" || q.format === "xlsx") {
+    await writeAudit(db, { eventType: "time_report.export", subjectId: null, payload: { clubId, rows: report.rows.length, withRates, format: q.format } });
+    const headers = { "Cache-Control": "private, no-store" };
+    const header = exportHeader(withRates);
+    if (q.format === "csv") {
+      const lines = report.rows.map((r) => csvRow(r, withRates));
+      const total: Array<string | number> = ["Summe", "", "", "", dec(report.totals.hours)];
+      if (withRates) total.push("", eur(report.totals.amountCents));
+      return c.body(buildCsv(header, [...lines, total]), 200, { ...headers, "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="stundenbericht.csv"' });
+    }
+    const bold = (text: string): XlsxCell => ({ text, bold: true });
+    const sheet: XlsxCell[][] = [
+      [bold("Stundenbericht")],
+      [REPORT_NOTE],
+      [`Zeitraum: ${germanDate(from)} bis ${germanDate(to)}`],
+      [],
+      header.map(bold),
+      ...report.rows.map((r): XlsxCell[] => {
+        const base: XlsxCell[] = [r.displayName, r.roleTypes.join(", "), r.eventTitle, germanDate(r.eventDate), r.hours];
+        return withRates ? [...base, r.rateCents === null ? null : r.rateCents / 100, r.amountCents === null ? null : r.amountCents / 100] : base;
+      }),
+      withRates
+        ? [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }, null, report.totals.amountCents === null ? null : { number: report.totals.amountCents / 100, bold: true }]
+        : [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }],
+    ];
+    const bytes = buildXlsx("Stundenbericht", sheet, withRates ? [28, 24, 32, 12, 10, 14, 14] : [28, 24, 32, 12, 10]);
+    return c.body(bytes as unknown as ArrayBuffer, 200, { ...headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Content-Disposition": 'attachment; filename="stundenbericht.xlsx"' });
   }
   return c.json({ data: { range: { from, to }, includesRates: withRates, note: "Calculation basis only: no payout, no booking, no payment status.", ...report } });
 });
 
+/** Selector data for the report: people with confirmed hours in the period (or, with `time:read_rates`, an applicable rate), their role types, events with hours. */
+timeReportRoutes.get("/people", zValidator("query", z.object({ from: z.iso.date().optional(), to: z.iso.date().optional() }), hook), async (c) => {
+  const { withRates, scope } = await reportAccess(c);
+  const { from, to, fromDate, toDate } = reportPeriod(c.req.valid("query"));
+  const data = await reportPeople(c.get("clubId"), { from: fromDate, to: toDate, scope, withRates });
+  return c.json({ data: { range: { from, to }, includesRates: withRates, ...data } });
+});

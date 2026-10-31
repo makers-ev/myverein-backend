@@ -305,6 +305,9 @@ const GUEST_DENIED_READS: Array<[string, string]> = [
   ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}`],
   ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}/loans`],
   ["GET", `/inventory-items/${"00000000-0000-4000-8000-000000000001"}/damage-reports`],
+  ["GET", "/time-entries"],
+  ["GET", "/time-report"],
+  ["GET", "/time-report/people"],
   ["GET", "/departments"],
   ["GET", `/departments/${"00000000-0000-4000-8000-000000000001"}`],
 ];

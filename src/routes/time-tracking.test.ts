@@ -24,7 +24,9 @@ describe("time tracking", () => {
   afterAll(async () => fx.cleanup());
 
   it("is for trainers and department leads only (deny by default)", async () => {
-    expect((await call(fx.users.member1, "/time-entries/clock-in", "POST", {})).status).toBe(403);
+    const denied = await call(fx.users.member1, "/time-entries/clock-in", "POST", {});
+    expect(denied.status).toBe(403);
+    expect((await fx.json(denied)).error.details.code).toBe("no_rate");
     expect((await call(fx.users.member1, "/time-entries")).status).toBe(403);
     expect((await manual(fx.users.member1, -3, -2)).status).toBe(403);
     expect((await call(fx.users.member1, "/time-report")).status).toBe(403);
@@ -128,7 +130,7 @@ describe("time tracking", () => {
     expect(lead.people.map((p: any) => p.displayName)).toContain("Trainer A"); // eslint-disable-line @typescript-eslint/no-explicit-any
     const csv = await call(fx.users.board, "/time-report?format=csv");
     expect(csv.headers.get("content-type")).toContain("text/csv");
-    expect(await csv.text()).toContain("Name;Einträge;Stunden;Satz (EUR/h);Betrag (EUR);Satz fehlt");
+    expect(await csv.text()).toContain("Name;Rolle(n);Termin;Datum;Stunden;Satz (EUR/h);Betrag (EUR)");
     expect((await call(fx.users.trainerA, "/time-report")).status).toBe(403);
     expect((await call(fx.users.board, "/time-report?from=2020-01-01&to=2026-12-31")).status).toBe(422);
     // The API knows no payout, booking or payment state.

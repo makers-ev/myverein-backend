@@ -67,6 +67,7 @@ import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
 import { writeAudit } from "../lib/audit.js";
+import { trackingCapability } from "../lib/time-tracking.js";
 
 export const clubMemberRoutes = new Hono<ClubEnv>();
 
@@ -450,7 +451,7 @@ clubMemberRoutes.get("/me", async (c) => {
   // Safety net for accounts whose club_members row is missing (normally created by the Better Auth hook).
   const row = await ensureClubMember(db, membership);
   const shaped = await shapeOne(row, callerOf(c), true);
-  return c.json({ data: { ...shaped, clubMemberId: row.id, permissions: clubPermissionsFor(c.get("clubRoleTypes")) } });
+  return c.json({ data: { ...shaped, clubMemberId: row.id, permissions: clubPermissionsFor(c.get("clubRoleTypes")), ...(await trackingCapability(c.get("clubId"), row.id, c.get("clubRoleTypes"))) } });
 });
 
 /** Name parts a person types about themself: same as `optText(100)` plus the shared clean-text policy (no control/bidi characters). */

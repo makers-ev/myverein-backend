@@ -245,7 +245,7 @@ export const AUDIT_EVENTS = {
   "time_entry.delete": spec(["clubId", "clubMemberId", "entryId"], "subject"),
   "time_entry.reject": spec(["clubId", "clubMemberId", "entryId"], "subject"),
   "time_entry.update": spec(["clubId", "clubMemberId", "entryId"], "subject"),
-  "time_report.export": spec(["clubId", "rows", "withRates"]),
+  "time_report.export": spec(["clubId", "format", "rows", "withRates"]),
   "meeting.create": spec(["clubId", "type"]),
   "meeting.delete": spec(["clubId", "notify"]),
   "meeting.notify_suppressed": spec(["actor", "cancelled", "clubId"]),
