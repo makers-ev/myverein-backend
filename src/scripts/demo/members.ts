@@ -68,6 +68,7 @@ function specs(today: string): MemberSpec[] {
     { key: "beisitz", account: "beisitz", first: "Sabine", last: "Neumann", birth: A(36, 170), cat: "aktiv", status: "aktiv", joined: J(8, 90), phone: true, address: true, depts: [{ key: "turnen" }] },
     { key: "trainer", account: "trainer", first: "Marco", last: "Vogel", birth: A(40, 60), cat: "aktiv", status: "aktiv", joined: J(9, 44), phone: true, address: true, depts: [{ key: "fussball" }] },
     { key: "trainer2", account: "trainer2", first: "Lena", last: "Wolff", birth: A(31, 10), cat: "aktiv", status: "aktiv", joined: J(5, 120), phone: true, depts: [{ key: "tennis" }] },
+    { key: "trainer3", account: "trainer3", first: "Nina", last: "Hoffmeister", birth: A(29, 75), cat: "aktiv", status: "aktiv", joined: J(2, 40), phone: true, depts: [{ key: "schwimmen" }] },
     { key: "abtleit", account: "abtleit", first: "Ute", last: "Hartmann", birth: A(47, 250), cat: "aktiv", status: "aktiv", joined: J(16, 8), phone: true, address: true, depts: [{ key: "fussball" }] },
     { key: "abtleit2", account: "abtleit2", first: "Frank", last: "Bergmann", birth: A(54, 90), cat: "aktiv", status: "aktiv", joined: J(20, 150), phone: true, address: true, depts: [{ key: "tennis" }] },
     { key: "mitglied", account: "mitglied", first: "Lukas", last: "Fischer", birth: A(38, 120), cat: "aktiv", status: "aktiv", joined: J(6, 77), phone: true, address: true, depts: [{ key: "tennis" }, { key: "schwimmen" }] },

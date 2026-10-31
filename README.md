@@ -66,7 +66,7 @@ curl http://localhost:3000/health
 | `npm run db:verify-counts` | Read-only count/integrity report against `DATABASE_URL` (Wave 7 B12, see [Verifying the Wave 7 migrations](#verifying-the-wave-7-migrations-b12)); prints table names and numbers only, exit code 1 if a check fails |
 | `npm run seed:admin` | Create or promote the admin user from `ADMIN_EMAIL`/`ADMIN_PASSWORD` |
 | `npm run seed:club` | Bootstrap a demo club and make `ADMIN_EMAIL` its "vorsitz" — needed for local dev. Also creates the club's standard calendar ("Vereinskalender"). Real users create clubs through the Wave 6 registration + review flow (`/club-registrations`, [Club registration](#club-registration)); `organization/create` is closed for end users, `seed:club` and the approval call `auth.api.createOrganization` server-side, which is still allowed. See `src/scripts/seed-club.ts` |
-| `npm run seed:demo` | Build ONE fully populated demo club ("Demo Sportverein Wiesbach e.V.") with 17 demo logins, 47 members, calendar, material, assemblies, privacy, communication, documents, acknowledgements and membership card data — see [Demo club](#demo-club-npm-run-seeddemo). Idempotent, `--reset` rebuilds only that club, refuses `NODE_ENV=production` without `--force`. See `src/scripts/seed-demo.ts` |
+| `npm run seed:demo` | Build ONE fully populated demo club ("Demo Sportverein Wiesbach e.V.") with 18 demo logins, 48 members, calendar, time tracking and hourly rates, material, assemblies, privacy, communication, documents, acknowledgements and membership card data — see [Demo club](#demo-club-npm-run-seeddemo). Idempotent, `--reset` rebuilds only that club, refuses `NODE_ENV=production` without `--force`. See `src/scripts/seed-demo.ts` |
 | `npm run auth:generate` | Regenerate `src/auth/auth-schema.ts` from the Better Auth config |
 | `npm run lint` | ESLint |
 | `npm test` | Vitest (unit + integration) |
@@ -93,19 +93,20 @@ npm run seed:demo -- --force       # allow NODE_ENV=production (never use on a r
 | Login | Account | Club role(s) | What it demonstrates |
 |---|---|---|---|
 | `admin@` | platform `admin` | - | Platform admin views: open club registration (`gruender@`), jobs, mail log, DPA draft |
-| `vorsitz@` | owner | `vorsitz` | Everything the board may do; chairs the assemblies |
+| `vorsitz@` | owner | `vorsitz` | Everything the board may do; chairs the assemblies; time report with amounts, rate cards, confirms time entries |
 | `stellv.vorsitz@` | admin | `stellv_vorsitz` | Same rights as the chair |
-| `kassenwart@` | member | `kassenwart` | Sensitive member data and KPIs only; **term ends in 21 days** |
+| `kassenwart@` | member | `kassenwart` | Sensitive member data and KPIs only; **term ends in 21 days**; time report with amounts (`time:read_rates`), cannot confirm |
 | `schriftfuehrer@` | member | `schriftfuehrer` | Meetings, minutes, forms, announcements, assembly management |
 | `beisitzer@` | member | `beisitzer`, `abteilungsleitung` Turnen | Re-elected in the demo assembly (24 month term), leads Turnen |
-| `trainer@` | member | `trainer` Fußball | Department announcements, absences of the own department, qualifications |
+| `trainer@` | member | `trainer` Fußball | Department announcements, absences of the own department, qualifications; time tracking with a personal rate (20 EUR/h lapsed, 25 EUR/h now) |
+| `trainer3@` | member | `trainer` Schwimmen | Time tracking at the role rate trainer (18 EUR/h), open entries; Schwimmen has no lead, so only the board sees these hours |
 | `trainer2@` | member | `trainer` Tennis | **Term expired 12 days ago** (the statute suspends the role's rights) |
-| `abteilungsleitung@` | member | `abteilungsleitung` Fußball | Calendars, locations, material |
-| `abteilungsleitung2@` | member | `abteilungsleitung` Tennis | **Term ends in 45 days** |
-| `mitglied@` | member | (implicit `mitglied`) | Plain member, read rights only; has **not yet voted** in the open circular resolution; father of Finn |
+| `abteilungsleitung@` | member | `abteilungsleitung` Fußball | Calendars, locations, material; time report **hours only** and only of the own department (Marco, Ute), confirms their entries (not her own) |
+| `abteilungsleitung2@` | member | `abteilungsleitung` Tennis | **Term ends in 45 days**; time report hours only, department Tennis (Lukas, Lena) |
+| `mitglied@` | member | (implicit `mitglied`) | Plain member, read rights only; tracks time through the rate for all members (8 EUR/h), **clock is running**; has **not yet voted** in the open circular resolution; father of Finn |
 | `jugend@` | member | (implicit `mitglied`) | 16-year-old youth member with an account, no voting right (category `jugend`) |
 | `erziehungsberechtigt@` | guest | `erziehungsberechtigt` | External guardian: wards Noah and Mia (valid), Lina (**not confirmed**, grants nothing), Tim (**expired**, turned 18) |
-| `gast@` | guest | - | External guest (association referee): sees only guest-level content |
+| `gast@` | guest | - | External guest (association referee): sees only guest-level content; no hourly rate, so time tracking answers `403 no_rate` |
 | `bewerber@` / `eltern.bewerber@` | no membership | - | Applicants with an open admission application (the second one for a child) |
 | `gruender@` | no membership | - | Wants to found a club: open registration for the platform review |
 
@@ -114,7 +115,7 @@ npm run seed:demo -- --force       # allow NODE_ENV=production (never use on a r
 | Area | Content |
 |---|---|
 | Club | Verified club (approved registration), 6 info pages (statute, vision, history, fee schedule, house rules, external link), settings: reminders, mail template + text blocks, consent age limit 16, privacy contact/controller, **complete statute parameters of the general assembly** (14 + 3 days notice, quorum 25 %, majorities per topic, proxies, hybrid, circular resolutions, digital secret ballots, voting age 16, term warnings) |
-| Members | 47 members (13 with account): categories Aktiv, Passiv, Fördernd, Ehrenmitglied, Jugend, Kinder, Studierende (with and without voting right, age rules for the age transition); statuses interessent, probe, aktiv, ruhend, **scheduled exit** (aktiv + future `left_at`), ausgetreten, ausgeschlossen (with legal hold), verstorben; entry/exit dates, status and category history, contact data, emergency contacts, organisations as sponsors, siblings sharing one e-mail address, members without any address (post list) |
+| Members | 48 members (14 with account): categories Aktiv, Passiv, Fördernd, Ehrenmitglied, Jugend, Kinder, Studierende (with and without voting right, age rules for the age transition); statuses interessent, probe, aktiv, ruhend, **scheduled exit** (aktiv + future `left_at`), ausgetreten, ausgeschlossen (with legal hold), verstorben; entry/exit dates, status and category history, contact data, emergency contacts, organisations as sponsors, siblings sharing one e-mail address, members without any address (post list) |
 | Structure | 4 departments (Schwimmen without a lead), leads, department assignments (one ended), club roles with terms (expiring soon, expired), term history |
 | Guardians | Links in every state: valid, second guardian without custody (cannot consent), unconfirmed, expired; minors Leon, Hannah, Sophie, Jonas **without** a guardian |
 | Member data | 7 custom fields (select, textarea, checkbox, multiselect, sensitive, 2 credentials), 34 values, qualifications valid / expiring (25–38 days) / expired, per-member visibility of phone, e-mail, address, photo |
@@ -127,12 +128,27 @@ npm run seed:demo -- --force       # allow NODE_ENV=production (never use on a r
 | Communication (Wave 9) | 9 announcements (pinned, urgent, department, category + guardians, scheduled, draft, expired, cancelled) with delivery rows incl. read marks and `skipped_optout`; notification preferences (global, per club, for a member without account) |
 | Documents and PDF (Wave 13) | **Branding:** logo (a real generated PNG through the media layer), brand colours, letterhead, storage quota 256 MB. **Archive:** 4 folders with rights (role and department entries, `Verträge` inherits `Vorstand`, board only), 6 uploaded PDFs, a second version, 1 document in the trash, 1 under legal hold with reason, 2 club info pages with a second version (statute with the archive PDF attached). **Personal storage:** an upload of `mitglied@`, one of the guardian for Noah, an access-log entry of the board. **Generated by the real render service:** membership confirmation, admission receipt (person storage), member list and annual report (system folder, retention date set by the class), acknowledgement proof. |
 | Acknowledgements and cards (Wave 13) | 9 requests on two documents: house rules (confirmed by themselves, confirmed on paper by the board, one **expired**, open) and holiday camp consent for children (re-authentication required, answered by the guardian for Noah, two open). 11 membership cards: one re-issued (old QR invalid), one revoked by the board, one revoked by an exit; 4 card checks in the audit log. |
+| Time tracking and rates (Wave 12 B20) | 6 rate cards (EUR/h): `mitglied` 8 ("Alle Mitglieder", from 1 January of last year), `trainer` 18, `abteilungsleitung` 22 until the end of this month and **24 from the first of next month** (future dated), Marco's personal 20 (**lapsed** 31 days ago) and 25 (since 30 days ago); no two cards of the same target overlap. 37 time entries of the last 8 weeks for 6 people (Marco, Nina, Ute, Lukas, Jan, Lena): 28 confirmed (by `vorsitz@` or `stellv.vorsitz@`, never by the person themselves), 7 open, 1 rejected, **1 running** (Lukas, started 90 minutes before the seed), 1 over Berlin midnight (Jan); sources `stempeln` 17 / `aus_termin` 9 (tied to the Vereinsputztag and the finished football trainings) / `manuell` 11. Confirmed entries give a report of about 72 h and 1,167 EUR for 6 people and 6 events, Marco with two rates in the period (`rateCents` null), no `rateMissing`. Who has no rate: external guests (`gast@`, `erziehungsberechtigt@`), they have no entries and get `403 no_rate`. Running clock: stopping works for 16 h, later delete it and enter it by hand. |
 | Heute and search (Wave 14) | `mitglied@` and `trainer@` see unanswered events in the next 14 days, a cancelled event they had answered, unread announcements, own loans due soon and overdue, an open ballot; `vorsitz@` sees open applications and exits and maintenance-due items |
 | Audit | One entry per seeded member, role, field, calendar and every service call (ballots, elections, minutes, invitations, consents) |
 
+**Time tracking: which login for what.**
+
+| Login | Use it for |
+|---|---|
+| `vorsitz@`, `stellv.vorsitz@` | Time report **with amounts** (filter, group by person / event / person+event, CSV and XLSX export), rate cards, confirm or reject open entries |
+| `kassenwart@` | Time report with amounts and rate cards (`time:read_rates`); cannot confirm (no `time:write`) |
+| `abteilungsleitung@` | Report **hours only** for the own department Fußball (Marco, Ute); confirms entries of the department but not her own (`no_self_decision`) |
+| `abteilungsleitung2@` | Report hours only for Tennis (Lukas, Lena) |
+| `trainer@`, `trainer3@` | Tracking: personal rate (two rates over time) and role rate; suggestions from events |
+| `mitglied@` | Tracking without a trainer role (rate for all members), running clock |
+| `gast@` | The "no rate" case: tracking is refused with `403 no_rate` |
+
+Because the card "Alle Mitglieder" covers every member with an account, a plain member always has a rate; the no-rate case is therefore tried with an external guest.
+
 **Skipped on purpose.** Profile photos, location and damage photos, registration proofs and form attachments (member cards therefore show initials, not photos). Documents, the logo and the personal storage are real uploads through the media layer (files under `UPLOADS_DIR`, removed again by `--reset`); no mail or notification is sent for acknowledgement requests. Billing is out of scope of MyVerein. The ballots of the Jahreshauptversammlung are dated to the evening of the meeting (their timestamps and result hash are re-sealed); the audit entries of the service calls carry the seed time.
 
-**Tests.** `src/scripts/seed-demo.test.ts` runs the seed against the test database with its own slug and e-mail domain, asserts the counts per area (`src/scripts/demo/counts.ts`), idempotency (second run changes nothing, `--reset` rebuilds identical counts), that another club is untouched, that a foreign club with the same slug is refused, and the production guard.
+**Tests.** `src/scripts/seed-demo.test.ts` runs the seed against the test database with its own slug and e-mail domain, asserts the counts per area (`src/scripts/demo/counts.ts`), idempotency (second run changes nothing, `--reset` rebuilds identical counts), that another club is untouched, that a foreign club with the same slug is refused, and the production guard, and it calls the real report routes with the demo logins (JSON, CSV, XLSX: totals, lead scope without amounts, no `rateMissing`, `no_rate` for the guest).
 
 ## Architecture
 

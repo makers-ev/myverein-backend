@@ -35,6 +35,7 @@ import { seedBoardMeetings } from "./demo/meetings.js";
 import { seedInventory, seedLocations } from "./demo/places.js";
 import { seedConsents, seedPrivacy } from "./demo/privacy.js";
 import { seedRoles } from "./demo/roles.js";
+import { seedTimeTracking, TIME_LOGIN_HINTS } from "./demo/time.js";
 
 /**
  * Demo club seed (`npm run seed:demo`): ONE fully populated club ("Demo Sportverein Wiesbach e.V.") so the whole MyVerein
@@ -44,6 +45,7 @@ import { seedRoles } from "./demo/roles.js";
  *   THIS club (and the demo accounts of its e-mail domain) and builds it again. A club with that slug that this seed did not
  *   create (no `organization.metadata.demoSeed`) is never touched.
  * - Refuses to run with NODE_ENV=production unless `--force`.
+ * - Time tracking: rate cards and ~40 time entries of the last 8 weeks (see demo/time.ts).
  * - Real service functions wherever they exist (Better Auth users and memberships, ensureClubMember, ballots, elections,
  *   minutes, invitations, consents, announcements), so hashes, snapshots, audit entries and invariants hold.
  * - Environment: DEMO_PASSWORD (shared password of all demo logins, default below), DEMO_CLUB_SLUG, DEMO_CLUB_NAME,
@@ -81,6 +83,7 @@ const STEPS: Step[] = [
   { name: "Termine", run: seedEvents },
   { name: "Verfügbarkeiten", run: seedAvailability },
   { name: "Abwesenheiten", run: seedAbsences },
+  { name: "Zeiterfassung und Stundensätze", run: seedTimeTracking },
   { name: "Vorstandssitzungen", run: seedBoardMeetings },
   { name: "Mitgliederversammlungen", run: seedAssembly },
   { name: "Einwilligungen", run: seedConsents },
@@ -183,6 +186,8 @@ async function main() {
   console.log(`\nDemo-Logins, Passwort für alle: ${opts.password}\n`);
   console.log(formatLoginTable(await loginRows(opts, result.clubId)));
   const counts = await demoCounts(result.clubId);
+  console.log("\nZeiterfassung und Stundenbericht: welcher Login wofür\n");
+  console.log(TIME_LOGIN_HINTS.map((h) => `${h.login.padEnd(32)} ${h.use}`).join("\n"));
   console.log("\nAnzahl je Bereich\n");
   console.log(Object.entries(counts).map(([k, v]) => `${k.padEnd(30)} ${v}`).join("\n"));
 }
