@@ -33,6 +33,7 @@ import { consentOverviewRoutes, consentPurposeRoutes } from "./consent-purposes.
 import { clubSettingsRoutes } from "./club-settings.js";
 import { auditLogRoutes } from "./audit-log.js";
 import { adminEmailRoutes } from "./admin-emails.js";
+import { adminPushStatsRoutes } from "./admin-push-stats.js";
 import { adminNotificationRoutes } from "./admin-notifications.js";
 import { adminNotificationTemplateRoutes } from "./admin-notification-templates.js";
 import { adminJobRoutes } from "./admin-jobs.js";
@@ -97,6 +98,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/", "healthRoutes", healthRoutes],
   ["/internal", "internalStatsRoutes", internalStatsRoutes],
   ["/admin", "adminStatsRoutes", adminStatsRoutes],
+  ["/admin", "adminPushStatsRoutes", adminPushStatsRoutes],
   ["/admin", "adminEmailRoutes", adminEmailRoutes],
   ["/admin", "adminStorageRoutes", adminStorageRoutes],
   ["/admin", "adminClubRoutes", adminClubRoutes],
