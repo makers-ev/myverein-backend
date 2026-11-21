@@ -24,9 +24,14 @@ import { liveClubBySlug, publicCaller, publicInvalidLimit, publicIpLimit, public
  */
 export const publicClubRoutes = new Hono();
 
-const publicGuard = async (c: Context, next: () => Promise<void>) => {
+const publicHeaders = (c: Context) => {
   c.header("X-Robots-Tag", "noindex, nofollow");
   c.header("Cache-Control", "no-store");
+};
+const publicGuard = async (c: Context, next: () => Promise<void>) => {
+  publicHeaders(c);
+  // "/clubs/*" also matches the search itself ("/clubs"), which has its own budget only.
+  if (/\/clubs\/?$/.test(c.req.path)) return next();
   const caller = publicCaller(c);
   await enforceLimit({ bucket: caller.subject === "trusted-server" ? "public_club.trusted" : "public_club.ip", subject: caller.subject, windowMs: HOUR_MS, max: caller.subject === "trusted-server" ? publicTrustedLimit() : publicIpLimit() });
   await next();
@@ -62,7 +67,9 @@ publicClubRoutes.get("/clubs/:slug", async (c) => {
 });
 
 /** Club search (Wave 15 B5): opt-in clubs only (`discoverable`), at most 10 hits, no total, own rate limit per client. */
-publicClubRoutes.get("/clubs", publicGuard, async (c) => {
+publicClubRoutes.get("/clubs", async (c) => {
+  // Only the search budget counts here (not additionally the general per-client budget of the page routes).
+  publicHeaders(c);
   const caller = publicCaller(c);
   await enforceLimit({ bucket: "public_club.search", subject: caller.subject, windowMs: HOUR_MS, max: caller.subject === "trusted-server" ? publicTrustedLimit() : publicSearchLimit() });
   const clean = (v: string | undefined) => stripControlChars(v ?? "").trim().slice(0, 100).trim();

@@ -593,10 +593,17 @@ export function respondRenderedPdf(c: Context, bytes: Buffer, filename: string, 
  */
 export async function serveSignedMedia(c: Context, row: MediaFileRow, maxAgeSeconds: number): Promise<Response> {
   if (row.sensitive) throw new NotFoundError("File not found");
-  const body = await streamOrNotFound(row);
   const isPublic = row.visibility === "public_opt_in";
   // `private`: a shared/CDN cache must never hand a signed response to someone else.
-  applyMediaHeaders(c, row, isPublic ? "public, max-age=300" : `private, max-age=${Math.max(0, maxAgeSeconds)}`, row.kind === "document" ? "attachment" : "inline");
+  // Released files: cacheable, but revalidated on every request (`no-cache` + ETag of the content hash), so revoking the opt-in
+  // takes effect immediately even behind a shared cache (Wave 15 BM).
+  if (isPublic) c.header("ETag", `"${row.sha256}"`);
+  if (isPublic && c.req.header("if-none-match") === `"${row.sha256}"`) {
+    c.header("Cache-Control", "public, no-cache");
+    return c.body(null, 304);
+  }
+  const body = await streamOrNotFound(row);
+  applyMediaHeaders(c, row, isPublic ? "public, no-cache" : `private, max-age=${Math.max(0, maxAgeSeconds)}`, row.kind === "document" ? "attachment" : "inline");
   return c.body(body);
 }
 

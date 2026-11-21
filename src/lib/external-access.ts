@@ -146,7 +146,13 @@ export async function acceptExternalInvite(token: string, account: { id: string;
     const [club] = await db.select({ name: organization.name }).from(organization).where(eq(organization.id, invite.clubId));
     return { clubId: invite.clubId, clubName: club?.name ?? null, memberId, roleType: invite.roleType };
   } catch (err) {
-    if (createdMemberId) await db.delete(member).where(eq(member.id, createdMemberId)).catch(() => undefined);
+    // Roll back everything this acceptance created: the club_members row first (it would otherwise survive as an orphan
+    // `interessent` once the account membership is gone), then the account membership.
+    if (createdMemberId) {
+      const id = createdMemberId;
+      await db.delete(clubMembers).where(eq(clubMembers.memberId, id)).catch((e) => logger.error({ err: e, memberId: id }, "[external-access] could not remove the member row of a failed acceptance"));
+      await db.delete(member).where(eq(member.id, id)).catch((e) => logger.error({ err: e, memberId: id }, "[external-access] could not remove the membership of a failed acceptance"));
+    }
     await release();
     throw err;
   }

@@ -206,7 +206,7 @@ export function publicCaller(c: Context): { subject: string; trusted: boolean } 
   const configured = process.env.PUBLIC_API_TRUSTED_TOKEN ?? "";
   const given = c.req.header("x-public-api-token") ?? "";
   const salt = process.env.UNSUBSCRIBE_SECRET || process.env.BETTER_AUTH_SECRET || "rate-limit";
-  const hashIp = (ip: string) => createHmac("sha256", salt).update(`rate-limit-ip:${ip}`).digest("hex").slice(0, 32);
+  const hashIp = (ip: string) => createHmac("sha256", salt).update(`rate-limit-ip:${rateLimitPrefix(ip)}`).digest("hex").slice(0, 32);
   if (configured.length >= 16 && given.length > 0) {
     const a = createHash("sha256").update(configured).digest();
     const b = createHash("sha256").update(given).digest();
@@ -217,6 +217,22 @@ export function publicCaller(c: Context): { subject: string; trusted: boolean } 
     }
   }
   return { subject: hashIp(clientIp(c)), trusted: false };
+}
+
+/**
+ * The part of a client address a limit counts against: IPv4 as is, IPv6 cut to its /64 network (one connection usually owns a
+ * whole /64, so per-address limits would be trivial to rotate around).
+ */
+export function rateLimitPrefix(ip: string): string {
+  const raw = ip.trim().toLowerCase().replace(/^\[|\]$/g, "").split("%")[0]!;
+  if (!raw.includes(":")) return raw;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(raw);
+  if (mapped) return mapped[1]!;
+  const [head, tail] = raw.split("::") as [string, string | undefined];
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? left : [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, "") || "0").join(":")}::/64`;
 }
 
 export const publicIpLimit = () => envInt("PUBLIC_CLUB_IP_LIMIT_PER_HOUR", 300);

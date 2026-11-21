@@ -77,7 +77,11 @@ describe("public media opt-in (Wave 15 BM)", () => {
     expect(await visibility(key)).toBe("public_opt_in");
     const res = await unsigned(key);
     expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(res.headers.get("cache-control")).toBe("public, no-cache");
+    // Revalidation: unchanged file -> 304 (cheap), revoked file -> 403 (see below), so a cache never serves a revoked logo.
+    const etag = res.headers.get("etag")!;
+    expect(etag).toMatch(/^"[0-9a-f]{64}"$/);
+    expect((await app.request(`/media/${key}`, { headers: { "x-forwarded-for": randomUUID(), "if-none-match": etag } })).status).toBe(304);
 
     // Page no longer shows sponsors -> revoked.
     await call(club.founder, "/club-public-profile", { method: "PUT", clubId: club.clubId, body: { showSponsors: false } });

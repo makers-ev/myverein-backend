@@ -12,7 +12,7 @@ import { events } from "../db/schema/events.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { sponsors } from "../db/schema/sponsors.js";
 import { makePng } from "../lib/media-fixtures.js";
-import { PUBLIC_CLUB_KEYS, syncPublicMedia } from "../lib/public-profile.js";
+import { PUBLIC_CLUB_KEYS, rateLimitPrefix, syncPublicMedia } from "../lib/public-profile.js";
 import { publishNotice } from "../lib/privacy-notice.js";
 import { clubPublicProfileRoutes } from "./club-public-profile.js";
 import { createClub, dropClubs, installErrorHandler, requester, type Account } from "./forms-test-support.js";
@@ -45,6 +45,16 @@ const form = (bytes: Buffer, name = "bild.png") => {
 };
 const pub = (path: string, headers: Record<string, string> = {}) => app.request(path, { headers: { "x-forwarded-for": randomUUID(), ...headers } });
 const isoOffset = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+
+describe("rate limit subject (pure)", () => {
+  it("counts IPv6 per /64 and keeps IPv4 as is", () => {
+    expect(rateLimitPrefix("203.0.113.7")).toBe("203.0.113.7");
+    expect(rateLimitPrefix("2001:db8:1:2:aaaa::1")).toBe("2001:db8:1:2::/64");
+    expect(rateLimitPrefix("2001:0db8:0001:0002:bbbb:cccc:dddd:eeee")).toBe("2001:db8:1:2::/64");
+    expect(rateLimitPrefix("2001:db8::1")).toBe("2001:db8:0:0::/64");
+    expect(rateLimitPrefix("::ffff:198.51.100.4")).toBe("198.51.100.4");
+  });
+});
 
 describe("public club page", () => {
   let club: Awaited<ReturnType<typeof createClub>>;
@@ -253,6 +263,12 @@ describe("public club page", () => {
     await db.delete(clubPlatformStatus).where(eq(clubPlatformStatus.clubId, club.clubId));
     expect(await names("city=wiesb")).toContain(club.slug);
 
+    // The search only uses its own budget: with a general limit of 1 two searches still pass.
+    process.env.PUBLIC_CLUB_IP_LIMIT_PER_HOUR = "1";
+    const ipOnly = randomUUID();
+    expect((await pub("/public/clubs?city=wiesb", { "x-forwarded-for": ipOnly })).status).toBe(200);
+    expect((await pub("/public/clubs?city=wiesb", { "x-forwarded-for": ipOnly })).status).toBe(200);
+    delete process.env.PUBLIC_CLUB_IP_LIMIT_PER_HOUR;
     process.env.PUBLIC_CLUB_SEARCH_LIMIT_PER_HOUR = "2";
     const ip = randomUUID();
     const statuses: number[] = [];

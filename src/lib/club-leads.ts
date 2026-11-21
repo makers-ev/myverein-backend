@@ -103,12 +103,12 @@ export async function recordPublicLead(input: PublicLeadInput): Promise<{ leadId
     await writeAudit(tx, { eventType: "club_lead.request", subjectId: row!.id, clubId: input.clubId, actorUserId: null, payload: { clubId: input.clubId, leadId: row!.id, merged: false } });
     return { leadId: row!.id, created: true };
   });
-  if (result.created) await notifyLeadToBoard(input.clubId, result.leadId, input.name, input.trialRequested);
+  if (result.created) await notifyLeadToBoard(input.clubId, result.leadId, input.trialRequested);
   return result;
 }
 
 /** Board notice about a new enquiry (Wave 9 dispatcher): everybody with `leads:write`, optional, switch `notify_board_requests`. */
-export async function notifyLeadToBoard(clubId: string, leadId: string, name: string, trial: boolean): Promise<void> {
+export async function notifyLeadToBoard(clubId: string, leadId: string, trial: boolean): Promise<void> {
   try {
     if (!(await loadClubSettings(db, clubId)).notifyBoardRequests) return;
     const lang = await clubMailLanguage(db, clubId);
@@ -119,8 +119,9 @@ export async function notifyLeadToBoard(clubId: string, leadId: string, name: st
       refId: leadId,
       audience: { roleTypes: roleTypesWithPermission("leads:write"), includeGuardians: false },
       content: {
-        title: tr(lang, trial ? `Neue Anfrage zum Probetraining: ${name}` : `Neue Anfrage: ${name}`, trial ? `New trial training request: ${name}` : `New enquiry: ${name}`),
-        body: tr(lang, `${name} hat über die öffentliche Vereinsseite angefragt. Bitte melde dich unter Verein, Interessenten.`, `${name} sent an enquiry through the public club page. Please follow up under Club, Interested people.`),
+        // Neutral text: nothing typed into the public form (name, message) goes into subject, mail or push.
+        title: tr(lang, trial ? "Neue Anfrage zum Probetraining über die Vereinsseite" : "Neue Anfrage über die Vereinsseite", trial ? "New trial training request through the club page" : "New enquiry through the club page"),
+        body: tr(lang, "Über die öffentliche Vereinsseite ist eine neue Anfrage eingegangen. Du findest sie unter Verein, Interessenten.", "A new enquiry arrived through the public club page. You find it under Club, Interested people."),
         category: "reminders",
         ctaLabel: tr(lang, "Zum Verein", "Go to the club"),
         ctaUrl: SITE_URL,

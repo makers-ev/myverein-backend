@@ -91,6 +91,8 @@ describe("club leads", () => {
     expect(row!.privacyAcceptedAt).not.toBeNull();
     const notices = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.eventKey, "lead.new"), eq(messageDeliveries.refId, row!.id)));
     expect(notices.length).toBeGreaterThan(0);
+    // Neutral wording: nothing typed into the public form ends up in the notice.
+    for (const n of notices) expect(JSON.stringify(n.content ?? {})).not.toMatch(/Ina|schnuppern/);
   });
 
   it("merges duplicates of an open lead and ignores departments the page does not offer", async () => {

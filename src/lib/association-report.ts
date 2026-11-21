@@ -93,7 +93,17 @@ export function computeAssociationReport(input: ClubStatsInput, options: ReportO
   const categoryOrder = new Map(input.categories.map((c, i) => [c.name, i]));
   const deptNames = new Map(input.departments.map((d) => [d.id, d.name]));
 
-  const present = input.members.filter((m) => m.status !== "interessent" && m.joinedAt <= stichtag && (m.leftAt === null ? !isLeftStatus(m.status) : m.leftAt > stichtag));
+  // Exit day of a member who left without `left_at` (e.g. `verstorben` recorded without a date): the latest exit in the status
+  // history. Without any recorded exit day the person is not counted (the day cannot be placed before or after the Stichtag).
+  const exitDay = new Map<string, string>();
+  for (const e of input.exits) if (!exitDay.has(e.clubMemberId) || exitDay.get(e.clubMemberId)! < e.effectiveOn) exitDay.set(e.clubMemberId, e.effectiveOn);
+  const leftAfterStichtag = (m: (typeof input.members)[number]): boolean => {
+    if (m.leftAt !== null) return m.leftAt > stichtag;
+    if (!isLeftStatus(m.status)) return true;
+    const day = exitDay.get(m.id);
+    return day !== undefined && day > stichtag;
+  };
+  const present = input.members.filter((m) => m.status !== "interessent" && m.joinedAt <= stichtag && leftAfterStichtag(m));
 
   const deptsOf = new Map<string, string[]>();
   if (ordered.includes("department")) {
