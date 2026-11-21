@@ -11,6 +11,7 @@ import { clubExternalInvites } from "../db/schema/external-access.js";
 import { locations } from "../db/schema/locations.js";
 import { sponsors } from "../db/schema/sponsors.js";
 import { ASSIGNABLE_ROLE_TYPES } from "../lib/club-permissions.js";
+import { resolveClubAudience } from "../lib/audience.js";
 import { createExternalInvite, externalPathAllowed, isExternalOnly } from "../lib/external-access.js";
 import { clubMemberRoutes } from "./club-members.js";
 import { externalAccessRoutes, externalRoutes } from "./external-access.js";
@@ -155,6 +156,18 @@ describe("external access API", () => {
     // The board (members:write) keeps access; self-service paths stay open.
     expect((await authCall(club.founder, `list-members?organizationId=${club.clubId}`)).status).toBe(200);
     expect((await authCall(sponsorUser, "list")).status).toBe(200);
+  });
+
+  it("never makes an external login (or an interested person) a recipient of club communication", async () => {
+    const sponsorMember = (await db.select().from(sponsors).where(eq(sponsors.id, sponsorId)))[0]!.linkedMemberId!;
+    for (const audience of [{ all: true }, { roleTypes: ["sponsor"] }, { all: true, roleTypes: ["sponsor", "dienstleister"] }] as const) {
+      const { recipients } = await resolveClubAudience(club.clubId, audience as never);
+      expect(recipients.map((r) => r.accountMemberId), JSON.stringify(audience)).not.toContain(sponsorMember);
+      expect(recipients.map((r) => r.userId)).not.toContain(sponsorUser.userId);
+    }
+    // A plain member is still reached by "all".
+    const all = await resolveClubAudience(club.clubId, { all: true });
+    expect(all.recipients.map((r) => r.userId)).toContain(club.members.plain!.userId);
   });
 
   it("gives service providers time-boxed assignments; details only once the window started", async () => {

@@ -8,6 +8,11 @@ import { pushTokens, type AnnouncementAudience, type CommunicationChannel } from
 import { guardianLinks } from "../db/schema/guardian-links.js";
 import { departments } from "../db/schema/departments.js";
 import { effectiveStatus, todayBerlin } from "./member-lifecycle.js";
+import { EXTERNAL_ROLE_TYPES } from "./club-permissions.js";
+
+const EXTERNAL = new Set<string>(EXTERNAL_ROLE_TYPES);
+/** Same rule as `isExternalOnly` in lib/external-access.ts (kept local: that module imports Better Auth). */
+const isExternalOnly = (orgRole: string, roleTypes: readonly string[]) => orgRole === "guest" && roleTypes.length > 0 && roleTypes.every((r) => EXTERNAL.has(r));
 
 /**
  * Audience resolver (Wave 9 B5, ADR-006). `resolveAudience` is a pure function: audience definition + candidate persons ->
@@ -42,6 +47,8 @@ export interface AudienceCandidate {
   guardianOf: string[];
   /** Number of enabled push tokens of the account. */
   pushTokenCount: number;
+  /** External login (Wave 15 B2: guest account whose roles are only sponsor / dienstleister): never a recipient of club communication. */
+  externalOnly?: boolean;
 }
 
 export interface RecipientChannels {
@@ -120,6 +127,7 @@ export function normalizeEmail(value: string | null | undefined): string | null 
 const personKey = (c: AudienceCandidate): string => c.clubMemberId ?? `acct:${c.accountMemberId ?? c.userId ?? "unknown"}`;
 
 function isEligible(c: AudienceCandidate, today: string): boolean {
+  if (c.externalOnly) return false;
   const status = effectiveStatus({ status: c.status, leftAt: c.leftAt }, today);
   return !(EXCLUDED_RECIPIENT_STATUSES as readonly string[]).includes(status);
 }
@@ -135,7 +143,8 @@ const hasAny = <T>(list: readonly T[] | undefined, wanted: ReadonlySet<T>): bool
  * Pure resolver. Rules:
  * - the audience is the UNION of `all`, `departmentIds`, `roleTypes` (accounts only), `categoryKeys`, `memberIds`;
  *   an empty definition matches nobody (deny by default);
- * - `all` means every club member (a row in `club_members`), not bare accounts;
+ * - `all` means every club member (a row in `club_members`, not `interessent`), not bare accounts;
+ * - external logins (sponsor / dienstleister only, Wave 15) are never recipients;
  * - dormant and left members (incl. a past `left_at`) are never recipients, neither directly nor as guardian target;
  * - `includeGuardians` (default true) adds the guardians of every matched ward;
  * - deduplicated by person and by e-mail address: a shared address belongs to the first person (accounts before
@@ -159,7 +168,8 @@ export function resolveAudience(audience: AnnouncementAudience, candidates: read
   const direct = new Map<string, AudienceCandidate>();
   for (const c of eligible) {
     const matches =
-      (audience.all === true && c.clubMemberId !== null) ||
+      // "All" means the members of the club: not interested people (`interessent`, incl. the rows of external guest accounts).
+      (audience.all === true && c.clubMemberId !== null && effectiveStatus({ status: c.status, leftAt: c.leftAt }, today) !== "interessent") ||
       hasAny(c.departmentIds, departmentIds) ||
       (c.accountMemberId !== null && hasAny(c.roleTypes, roleTypes)) ||
       (c.categoryKey !== null && categoryKeys.has(c.categoryKey)) ||
@@ -253,6 +263,7 @@ export async function loadAudienceCandidates(clubId: string, executor: DbExecuto
       clubMemberId: clubMembers.id,
       accountMemberId: clubMembers.memberId,
       userId: member.userId,
+      orgRole: member.role,
       displayName: clubMembers.displayName,
       firstName: clubMembers.firstName,
       status: clubMembers.status,
@@ -270,7 +281,7 @@ export async function loadAudienceCandidates(clubId: string, executor: DbExecuto
   // Accounts of the club without a club_members row (e.g. external guardians): addressable via roles / guardian links only.
   const linkedAccountIds = memberRows.map((r) => r.accountMemberId).filter((id): id is string => id !== null);
   const accountRows = await executor
-    .select({ accountMemberId: member.id, userId: member.userId, displayName: user.name, accountEmail: user.email })
+    .select({ accountMemberId: member.id, userId: member.userId, orgRole: member.role, displayName: user.name, accountEmail: user.email })
     .from(member)
     .innerJoin(user, eq(user.id, member.userId))
     .where(eq(member.organizationId, clubId));
@@ -335,6 +346,7 @@ export async function loadAudienceCandidates(clubId: string, executor: DbExecuto
     roleTypes: r.accountMemberId ? (rolesByAccount.get(r.accountMemberId) ?? []) : [],
     guardianOf: r.accountMemberId ? (wardsByGuardian.get(r.accountMemberId) ?? []) : [],
     pushTokenCount: r.userId ? (tokensByUser.get(r.userId) ?? 0) : 0,
+    externalOnly: r.orgRole ? isExternalOnly(r.orgRole, r.accountMemberId ? (rolesByAccount.get(r.accountMemberId) ?? []) : []) : false,
   }));
   for (const a of bareAccounts) {
     candidates.push({
@@ -352,6 +364,7 @@ export async function loadAudienceCandidates(clubId: string, executor: DbExecuto
       roleTypes: rolesByAccount.get(a.accountMemberId) ?? [],
       guardianOf: wardsByGuardian.get(a.accountMemberId) ?? [],
       pushTokenCount: tokensByUser.get(a.userId) ?? 0,
+      externalOnly: isExternalOnly(a.orgRole, rolesByAccount.get(a.accountMemberId) ?? []),
     });
   }
   return candidates;

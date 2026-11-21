@@ -50,6 +50,16 @@ const keys = (c: AudienceCandidate[], a: Parameters<typeof resolveAudience>[0], 
   resolveAudience(a, c, { today: TODAY, ...o }).recipients.map((r) => r.clubMemberId ?? r.key);
 
 describe("resolveAudience (pure)", () => {
+  it("leaves interested people out of 'all' and external logins out of everything (Wave 15)", () => {
+    const member = cand();
+    const interested = cand({ status: "interessent", contactEmail: "lead@example.test" });
+    const sponsor = account({ status: "interessent", roleTypes: ["sponsor"], externalOnly: true });
+    const keys = (a: Parameters<typeof resolveAudience>[0]) => resolveAudience(a, [member, interested, sponsor]).recipients.map((r) => r.key);
+    expect(keys({ all: true })).toEqual([member.clubMemberId]);
+    expect(keys({ roleTypes: ["sponsor"] })).toEqual([]);
+    expect(keys({ memberIds: [interested.clubMemberId!] })).toEqual([interested.clubMemberId]);
+  });
+
   it("matches nobody for an empty definition (deny by default)", () => {
     expect(keys([account(), cand({ contactEmail: "a@example.test" })], {})).toEqual([]);
     expect(keys([account()], { all: false, departmentIds: [], memberIds: [] })).toEqual([]);
