@@ -153,7 +153,7 @@ describe("public club page", () => {
     expect((await call(board, "/club-public-profile/settings", { method: "PUT", clubId: club.clubId, body: { publicProfileEnabled: true } })).status).toBe(200);
     const res = await pub(`/public/clubs/${club.slug}`);
     expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toMatch(/^public, max-age=300/);
+    expect(res.headers.get("cache-control")).toBe("public, no-cache");
     const text = await res.clone().text();
     const data = (await json(res)).data;
     expect(Object.keys(data).sort()).toEqual([...PUBLIC_CLUB_KEYS].sort());
@@ -219,6 +219,40 @@ describe("public club page", () => {
     expect(known.status).toBe(403);
     expect(unknown.status).toBe(403);
     expect(await known.text()).toBe(await unknown.text());
+  });
+
+  it("finds only opted-in, discoverable, live clubs with name/slug/city/logo (B5)", async () => {
+    const search = async (qs: string) => pub(`/public/clubs?${qs}`);
+    for (const qs of ["", "q=ab", "city=W", `q=${encodeURIComponent("Forms public")}&city=W`]) {
+      const res = await search(qs);
+      expect(res.status, qs).toBe(400);
+      expect((await json(res)).error, qs).toMatchObject({ code: "QUERY_TOO_SHORT", details: { code: "query_too_short", min: 3, minCity: 2 } });
+    }
+    const names = async (qs: string) => (await json(await search(qs))).data.map((x: { slug: string }) => x.slug);
+    // Live but not discoverable: invisible, like a club that does not exist.
+    expect(await names(`q=${encodeURIComponent(`public ${suffix}`)}`)).toEqual([]);
+    await call(board, "/club-public-profile/settings", { method: "PUT", clubId: club.clubId, body: { discoverable: true } });
+    const res = await search(`q=${encodeURIComponent(`public ${suffix}`)}`);
+    expect(res.headers.get("cache-control")).toBe("public, no-cache");
+    const hits = (await json(res)).data;
+    expect(hits).toEqual([{ slug: club.slug, name: `Forms public ${suffix}`, city: "Wiesbach", logoUrl: expect.stringMatching(/\/media\//) }]);
+    expect(await names("city=wiesb")).toContain(club.slug);
+    // The other club (no public page) never shows up, also not via LIKE metacharacters.
+    expect(await names(`q=${encodeURIComponent(`public-other ${suffix}`)}`)).toEqual([]);
+    expect(await names("q=%25%25%25")).toEqual([]);
+    expect(await names("q=___")).toEqual([]);
+    // Suspended or not enabled: gone.
+    await db.insert(clubPlatformStatus).values({ clubId: club.clubId, suspendedAt: new Date(), suspensionReason: "Test" });
+    expect(await names("city=wiesb")).not.toContain(club.slug);
+    await db.delete(clubPlatformStatus).where(eq(clubPlatformStatus.clubId, club.clubId));
+    expect(await names("city=wiesb")).toContain(club.slug);
+
+    process.env.PUBLIC_CLUB_SEARCH_LIMIT_PER_HOUR = "2";
+    const ip = randomUUID();
+    const statuses: number[] = [];
+    for (let i = 0; i < 3; i++) statuses.push((await pub("/public/clubs?city=wiesb", { "x-forwarded-for": ip })).status);
+    expect(statuses).toEqual([200, 200, 429]);
+    delete process.env.PUBLIC_CLUB_SEARCH_LIMIT_PER_HOUR;
   });
 
   it("rate limits failed lookups and all requests per client", async () => {

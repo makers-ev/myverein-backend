@@ -1,12 +1,13 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
-import { and, asc, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, asc, eq, gte, ilike, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import type { Context } from "hono";
 
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { calendars } from "../db/schema/calendars.js";
 import { clubPublicProfiles, type ClubPublicProfileRow, type PublicProfileContent } from "../db/schema/club-public-profiles.js";
+import { clubPlatformStatus } from "../db/schema/club-platform.js";
 import { clubSettings } from "../db/schema/club-settings.js";
 import { departments } from "../db/schema/departments.js";
 import { events } from "../db/schema/events.js";
@@ -211,3 +212,35 @@ export function publicCaller(c: Context): { subject: string; trusted: boolean } 
 export const publicIpLimit = () => envInt("PUBLIC_CLUB_IP_LIMIT_PER_HOUR", 300);
 export const publicInvalidLimit = () => envInt("PUBLIC_CLUB_INVALID_LIMIT_PER_HOUR", 30);
 export const publicTrustedLimit = () => envInt("PUBLIC_CLUB_TRUSTED_LIMIT_PER_HOUR", 20_000);
+/** Failed lookups of the trusted server when it forwards no visitor address (shared bucket, so it cannot be used to probe slugs freely). */
+export const publicTrustedInvalidLimit = () => envInt("PUBLIC_CLUB_TRUSTED_INVALID_LIMIT_PER_HOUR", 600);
+export const publicSearchLimit = () => envInt("PUBLIC_CLUB_SEARCH_LIMIT_PER_HOUR", 60);
+export const SEARCH_Q_MIN = 3;
+export const SEARCH_CITY_MIN = 2;
+export const SEARCH_LIMIT = 10;
+
+/**
+ * Club search (Wave 15 B5, E2): only clubs that opted in to BOTH the public page (enabled + published) and `discoverable`, never a
+ * suspended one. Name (`q`, at least 3 characters) and/or city (at least 2); LIKE metacharacters are escaped. At most 10 hits,
+ * name / slug / city / released logo only, no total count: a club that did not opt in is indistinguishable from one that does
+ * not exist.
+ */
+export async function searchPublicClubs(q: string | null, city: string | null) {
+  const like = (v: string) => `%${v.replace(/[\\%_]/g, "\\$&")}%`;
+  const rows = await db
+    .select({ id: organization.id, name: organization.name, slug: organization.slug, published: clubPublicProfiles.published })
+    .from(organization)
+    .innerJoin(clubSettings, and(eq(clubSettings.clubId, organization.id), eq(clubSettings.publicProfileEnabled, true), eq(clubSettings.discoverable, true)))
+    .innerJoin(clubPublicProfiles, and(eq(clubPublicProfiles.clubId, organization.id), isNotNull(clubPublicProfiles.published)))
+    .leftJoin(clubPlatformStatus, eq(clubPlatformStatus.clubId, organization.id))
+    .where(and(isNull(clubPlatformStatus.suspendedAt), q ? ilike(organization.name, like(q)) : undefined, city ? sql`${clubPublicProfiles.published}->>'city' ILIKE ${like(city)}` : undefined))
+    .orderBy(sql`lower(${organization.name})`, asc(organization.id))
+    .limit(SEARCH_LIMIT);
+  const out = [];
+  for (const r of rows) {
+    const content = normalizeContent(r.published);
+    const urls = await publicMediaUrls(r.id, [content.logoKey]);
+    out.push({ slug: r.slug, name: r.name, city: content.city, logoUrl: content.logoKey ? (urls.get(content.logoKey) ?? null) : null });
+  }
+  return out;
+}
