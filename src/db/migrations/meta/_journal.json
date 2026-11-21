@@ -414,6 +414,13 @@
       "when": 1793278280173,
       "tag": "0058_acknowledgement-status-check",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1795259337992,
+      "tag": "0059_sponsors",
+      "breakpoints": true
     }
   ]
 }

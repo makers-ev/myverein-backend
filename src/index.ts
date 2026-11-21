@@ -74,6 +74,7 @@ import { notificationPreferenceRoutes, unsubscribeRoutes } from "./routes/notifi
 import { notificationRoutes } from "./routes/notifications.js";
 import { pushTokenRoutes } from "./routes/push-tokens.js";
 import { rateCardRoutes, timeEntryRoutes, timeReportRoutes } from "./routes/time-tracking.js";
+import { sponsorRoutes } from "./routes/sponsors.js";
 import { trustedOrigins } from "./lib/trusted-origins.js";
 
 const app = new Hono<LoggerEnv>();
@@ -197,6 +198,7 @@ app.route("/elections", electionRoutes);
 app.route("/locations", locationRoutes);
 app.route("/inventory-items", inventoryItemRoutes);
 app.route("/media", mediaRoutes);
+app.route("/sponsors", sponsorRoutes);
 
 const port = Number(process.env.PORT ?? 3000);
 // Loopback-only by default -- LAN testing (a browser hitting this machine's

@@ -297,6 +297,11 @@ export const AUDIT_EVENTS = {
   "retention_policy.reset": spec(["category", "changedBy", "clubId"]),
   "retention_policy.update": spec(["category", "changedBy", "clubId", "retainDays"]),
   "session.create": spec(["ipAddress", "sessionId", "userAgent"]),
+  // Wave 15: outreach and platform
+  "sponsor.create": spec(["clubId", "contacts", "sponsorId", "visibility"]),
+  "sponsor.update": spec(["changedFields", "clubId", "sponsorId"]),
+  "sponsor.delete": spec(["clubId", "hadLogo", "sponsorId"]),
+  "sponsor.contact_change": spec(["action", "clubId", "contactId", "sponsorId"]),
 } as const satisfies Record<string, AuditEventSpec>;
 
 export type AuditEventType = keyof typeof AUDIT_EVENTS;

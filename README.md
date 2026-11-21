@@ -12,6 +12,7 @@ Clone it, set three environment variables, run `docker compose up`, and you have
 - [Architecture](#architecture)
 - [Data model](#data-model)
 - [Documents and PDF (Wave 13)](#documents-and-pdf-wave-13)
+- [Outreach and platform (Wave 15)](#outreach-and-platform-wave-15)
 - [Notification catalog](#notification-catalog)
 - [API reference](#api-reference)
 - [Rights and read scoping](#rights-and-read-scoping-wave-7-b7b8)
@@ -130,6 +131,7 @@ npm run seed:demo -- --force       # allow NODE_ENV=production (never use on a r
 | Acknowledgements and cards (Wave 13) | 9 requests on two documents: house rules (confirmed by themselves, confirmed on paper by the board, one **expired**, open) and holiday camp consent for children (re-authentication required, answered by the guardian for Noah, two open). 11 membership cards: one re-issued (old QR invalid), one revoked by the board, one revoked by an exit; 4 card checks in the audit log. |
 | Time tracking and rates (Wave 12 B20) | 6 rate cards (EUR/h): `mitglied` 8 ("Alle Mitglieder", from 1 January of last year), `trainer` 18, `abteilungsleitung` 22 until the end of this month and **24 from the first of next month** (future dated), Marco's personal 20 (**lapsed** 31 days ago) and 25 (since 30 days ago); no two cards of the same target overlap. 37 time entries of the last 8 weeks for 6 people (Marco, Nina, Ute, Lukas, Jan, Lena): 28 confirmed (by `vorsitz@` or `stellv.vorsitz@`, never by the person themselves), 7 open, 1 rejected, **1 running** (Lukas, started 90 minutes before the seed), 1 over Berlin midnight (Jan); sources `stempeln` 17 / `aus_termin` 9 (tied to the Vereinsputztag and the finished football trainings) / `manuell` 11. Confirmed entries give a report of about 72 h and 1,167 EUR for 6 people and 6 events, Marco with two rates in the period (`rateCents` null), no `rateMissing`. Who has no rate: external guests (`gast@`, `erziehungsberechtigt@`), they have no entries and get `403 no_rate`. Running clock: stopping works for 16 h, later delete it and enter it by hand. |
 | Heute and search (Wave 14) | `mitglied@` and `trainer@` see unanswered events in the next 14 days, a cancelled event they had answered, unread announcements, own loans due soon and overdue, an open ballot; `vorsitz@` sees open applications and exits and maintenance-due items |
+| Outreach (Wave 15) | **Sponsors:** 5 partners covering every derived state — active and public (Autohaus, contract ends in ~11 months), active and **expiring soon** (Bäckerei, 21 days), **planned** (Sparkasse, starts in 45 days), **expired** (Getränke Hahn) and internal only (Physiopraxis); 4 contacts, one primary each; no logos (upload one as `kassenwart@` or `vorsitz@`) |
 | Audit | One entry per seeded member, role, field, calendar and every service call (ballots, elections, minutes, invitations, consents) |
 
 **Time tracking: which login for what.**
@@ -242,7 +244,7 @@ src/
 
 ## Data model
 
-Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns forty-nine more: the Wave 1 set — `club_memberships` (deprecated since Wave 7, no longer written), `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_key_history` (Wave 7 B14), `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents` — and the Wave 7 member-foundation set — `club_members`, `member_categories`, `club_member_departments`, `club_member_status_history`, `club_settings`, `club_exit_requests`, `club_member_invites`, `media_files` (upload registry, B18) — and the Wave 8 form-builder set — `forms`, `form_versions`, `form_submissions`, `form_submission_files`, `member_field_definitions`, `member_field_values` ([Form builder data model](#form-builder-data-model-wave-8)) — and the Wave 9 communication/queue set — `jobs`, `club_announcements`, `message_deliveries`, `push_tokens`, `notification_preferences` ([Communication and job queue data model](#communication-and-job-queue-data-model-wave-9)). See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
+Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns forty-nine more: the Wave 1 set — `club_memberships` (deprecated since Wave 7, no longer written), `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_key_history` (Wave 7 B14), `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents` — and the Wave 7 member-foundation set — `club_members`, `member_categories`, `club_member_departments`, `club_member_status_history`, `club_settings`, `club_exit_requests`, `club_member_invites`, `media_files` (upload registry, B18) — and the Wave 8 form-builder set — `forms`, `form_versions`, `form_submissions`, `form_submission_files`, `member_field_definitions`, `member_field_values` ([Form builder data model](#form-builder-data-model-wave-8)) — and the Wave 9 communication/queue set — `jobs`, `club_announcements`, `message_deliveries`, `push_tokens`, `notification_preferences` ([Communication and job queue data model](#communication-and-job-queue-data-model-wave-9)) — and the Wave 15 outreach/platform set — `sponsors`, `sponsor_contacts` ([Outreach and platform](#outreach-and-platform-wave-15)). See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
 
 ```mermaid
 erDiagram
@@ -1377,6 +1379,22 @@ diff before.txt after.txt                 # only the new tables and the Wave 7 c
 
 The script runs in a `READ ONLY` transaction and prints only table names, counts and flags (`OK`/`FAIL`), never names, e-mail addresses or member numbers, so the output can be pasted into a ticket. Checks (all must be `OK`, exit code 0): every `member` has its `club_members` row, no duplicate `member_id`, linked rows match the account's club, no `ausgetreten` without `left_at`, every linked member has a category and `last_user_id`, no umlaut/unnormalised category keys and all five default categories per club, no dangling `guardian_links` ward and the legacy `ward_member_id` column gone, no foreign/external/traversal `photo_key`, every key holder covered by a history entry, no `open` wifi with a password, `meetings.type` within the controlled set, no unvalidated constraint. Informational lines (not failures): duplicate member-number groups (legacy data), `aktiv` members with a future `left_at`, cross-club guardian links. The script needs `tsx`, i.e. host mode (a checkout), not the production container.
 
+## Outreach and platform (Wave 15)
+
+Wave 15 covers what a club needs towards the outside and as a customer of the platform: sponsors and partners, restricted external logins, an optional public club page with an enquiry/trial-training form, an opt-in club search, association reports and the platform admin tools. **No billing:** neither sponsoring amounts nor plan prices are handled; MyVerein stays "everything digital except billing". Plan: vault `Implementation Plan - MyVerein Wave 15`.
+
+<a id="sponsors-wave-15"></a>
+### Sponsors and partners (Wave 15 B1)
+
+Tables (migration `0059_sponsors`):
+
+| Table | Columns | Notes |
+|---|---|---|
+| `sponsors` | `id`, `club_id` (FK `organization`, cascade), `name`, `logo_key` (FK `media_files.storage_key`, set null — a key, never a URL), `website` (external http(s) link), `description`, `consideration` (what the club gives in return, free text), `starts_on`/`ends_on` (dates, both optional, `ends_on >= starts_on`), `visibility` (`intern` \| `oeffentlich`, CHECK), `notes` (internal), `linked_member_id` (FK `member`, set null: the sponsor's external login, Wave 15 B2), `created_by`, timestamps | Status is **derived at read time** from the Berlin day: `geplant` (start in the future), `aktiv`, `abgelaufen` (end before today); `expiringSoon` = active and ending within `SPONSOR_EXPIRING_DAYS` (default 60), `daysLeft`. No job writes a status. |
+| `sponsor_contacts` | `id`, `sponsor_id` (FK, cascade), `name`, `role`, `email`, `phone`, `is_primary`, `created_at` | Business contacts, internal only; at most 10 per sponsor, one primary (setting a new primary clears the old one). |
+
+Rights (deny-by-default, `src/lib/club-permissions.ts`): `sponsors:read` = `vorsitz`, `stellv_vorsitz`, `kassenwart`, `schriftfuehrer`, `beisitzer`; `sponsors:write` = the same without `beisitzer`. Plain members, trainers, guardians and external roles get `403`. The logo is uploaded through the media layer (`PUT /sponsors/:id/logo`: PNG/JPEG/WebP, max 2 MB, magic bytes, EXIF strip, quota; registry owner `sponsor_logo`, visibility `private`) and returned only as a short-lived signed URL (`logoUrl`) after the permission check. Audit: `sponsor.create`, `sponsor.update` (`changedFields`), `sponsor.delete`, `sponsor.contact_change` (ids and field names only). Tests: `src/routes/sponsors.test.ts`, rights matrix.
+
 ## Documents and PDF (Wave 13)
 
 Wave 13 adds document handling: versioned club documents (`club_info`), the document archive, the personal storage of members, branding, a storage quota and PDF generation. Decision record: vault ADR-010 "PDF-Erzeugung" (status Proposed, awaiting product owner sign-off).
@@ -1757,6 +1775,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `consent_not_for_guardian` | 403 | `routes/member-consents.ts` |
 | `consent_requires_guardian` | 403 | `routes/member-consents.ts` |
 | `consent_text_outdated` | 409 | `lib/consent.ts` |
+| `contact_limit` | 422 | `routes/sponsors.ts` |
 | `count_mismatch` | 409 | `lib/ballots.ts` |
 | `csv_empty` | 422 | `lib/member-import.ts` |
 | `csv_malformed` | 422 | `lib/member-import.ts` |
@@ -1821,7 +1840,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `invalid_max_choices` | 422 | `lib/ballots.ts` |
 | `invalid_min_staff` | 422 | `routes/event-helpers.ts` |
 | `invalid_party_size` | 422 | `lib/event-registration.ts` |
-| `invalid_period` | 422 | `lib/absences.ts` |
+| `invalid_period` | 422 | `lib/absences.ts`, `routes/sponsors.ts` |
 | `invalid_selection` | 422 | `lib/ballots.ts` |
 | `invalid_time` | 422 | `lib/time-tracking.ts`, `routes/event-helpers.ts` |
 | `invalid_window` | 422 | `lib/ballots.ts` |
@@ -2348,6 +2367,11 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `/club-settings/branding/preview` | POST | `branding:write` | One-page test PDF (`application/pdf`, `no-store`) with the current branding and dummy data; nothing is stored or counted against the quota; 10/min per user |
 | `/admin/club-storage` | GET | platform admin | Wave 13 A1: `?page&pageSize&q` (q searches name and slug); `{ data: [{ clubId, name, slug, usedBytes, quotaBytes, customQuota, percent, overQuota }], page, pageSize, total, defaultQuotaBytes }`. Usage and quota only |
 | `/admin/club-storage/:clubId` | PATCH | platform admin | Body `{ quotaBytes: int 1..1 TiB \| null }` (`null` = platform default); audit `club_storage.quota_update`; `404` unknown club, `422` invalid value. Answer `{ data: { clubId, quotaBytes, effectiveQuotaBytes } }` |
+| `/sponsors` | GET, POST | session + `clubGuard`; GET `sponsors:read`, POST `sponsors:write` (`403` otherwise, also for external roles) | Wave 15 B1. `GET ?status=geplant\|aktiv\|abgelaufen\|laeuft_aus&visibility=intern\|oeffentlich&q=` -> `{ data: [{ id, name, website, description, consideration, startsOn, endsOn, visibility, notes, status, expiringSoon, daysLeft, logoUrl (signed or null), contacts: [{ id, name, role, email, phone, isPrimary }], linkedAccount: { memberId, name } \| null, createdAt, updatedAt }] }` (`laeuft_aus` = active and ending within `SPONSOR_EXPIRING_DAYS`). `POST` body `{ name, website?, description?, consideration?, startsOn?, endsOn?, visibility? (default intern), notes?, contacts?: [{ name, role?, email?, phone?, isPrimary? }] (max 10) }` -> `201`; `website` must be http(s), `endsOn >= startsOn` (`422`) |
+| `/sponsors/:id` | GET, PATCH, DELETE | as above (`sponsors:read` / `sponsors:write`) | One sponsor (same shape); `PATCH` partial (same fields without contacts, `null` clears; period checked against the stored values, `422 invalid_period`); `DELETE` -> `204`, removes the logo file; ids of another club `404` |
+| `/sponsors/:id/logo` | PUT, DELETE | `sponsors:write` | `PUT` multipart `file` (PNG/JPEG/WebP, max 2 MB, magic bytes, EXIF stripped, quota) replaces the logo -> sponsor shape with a signed `logoUrl`; `DELETE` -> `204` |
+| `/sponsors/:id/contacts` | POST | `sponsors:write` | `{ name, role?, email?, phone?, isPrimary? }` -> `201 { data: contact }`; more than 10 `422 contact_limit` |
+| `/sponsors/:id/contacts/:contactId` | PATCH, DELETE | `sponsors:write` | Partial update / `204`; unknown or foreign ids `404` |
 
 <a id="club-registration"></a>
 ### Club registration (Wave 6)
@@ -2670,6 +2694,7 @@ All variables live in `.env.example`. Wave 10 B1/B2 (privacy foundation, audit l
 | `FORM_DRAFT_TTL_DAYS` | no | Idle days after which an application draft and its files are swept (default `30`, clamped 1–365); the job `form_cleanup_sweep` runs hourly (`src/lib/form-sweeper.ts`) |
 | `FORM_REJECTED_FILE_TTL_DAYS` | no | Days after the rejection of an application until its uploaded files are deleted (default `30`, clamped 1–3650); also the time after which the **answers** of a rejected/withdrawn *child* application are erased. The answers of adults' applications stay (decision record). Run by the hourly job `form_cleanup_sweep` and lazily (see Retention) |
 | `FORM_SUBMISSIONS_PER_HOUR` | no | Per-user limit of creating drafts and of submitting forms per hour (`POST /form-submissions`, `POST /form-submissions/:id/submit`, `DELETE /form-submissions/:id`, separate buckets); default `20`, clamped 1–10000. All `/form-submissions` routes additionally share a flat 120 requests/min per user |
+| `SPONSOR_EXPIRING_DAYS` | no | Days before `sponsors.ends_on` from which an active sponsor is `expiringSoon` / listed under `?status=laeuft_aus` (default `60`, 1-365) |
 | `PORT` | no | Port the Hono server listens on (default `3000`) |
 | `COOKIE_DOMAIN` | no | Registrable base domain (e.g. `example.com`) for cross-subdomain session cookies; only effective when `BACKEND_URL` is `https://` |
 | `BIND_HOST` | no | Host interface `compose.yml` binds the backend port to (default `127.0.0.1`, loopback only; set `0.0.0.0` only for LAN device testing). Read by compose, not by the Node process |

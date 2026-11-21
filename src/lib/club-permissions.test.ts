@@ -172,3 +172,14 @@ describe("Wave 13 permissions (documents, cards, branding, storage)", () => {
     for (const p of NEW) expect(hasClubPermission([], p)).toBe(false);
   });
 });
+
+describe("Wave 15 permissions (sponsors)", () => {
+  it("lets the board read sponsors and the managing board roles write them; everybody else nothing", () => {
+    const read = ["vorsitz", "stellv_vorsitz", "kassenwart", "schriftfuehrer", "beisitzer"];
+    const write = ["vorsitz", "stellv_vorsitz", "kassenwart", "schriftfuehrer"];
+    for (const role of CLUB_ROLE_TYPES) {
+      expect(hasClubPermission([role], "sponsors:read"), `${role} read`).toBe(read.includes(role));
+      expect(hasClubPermission([role], "sponsors:write"), `${role} write`).toBe(write.includes(role));
+    }
+  });
+});

@@ -72,7 +72,9 @@ export type ClubPermission =
   | "member_cards:verify" // Wave 13: scan/check membership cards of the own club
   | "member_cards:manage" // Wave 13: issue, re-issue, revoke membership cards of other members, bulk print
   | "branding:write" // Wave 13: logo, colours and letterhead of generated documents
-  | "storage:read"; // Wave 13: storage usage and quota of the club
+  | "storage:read" // Wave 13: storage usage and quota of the club
+  | "sponsors:read" // Wave 15: sponsor/partner list incl. contacts and internal notes (board)
+  | "sponsors:write"; // Wave 15: create/edit/delete sponsors, their logo and contacts
 
 /**
  * Which permissions each role_type grants. A membership can hold several
@@ -121,6 +123,8 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "member_cards:manage",
     "branding:write",
     "storage:read",
+    "sponsors:read",
+    "sponsors:write",
   ],
   stellv_vorsitz: [
     "members:write",
@@ -155,13 +159,15 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "member_cards:manage",
     "branding:write",
     "storage:read",
+    "sponsors:read",
+    "sponsors:write",
   ],
-  kassenwart: ["members:read_sensitive", "club_stats:read", "time:read_rates", "documents:generate", "storage:read"],
+  kassenwart: ["members:read_sensitive", "club_stats:read", "time:read_rates", "documents:generate", "storage:read", "sponsors:read", "sponsors:write"],
   // A schriftfuehrer's real-world job in a German Verein is literally running
   // meeting agendas/Protokolle, so meetings:write is a natural fit here.
-  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write", "announcements:write", "assembly:manage", "helpers:write", "documents:write", "documents:generate", "member_cards:verify"],
+  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write", "announcements:write", "assembly:manage", "helpers:write", "documents:write", "documents:generate", "member_cards:verify", "sponsors:read", "sponsors:write"],
   // Beisitzer sit on the board, so they may read Vorstandssitzungen and the club KPIs (but write nothing).
-  beisitzer: ["meetings:read_board", "club_stats:read", "member_cards:verify"],
+  beisitzer: ["meetings:read_board", "club_stats:read", "member_cards:verify", "sponsors:read"],
   // Also calendars:write/locations:write/inventory:write, on top of
   // departments:write -- an Abteilungsleitung needs to manage calendars,
   // venues, and equipment day to day, not just the board (same
