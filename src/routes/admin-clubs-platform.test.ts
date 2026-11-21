@@ -1,11 +1,15 @@
+import { randomUUID } from "node:crypto";
+
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { user } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubRegistrations } from "../db/schema/club-registrations.js";
+import { messageDeliveries } from "../db/schema/communication.js";
+import { handleEmailDelivery, notify } from "../lib/notify/index.js";
 import { adminClubRoutes } from "./admin-clubs.js";
 import { clubFormRoutes } from "./club-forms.js";
 import { clubMemberRoutes } from "./club-members.js";
@@ -16,6 +20,8 @@ import { myClubRoutes } from "./my-clubs.js";
  * Platform admin tools (Wave 15 B7): club list/detail, suspension with mandatory reason (enforced by clubGuard, readable hint
  * for members), plan data (no billing), register check link. The sweep over EVERY clubGuard route lives in the rights matrix.
  */
+
+vi.mock("../lib/email.js", () => ({ sendEmail: async () => undefined }));
 
 const app = new Hono();
 app.route("/admin", adminClubRoutes);
@@ -95,6 +101,21 @@ describe("admin clubs (Wave 15 B7)", () => {
     const mine = (await json(await call(club.founder, "/my-clubs"))).data;
     expect(mine.find((x: { clubId: string }) => x.clubId === club.clubId).suspended).toBe(true);
     expect((await json(await call(admin, `/admin/clubs?q=${suffix}&status=suspended`))).data.map((x: { clubId: string }) => x.clubId)).toEqual([club.clubId]);
+  });
+
+  it("sends nothing for a suspended club: new messages are dropped, queued mails skipped, reminders not scheduled", async () => {
+    // A mail queued before the suspension (the club is suspended by the previous test).
+    const [queued] = await db.insert(messageDeliveries).values({ clubId: club.clubId, channel: "email", status: "queued", address: "someone@example.com", eventKey: "test.suspended", refId: randomUUID(), content: { title: "x", body: "y" } as never }).returning();
+    await handleEmailDelivery({ id: randomUUID(), type: "notify.email", payload: { deliveryId: queued!.id }, attempt: 1, maxAttempts: 3 });
+    const [after] = await db.select().from(messageDeliveries).where(eq(messageDeliveries.id, queued!.id));
+    expect(after).toMatchObject({ status: "skipped", errorCode: "club_suspended" });
+
+    const result = await notify({ clubId: club.clubId, class: "optional", eventKey: "test.suspended.new", refId: randomUUID(), audience: { all: true }, content: { title: "Hallo", body: "Welt" }, channels: ["in_app", "email"] });
+    expect(result.recipients).toBe(0);
+    expect(await db.select().from(messageDeliveries).where(eq(messageDeliveries.eventKey, "test.suspended.new"))).toEqual([]);
+    // Same message to the other (active) club goes out.
+    const ok = await notify({ clubId: other.clubId, class: "optional", eventKey: "test.suspended.other", refId: randomUUID(), audience: { all: true }, content: { title: "Hallo", body: "Welt" }, channels: ["in_app"] });
+    expect(ok.recipients).toBeGreaterThan(0);
   });
 
   it("unsuspends with a reason and keeps the history", async () => {

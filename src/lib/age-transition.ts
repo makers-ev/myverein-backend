@@ -1,5 +1,6 @@
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 
+import { suspendedClubIds } from "./club-platform.js";
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMembers, clubMemberStatusHistory, memberCategories } from "../db/schema/club-members.js";
@@ -137,7 +138,10 @@ export async function runAgeTransitionSweep(now: Date = new Date(), scope: { clu
     .innerJoin(organization, eq(organization.id, clubSettings.clubId))
     .where(and(eq(clubSettings.ageTransitionAuto, true), scope.clubId ? eq(clubSettings.clubId, scope.clubId) : undefined));
   const result: AgeTransitionResult = { clubs: 0, moved: 0 };
+  // Wave 15 B7: nothing is changed or announced automatically in a club suspended by the platform.
+  const suspended = await suspendedClubIds(clubs.map((c) => c.id));
   for (const club of clubs) {
+    if (suspended.has(club.id)) continue;
     try {
       const moved = await applyAgeTransitionsForClub(club.id, localDate(now, safeTimezone(club.timezone)));
       result.clubs += 1;

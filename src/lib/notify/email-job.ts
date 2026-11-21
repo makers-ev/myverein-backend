@@ -1,5 +1,6 @@
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 
+import { isClubSuspended } from "../club-platform.js";
 import { organization } from "../../auth/auth-schema.js";
 import { db } from "../../db/client.js";
 import { clubSettings } from "../../db/schema/club-settings.js";
@@ -40,6 +41,11 @@ export async function handleEmailDelivery(job: JobContext): Promise<void> {
 
   if ((await withdrawnAnnouncementIds([delivery.announcementId])).size > 0) {
     await db.update(messageDeliveries).set({ status: "skipped", errorCode: "withdrawn" }).where(open);
+    return;
+  }
+  // Wave 15 B7: mails still queued when the club was suspended are not sent.
+  if (delivery.clubId && (await isClubSuspended(delivery.clubId))) {
+    await db.update(messageDeliveries).set({ status: "skipped", errorCode: "club_suspended" }).where(open);
     return;
   }
   if ((await optedOutDeliveryIds([delivery])).size > 0) {
