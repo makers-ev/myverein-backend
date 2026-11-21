@@ -1,3 +1,4 @@
+import { clubLeads } from "../../db/schema/club-leads.js";
 import { and, eq, inArray, isNotNull, isNull, lt, ne, notExists, sql } from "drizzle-orm";
 
 import { db } from "../../db/client.js";
@@ -296,6 +297,24 @@ export async function eventGuestsOld(ctx: CategoryContext): Promise<CategoryResu
   return { scanned: rows.length, affected: rows.length };
 }
 
+/**
+ * Enquiries of interested people (Wave 15 B4): a lead is deleted `days` after its last change (status change, note, new request),
+ * whatever its status -- converted leads live on as the member record, rejected and forgotten ones are personal data of
+ * non-members without purpose.
+ */
+export async function clubLeadsOld(ctx: CategoryContext): Promise<CategoryResult> {
+  const cutoff = cutoffTime(ctx);
+  const due = sql`SELECT id FROM club_leads WHERE club_id = ${ctx.clubId} AND updated_at < ${cutoff} AND last_request_at < ${cutoff}`;
+  if (ctx.dryRun) {
+    const result = await db.execute(sql`SELECT count(*)::int AS n FROM (${due}) due`);
+    return { scanned: Number((result.rows[0] as { n: number } | undefined)?.n ?? 0), affected: 0 };
+  }
+  const rows = (await db.execute(sql`SELECT d.id FROM (${due} LIMIT ${BATCH}) d`)).rows as Array<{ id: string }>;
+  if (rows.length === 0) return { scanned: 0, affected: 0 };
+  await db.delete(clubLeads).where(inArray(clubLeads.id, rows.map((r) => r.id)));
+  return { scanned: rows.length, affected: rows.length };
+}
+
 export const categoryRunners = {
   registration_proofs_approved: registrationProofs("approved"),
   registration_proofs_rejected: registrationProofs("rejected"),
@@ -310,4 +329,5 @@ export const categoryRunners = {
   consent_proofs: consentProofs,
   event_attendance: eventAttendanceOld,
   event_guests: eventGuestsOld,
+  club_leads: clubLeadsOld,
 } as const satisfies Record<string, (ctx: CategoryContext) => Promise<CategoryResult>>;

@@ -15,6 +15,7 @@ import { locations } from "../db/schema/locations.js";
 import { mediaFiles } from "../db/schema/media-files.js";
 import { sponsors } from "../db/schema/sponsors.js";
 import { isClubSuspended } from "./club-platform.js";
+import { latestPublishedNotice } from "./privacy-notice.js";
 import { clientIp, envInt } from "./rate-limits.js";
 import { publicMediaUrls, syncPublicOptIn } from "./media.js";
 import { todayBerlin } from "./member-lifecycle.js";
@@ -156,6 +157,7 @@ export async function shapePublicClub(club: { id: string; name: string; slug: st
     publicSponsorRows(club.id, content),
   ]);
   const urls = await publicMediaUrls(club.id, [...imageKeysOf(content), ...sponsorRows.map((s) => s.logoKey)]);
+  const notice = content.leadFormEnabled ? await latestPublishedNotice(club.id) : null;
   const url = (key: string | null) => (key ? (urls.get(key) ?? null) : null);
   const departmentList = depts.map((d) => ({ id: d.id, name: d.name }));
   return {
@@ -172,7 +174,13 @@ export async function shapePublicClub(club: { id: string; name: string; slug: st
     departments: departmentList,
     events: evs.map((e) => ({ title: e.title, startsAt: e.startsAt, endsAt: e.endsAt, allDay: e.allDay, cancelled: e.cancelledAt !== null, locationName: e.locationName ?? null })),
     sponsors: sponsorRows.map((s) => ({ name: s.name, website: s.website, logoUrl: url(s.logoKey) })),
-    leadForm: { enabled: content.leadFormEnabled, trialTraining: content.leadFormEnabled && content.trialTrainingEnabled, departments: content.leadFormEnabled ? departmentList : [] },
+    leadForm: {
+      enabled: content.leadFormEnabled,
+      trialTraining: content.leadFormEnabled && content.trialTrainingEnabled,
+      departments: content.leadFormEnabled ? departmentList : [],
+      // The club's published privacy notice (a public legal text) for the enquiry form; only while the form is on.
+      privacyNotice: notice ? { version: notice.version, body: notice.body, publishedAt: notice.publishedAt } : null,
+    },
   };
 }
 

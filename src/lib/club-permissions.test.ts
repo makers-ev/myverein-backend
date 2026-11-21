@@ -174,6 +174,10 @@ describe("Wave 13 permissions (documents, cards, branding, storage)", () => {
 });
 
 describe("Wave 15 permissions", () => {
+  it("lets the board and department leads manage enquiries, nobody else", () => {
+    for (const role of CLUB_ROLE_TYPES) expect(hasClubPermission([role], "leads:write"), role).toBe(["vorsitz", "stellv_vorsitz", "schriftfuehrer", "abteilungsleitung"].includes(role));
+  });
+
   it("lets only vorsitz, stellv_vorsitz and schriftfuehrer edit and publish the public page", () => {
     for (const role of CLUB_ROLE_TYPES) expect(hasClubPermission([role], "public_profile:write"), role).toBe(["vorsitz", "stellv_vorsitz", "schriftfuehrer"].includes(role));
   });

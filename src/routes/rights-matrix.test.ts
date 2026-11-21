@@ -86,6 +86,7 @@ import { sponsorRoutes } from "./sponsors.js";
 import { clubPublicProfileRoutes } from "./club-public-profile.js";
 import { publicClubRoutes } from "./public-clubs.js";
 import { externalAccessRoutes, externalRoutes } from "./external-access.js";
+import { clubLeadRoutes } from "./club-leads.js";
 
 /**
  * Rights matrix (Wave 7 B12 part, deny-by-default): EVERY registered writing route (POST/PATCH/PUT/DELETE)
@@ -179,6 +180,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/club-public-profile", "clubPublicProfileRoutes", clubPublicProfileRoutes],
   ["/external-access", "externalAccessRoutes", externalAccessRoutes],
   ["/external", "externalRoutes", externalRoutes],
+  ["/club-leads", "clubLeadRoutes", clubLeadRoutes],
 ];
 
 const app = new Hono();
@@ -280,6 +282,7 @@ const SELF_SERVICE: Record<string, string> = {
   "DELETE /guardian/wards/:wardId/absences/:id": "guardian withdraws an absence of a ward (guardianScope + can_report_absence)",
   "POST /club-members/me/erasure-request": "the member's own erasure request (a request with a deadline for the board; nothing is erased by it)",
   "POST /guardian/wards/:wardId/erasure-request": "guardian files an erasure request for a ward (guardianScope: a ward that is not the caller's is 404)",
+  "POST /public/clubs/:slug/leads": "public enquiry form: no session, only for live clubs with the form switched on (else 404), rate limited per client / club / address, honeypot; the board is notified",
   "POST /external-access/invites/preview": "external invitation token (session only, the invitee is not a member yet; unknown tokens 404)",
   "POST /external-access/invites/accept": "accepting an own external invitation (session only, bound to the secret token and the verified account e-mail)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
@@ -356,6 +359,7 @@ const GUEST_DENIED_READS: Array<[string, string]> = [
   ["GET", `/departments/${"00000000-0000-4000-8000-000000000001"}`],
   ["GET", "/sponsors"],
   ["GET", "/club-public-profile"],
+  ["GET", "/club-leads"],
 ];
 
 /** Routes whose body validation runs before the permission check need a valid sample body. Default `{}`. */
@@ -437,6 +441,8 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "PATCH /sponsors/:id/contacts/:contactId": { name: "Neu" },
   "PUT /club-public-profile": { tagline: "Hallo" },
   "PUT /club-public-profile/settings": { publicProfileEnabled: true },
+  "POST /club-leads": { name: "Interessent" },
+  "PATCH /club-leads/:id": { notes: "Notiz" },
   "POST /external-access/invites": { email: "nobody@example.com", roleType: "sponsor", displayName: "Niemand" },
   "POST /external-access/accounts/:memberId/assignments": { title: "Reinigung", validFrom: "2030-01-01T08:00:00Z", validUntil: "2030-01-01T12:00:00Z" },
 };

@@ -83,7 +83,8 @@ export type ClubPermission =
   | "storage:read" // Wave 13: storage usage and quota of the club
   | "sponsors:read" // Wave 15: sponsor/partner list incl. contacts and internal notes (board)
   | "sponsors:write" // Wave 15: create/edit/delete sponsors, their logo and contacts
-  | "public_profile:write"; // Wave 15: public club page (draft, images, publish/unpublish, opt-in switches)
+  | "public_profile:write" // Wave 15: public club page (draft, images, publish/unpublish, opt-in switches)
+  | "leads:write"; // Wave 15: enquiries / trial training / waitlists of interested people, conversion into a member record
 
 /**
  * Which permissions each role_type grants. A membership can hold several
@@ -135,6 +136,7 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "sponsors:read",
     "sponsors:write",
     "public_profile:write",
+    "leads:write",
   ],
   stellv_vorsitz: [
     "members:write",
@@ -172,11 +174,12 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
     "sponsors:read",
     "sponsors:write",
     "public_profile:write",
+    "leads:write",
   ],
   kassenwart: ["members:read_sensitive", "club_stats:read", "time:read_rates", "documents:generate", "storage:read", "sponsors:read", "sponsors:write"],
   // A schriftfuehrer's real-world job in a German Verein is literally running
   // meeting agendas/Protokolle, so meetings:write is a natural fit here.
-  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write", "announcements:write", "assembly:manage", "helpers:write", "documents:write", "documents:generate", "member_cards:verify", "sponsors:read", "sponsors:write", "public_profile:write"],
+  schriftfuehrer: ["members:write", "club_info:write", "calendars:write", "meetings:write", "locations:write", "inventory:write", "meetings:read_board", "locations:read_access", "club_stats:read", "forms:write", "announcements:write", "assembly:manage", "helpers:write", "documents:write", "documents:generate", "member_cards:verify", "sponsors:read", "sponsors:write", "public_profile:write", "leads:write"],
   // Beisitzer sit on the board, so they may read Vorstandssitzungen and the club KPIs (but write nothing).
   beisitzer: ["meetings:read_board", "club_stats:read", "member_cards:verify", "sponsors:read"],
   // Also calendars:write/locations:write/inventory:write, on top of
@@ -185,7 +188,7 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
   // operational-need reasoning as members:read_sensitive above). Note this
   // is club-wide, not scoped to just their own department -- same shape as
   // their existing departments:write (Wave 1 precedent), not a new gap.
-  abteilungsleitung: ["departments:write", "calendars:write", "locations:write", "inventory:write", "locations:read_access", "announcements:write_department", "absences:read", "attendance:write", "attendance:read", "registrations:read", "helpers:write", "time:write", "documents:generate", "member_cards:verify"],
+  abteilungsleitung: ["departments:write", "calendars:write", "locations:write", "inventory:write", "locations:read_access", "announcements:write_department", "absences:read", "attendance:write", "attendance:read", "registrations:read", "helpers:write", "time:write", "documents:generate", "member_cards:verify", "leads:write"],
   // Trainers may inform their own departments (never club-wide, never urgent); the scope comes from club_roles.department_id.
   trainer: ["announcements:write_department", "absences:read", "attendance:write", "attendance:read", "registrations:read", "documents:generate", "member_cards:verify"],
   erziehungsberechtigt: [],

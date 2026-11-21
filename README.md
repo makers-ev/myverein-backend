@@ -133,6 +133,7 @@ npm run seed:demo -- --force       # allow NODE_ENV=production (never use on a r
 | Heute and search (Wave 14) | `mitglied@` and `trainer@` see unanswered events in the next 14 days, a cancelled event they had answered, unread announcements, own loans due soon and overdue, an open ballot; `vorsitz@` sees open applications and exits and maintenance-due items |
 | Outreach (Wave 15) | **Sponsors:** 5 partners covering every derived state — active and public (Autohaus, contract ends in ~11 months), active and **expiring soon** (Bäckerei, 21 days), **planned** (Sparkasse, starts in 45 days), **expired** (Getränke Hahn) and internal only (Physiopraxis); 4 contacts, one primary each; no logos (upload one as `kassenwart@` or `vorsitz@`) |
 | Public page (Wave 15) | Published, **switched on and findable** (both switches are off for real clubs): tagline, description, address, confirmed club contact, 4 departments, the next events of the Fußball calendar, sponsors shown, enquiry form with trial training; the draft holds one unpublished change |
+| Interested people (Wave 15) | 6 enquiries in every status (neu, kontaktiert, Probetraining with a date, abgelehnt), one merged duplicate, trial training requests and the waitlists of Tennis (2, in order) and Schwimmen; log in as `schriftfuehrer@` or `abteilungsleitung@` |
 | Audit | One entry per seeded member, role, field, calendar and every service call (ballots, elections, minutes, invitations, consents) |
 
 **Time tracking: which login for what.**
@@ -245,7 +246,7 @@ src/
 
 ## Data model
 
-Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns forty-nine more: the Wave 1 set — `club_memberships` (deprecated since Wave 7, no longer written), `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_key_history` (Wave 7 B14), `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents` — and the Wave 7 member-foundation set — `club_members`, `member_categories`, `club_member_departments`, `club_member_status_history`, `club_settings`, `club_exit_requests`, `club_member_invites`, `media_files` (upload registry, B18) — and the Wave 8 form-builder set — `forms`, `form_versions`, `form_submissions`, `form_submission_files`, `member_field_definitions`, `member_field_values` ([Form builder data model](#form-builder-data-model-wave-8)) — and the Wave 9 communication/queue set — `jobs`, `club_announcements`, `message_deliveries`, `push_tokens`, `notification_preferences` ([Communication and job queue data model](#communication-and-job-queue-data-model-wave-9)) — and the Wave 15 outreach/platform set — `sponsors`, `sponsor_contacts`, `club_external_invites`, `external_access_assignments`, `club_platform_status`, `club_status_history`, `club_plans`, `club_public_profiles` ([Outreach and platform](#outreach-and-platform-wave-15)). See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
+Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns forty-nine more: the Wave 1 set — `club_memberships` (deprecated since Wave 7, no longer written), `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_key_history` (Wave 7 B14), `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents` — and the Wave 7 member-foundation set — `club_members`, `member_categories`, `club_member_departments`, `club_member_status_history`, `club_settings`, `club_exit_requests`, `club_member_invites`, `media_files` (upload registry, B18) — and the Wave 8 form-builder set — `forms`, `form_versions`, `form_submissions`, `form_submission_files`, `member_field_definitions`, `member_field_values` ([Form builder data model](#form-builder-data-model-wave-8)) — and the Wave 9 communication/queue set — `jobs`, `club_announcements`, `message_deliveries`, `push_tokens`, `notification_preferences` ([Communication and job queue data model](#communication-and-job-queue-data-model-wave-9)) — and the Wave 15 outreach/platform set — `sponsors`, `sponsor_contacts`, `club_external_invites`, `external_access_assignments`, `club_platform_status`, `club_status_history`, `club_plans`, `club_public_profiles`, `club_leads` ([Outreach and platform](#outreach-and-platform-wave-15)). See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
 
 ```mermaid
 erDiagram
@@ -1424,6 +1425,18 @@ A sponsor sees its linked sponsor profile(s) (`sponsors.linked_member_id`) witho
 - **Media (BM):** page images are uploaded with `POST /club-public-profile/images` (media layer: PNG/JPEG/WebP ≤ 5 MB, magic bytes, EXIF strip, quota; owner `public_profile`, visibility `private`). `syncPublicMedia(clubId)` makes **exactly** the images of the live published page and the logos of the sponsors it shows `public_opt_in` and puts every other `public_profile`/`sponsor_logo` file back to `private`; it runs after publish/unpublish/settings and is repeated by the job `public_media_sync`. Public responses only carry unsigned URLs of `public_opt_in` rows (`publicMediaUrls`); a revoked file answers `403` at once, exactly like an unknown key. Unused page images (neither draft nor published, older than 1 h) are deleted; at most 30 per club (`422 image_limit`).
 - Rights: `public_profile:write` = `vorsitz`, `stellv_vorsitz`, `schriftfuehrer`. Audit: `public_profile.update`, `public_profile.publish`, `public_profile.unpublish`, `public_profile.settings`. Tests: `src/routes/public-clubs.test.ts` (opt-in, identical 404, whitelist, no internal data, released vs private media, revocation on unpublish/disable/suspension, key probing, rate limits, trusted server).
 
+<a id="leads-wave-15"></a>
+### Interested people and trial training (Wave 15 B4)
+
+`club_leads` (migration `0063_club-leads`): `id`, `club_id`, `name`, `email` (lower case), `phone`, `department_id` (FK, set null), `message`, `source` (`oeffentliche_seite` \| `manuell`, CHECK), `status` (`neu`, `kontaktiert`, `probetraining`, `mitglied`, `abgelehnt`, CHECK), `trial_requested`, `trial_on`, `waitlisted_at` (set = on the waitlist of its department, ordered by this timestamp), `notes` (internal), `privacy_accepted_at`, `request_count`, `last_request_at`, `converted_club_member_id` (FK `club_members`, set null), `created_by`, timestamps.
+
+- **Intake** `POST /public/clubs/:slug/leads` (no session): only for a live page with `lead_form_enabled` (else the same `404` as the page). Zod validation, `privacyAccepted: true` mandatory (the page response carries the club's published privacy notice in `leadForm.privacyNotice`), honeypot field `website` (filled = `202` and nothing stored), DB-backed limits per client (`PUBLIC_LEAD_IP_LIMIT_PER_HOUR`), per club and day (`PUBLIC_LEAD_CLUB_LIMIT_PER_DAY`) and per address and club (3 per day). A department the page does not offer is ignored. An open lead with the same address is **merged** (`request_count + 1`, message appended up to 4000 characters) instead of duplicated. Every outcome answers the same `202 { data: { status: "received" } }`; **no mail goes to the given address** (the form cannot be abused to mail strangers).
+- **Board notice** (Wave 9 dispatcher, optional, `club_settings.notify_board_requests`): in-app + e-mail `lead.new` to every role with `leads:write`, only for a new lead.
+- **Status flow:** `neu → kontaktiert | probetraining | abgelehnt`, `kontaktiert → probetraining | abgelehnt | neu`, `probetraining → kontaktiert | abgelehnt`, `abgelehnt → neu`; anything else `409 invalid_status_transition`; `mitglied` only through the conversion (`422 use_convert`).
+- **Conversion** `POST /club-leads/:id/convert`: creates a member record without account (status `interessent`, no member number, default category, the lead's department), sets the lead to `mitglied`; the account invitation (`POST /club-members/:id/invite`) or the normal admission follow from there. Twice `409 lead_already_converted`.
+- **Retention:** rule `club_leads` (club scope, default 180 days, 30–1095) deletes leads whose last change and last request are older than the period (dry run unless `RETENTION_DRY_RUN=false`).
+- Rights: `leads:write` = `vorsitz`, `stellv_vorsitz`, `schriftfuehrer`, `abteilungsleitung` (club-wide, like their other department permissions). Audit: `club_lead.request` (`merged`), `.create`, `.update` (`changedFields`, `status`), `.delete`, `.convert`. Tests: `src/routes/club-leads.test.ts`.
+
 <a id="club-search-wave-15"></a>
 ### Club search (Wave 15 B5)
 
@@ -1726,6 +1739,15 @@ Best effort after the commit (`notifySafely`), texts in the club's mail language
 | 73 | Sweep: shift within 24 h | `helper.reminder` (`<shift>#remind24`) | the people on the shift and their guardians, in-app + push, category reminders | `Erinnerung: Helferschicht` |
 | 74 | Sweep: shift within 48 h below its minimum staffing | `helper.shift_open` (`<shift>#open48`) | the organisers, in-app + push | `Schicht noch offen` |
 
+### K. Outreach (Wave 15)
+
+| Event key | Trigger | Recipients | Class / channels |
+|---|---|---|---|
+| `lead.new` | New enquiry through the public club page (not for a merged duplicate) | Roles with `leads:write` (no guardians); switch `club_settings.notify_board_requests` | optional, in-app + e-mail |
+| `external_invite.created` | Board invites a sponsor / service provider | The invited address only (link wiped from the delivery row after sending) | mandatory, e-mail (inline) |
+
+The enquiring person gets **no** mail (the public form must not send mail to arbitrary addresses).
+
 ### States that deliberately send nothing
 
 Event created; event edit that changes only title, description, category or capacity; change of an already cancelled event; delete of an event without RSVP rows; `notify:false` (audited); RSVP, cancel of an RSVP (audit only; the person who moves up from the waitlist is told, see #36); meeting created, answer given, invitee removed, deleting a meeting that was held, cancelled or has no invitees; announcement draft, cancelled, withdrawn (no retraction notice, the entry just disappears from the inbox); member status changes, role and guardian-link changes, profile edits, imports; loans and keys: only the actor's own return/extension and key action, or a club with `notify_handover` off (otherwise see H); direct exits (booked by the board) at the effective day; dormant, left and deceased members as audience; empty audience; mandatory classes never get an unsubscribe link; account-less members get no in-app and no push.
@@ -1898,11 +1920,13 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `invalid_party_size` | 422 | `lib/event-registration.ts` |
 | `invalid_period` | 422 | `lib/absences.ts`, `routes/sponsors.ts` |
 | `invalid_selection` | 422 | `lib/ballots.ts` |
+| `invalid_status_transition` | 409 | `lib/club-leads.ts` |
 | `invalid_time` | 422 | `lib/time-tracking.ts`, `routes/event-helpers.ts` |
 | `invalid_window` | 422 | `lib/ballots.ts` |
 | `invitation_not_supported` | 422 | `lib/assembly-invitation.ts` |
 | `invitation_period_violated` | 422 | `lib/assembly-invitation.ts`, `routes/meetings.ts` |
 | `invite_not_open` | 409 | `routes/external-access.ts` |
+| `lead_already_converted` | 409 | `lib/club-leads.ts` |
 | `lead_is_candidate` | 409 | `lib/elections.ts` |
 | `location_busy` | 409 | `routes/location-bookings.ts` |
 | `logo_dimensions` | 422 | `routes/club-branding.ts` |
@@ -2014,12 +2038,13 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `unattached_cap` | 422 | `lib/media.ts` |
 | `unknown_calendar` | 422 | `routes/club-public-profile.ts` |
 | `unknown_column` | 422 | `routes/club-members.ts`, `routes/event-participants.ts` |
-| `unknown_department` | 422 | `routes/club-public-profile.ts` |
+| `unknown_department` | 422 | `routes/club-leads.ts`, `routes/club-public-profile.ts` |
 | `unknown_entry` | 422 | `routes/event-attendance.ts` |
 | `unknown_image` | 422 | `routes/club-public-profile.ts` |
 | `unknown_location` | 422 | `routes/external-access.ts` |
 | `unknown_member` | 422 | `routes/event-attendance.ts` |
 | `unknown_option` | 422 | `lib/ballots.ts` |
+| `use_convert` | 422 | `lib/club-leads.ts` |
 | `use_voting_roll_override` | 422 | `routes/meetings.ts` |
 | `version_immutable` | 409 | `routes/forms.ts` |
 | `version_limit` | 409 | `routes/forms.ts` |
@@ -2456,6 +2481,11 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `/external-access/accounts/:memberId/assignments/:assignmentId` | DELETE | `roles:write` | `204`, unknown `404` |
 | `/external/me` | GET | session + `clubGuard` (any member; the one area external-only logins may use) | `{ data: { clubId, clubName, clubSlug, externalOnly, roleTypes, sponsors: [{ id, name, website, description, consideration, startsOn, endsOn, status, logoUrl (signed), contacts }], assignments: [Assignment] } }` — own sponsor profiles without notes; current + upcoming assignments (upcoming without location and note) |
 | `/public/clubs` | GET | none (public; `PUBLIC_CLUB_SEARCH_LIMIT_PER_HOUR` per client) | Wave 15 B5 club search. `?q=` (name, ≥ 3) and/or `&city=` (≥ 2), else `400 QUERY_TOO_SHORT` (`details.min = 3`, `details.minCity = 2`). `{ data: [{ slug, name, city, logoUrl }] }` (max 10, by name, no total); only live **and** discoverable clubs |
+| `/public/clubs/:slug/leads` | POST | none (public; `PUBLIC_LEAD_IP_LIMIT_PER_HOUR` per client, `PUBLIC_LEAD_CLUB_LIMIT_PER_DAY` per club, 3/day per address) | Wave 15 B4 enquiry form. Body `{ name (2-100), email, phone? (≤40), departmentId? (one of `leadForm.departments`, else ignored), message? (≤2000), trialRequested?, privacyAccepted: true, website? (honeypot, keep empty and hidden) }` -> `202 { data: { status: "received" } }` for new, merged and honeypot alike; `404` when the page is not live or the form is off, `422` validation, `429` limits |
+| `/club-leads` | GET, POST | session + `clubGuard` + `leads:write` (`403` otherwise) | Wave 15 B4. `GET ?status&departmentId&waitlisted=true\|false&q (name/e-mail)&page&pageSize` -> `{ data: [Lead], page, pageSize, total }` newest request first; `Lead = { id, name, email, phone, department: { id, name } \| null, message, source, status, trialRequested, trialOn, waitlisted, waitlistedAt, notes, requestCount, lastRequestAt, convertedClubMemberId, createdAt, updatedAt }`. `POST { name (2-100), email?, phone?, departmentId?, message?, trialOn? }` (source `manuell`) -> `201` |
+| `/club-leads/waitlist` | GET | `leads:write` | `?departmentId` -> `{ data: [{ department: { id, name } \| null, leads: [Lead + position] }] }`, first come first served |
+| `/club-leads/:id` | GET, PATCH, DELETE | `leads:write` | `PATCH { status?, notes? (≤4000), trialOn?, departmentId?, waitlisted?, name?, email?, phone? }` (status flow above: `409 invalid_status_transition`, `422 use_convert`); `DELETE` -> `204`; foreign ids `404` |
+| `/club-leads/:id/convert` | POST | `leads:write` | -> `201 { data: { lead, clubMemberId } }`: member record `interessent` without account; then invite via `POST /club-members/:id/invite`; twice `409 lead_already_converted` |
 
 <a id="club-registration"></a>
 ### Club registration (Wave 6)
@@ -2782,6 +2812,7 @@ All variables live in `.env.example`. Wave 10 B1/B2 (privacy foundation, audit l
 | `REGISTER_PORTAL_URL` | no | Target of the manual register check link (`registerCheck.portalUrl`) on the admin club detail and registration review (default `https://www.handelsregister.de/rp_web/erweitertesuche.xhtml`); no automatic query is ever made |
 | `PUBLIC_CLUB_IP_LIMIT_PER_HOUR` / `PUBLIC_CLUB_INVALID_LIMIT_PER_HOUR` / `PUBLIC_CLUB_SEARCH_LIMIT_PER_HOUR` / `PUBLIC_CLUB_TRUSTED_LIMIT_PER_HOUR` / `PUBLIC_CLUB_TRUSTED_INVALID_LIMIT_PER_HOUR` | no | DB-backed hourly limits of the public club routes (`/public/clubs*`): all requests per client (default `300`), failed slug lookups per client (default `30`), club searches per client (default `60`), requests and failed lookups of the trusted website server without a forwarded visitor address (defaults `20000` / `600`) |
 | `PUBLIC_API_TRUSTED_TOKEN` | no | Shared secret (at least 16 characters) the website server sends as `X-Public-Api-Token` on server-side calls to `/public/clubs*`; it may then forward the visitor address in `X-Public-Client-Ip`. Unset: no caller is trusted. Never expose it to browsers |
+| `PUBLIC_LEAD_IP_LIMIT_PER_HOUR` / `PUBLIC_LEAD_CLUB_LIMIT_PER_DAY` | no | DB-backed limits of the public enquiry form `POST /public/clubs/:slug/leads`: per client and hour (default `5`), per club and day (default `50`); per address and club the limit is fixed at 3 per day |
 | `PORT` | no | Port the Hono server listens on (default `3000`) |
 | `COOKIE_DOMAIN` | no | Registrable base domain (e.g. `example.com`) for cross-subdomain session cookies; only effective when `BACKEND_URL` is `https://` |
 | `BIND_HOST` | no | Host interface `compose.yml` binds the backend port to (default `127.0.0.1`, loopback only; set `0.0.0.0` only for LAN device testing). Read by compose, not by the Node process |

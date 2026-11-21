@@ -164,7 +164,7 @@ describe("public club page", () => {
     expect(Object.keys(data.events[0]).sort()).toEqual(["allDay", "cancelled", "endsAt", "locationName", "startsAt", "title"]);
     expect(data.sponsors.map((s: { name: string }) => s.name)).toEqual(["Aktiv GmbH"]);
     expect(Object.keys(data.sponsors[0]).sort()).toEqual(["logoUrl", "name", "website"]);
-    expect(data.leadForm).toEqual({ enabled: true, trialTraining: true, departments: [{ id: deptId, name: "Fußball" }] });
+    expect(data.leadForm).toEqual({ enabled: true, trialTraining: true, departments: [{ id: deptId, name: "Fußball" }], privacyNotice: null });
     // Nothing internal: no hidden department, no board calendar, no sponsor notes, no member names/addresses, no signatures.
     for (const forbidden of ["Geheimrat", "Vorstandssitzung", "GEHEIME-NOTIZ", "Intern AG", "Vorbei KG", "Founder public", "@example.com", "sig=", hiddenDeptId]) expect(text).not.toContain(forbidden);
 

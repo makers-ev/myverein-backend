@@ -44,6 +44,7 @@ import * as mediaFilesSchema from "./schema/media-files.js";
 import * as meetingsSchema from "./schema/meetings.js";
 import * as notificationsSchema from "./schema/notifications.js";
 import * as sponsorsSchema from "./schema/sponsors.js";
+import * as clubLeadsSchema from "./schema/club-leads.js";
 import * as clubPublicProfilesSchema from "./schema/club-public-profiles.js";
 import * as clubPlatformSchema from "./schema/club-platform.js";
 import * as externalAccessSchema from "./schema/external-access.js";
@@ -117,6 +118,7 @@ export const schema = {
   ...clubPrivacyNoticesSchema,
   ...privacySchema,
   ...sponsorsSchema,
+  ...clubLeadsSchema,
   ...clubPublicProfilesSchema,
   ...clubPlatformSchema,
   ...externalAccessSchema,

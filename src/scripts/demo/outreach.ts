@@ -1,4 +1,5 @@
 import { db } from "../../db/client.js";
+import { clubLeads } from "../../db/schema/club-leads.js";
 import { clubPublicProfiles, type PublicProfileContent } from "../../db/schema/club-public-profiles.js";
 import { clubSettings } from "../../db/schema/club-settings.js";
 import { sponsorContacts, sponsors } from "../../db/schema/sponsors.js";
@@ -132,4 +133,48 @@ export async function seedPublicProfile(ctx: DemoCtx): Promise<void> {
   await writeAudit(db, { eventType: "public_profile.publish", subjectId: ctx.clubId, clubId: ctx.clubId, actorUserId: board.userId, payload: { clubId: ctx.clubId, contactConfirmed: true, enabled: true } });
   await syncPublicMedia(ctx.clubId);
   ctx.log("Öffentliche Vereinsseite veröffentlicht und auffindbar (Entwurf mit einer unveröffentlichten Änderung)");
+}
+
+/**
+ * Interested people (Wave 15 B4): every status of the pipeline, a merged duplicate, trial training dates and the waitlists of
+ * Tennis (two people, in order) and Schwimmen. Addresses use the reserved example domain.
+ */
+export async function seedLeads(ctx: DemoCtx): Promise<void> {
+  const board = accountOf(ctx, "schrift");
+  const day = (d: number) => new Date(ctx.now.getTime() + d * 86_400_000);
+  const specs = [
+    { name: "Mila Becker", email: "mila.becker@example.org", dept: "fussball", status: "neu", source: "oeffentliche_seite", trial: true, message: "Meine Tochter (9) möchte gerne Fußball spielen. Gibt es ein Probetraining?", created: -1, count: 1 },
+    { name: "Jonas Krüger", email: "jonas.krueger@example.org", dept: "tennis", status: "kontaktiert", source: "oeffentliche_seite", trial: false, message: "Ich suche einen Verein für Doppel am Wochenende.", created: -6, count: 2, notes: "Angerufen, meldet sich nach dem Urlaub", waitlist: -5 },
+    { name: "Aylin Demir", email: "aylin.demir@example.org", dept: "tennis", status: "neu", source: "oeffentliche_seite", trial: true, message: "Gerne auch auf die Warteliste.", created: -3, count: 1, waitlist: -3 },
+    { name: "Peter Lang", email: "peter.lang@example.org", dept: "turnen", status: "probetraining", source: "manuell", trial: true, message: "Am Infostand des Sommerfests erfasst.", created: -10, count: 1, trialOn: 4 },
+    { name: "Sven Otto", email: "sven.otto@example.org", dept: "schwimmen", status: "abgelehnt", source: "oeffentliche_seite", trial: false, message: "Kurs für Erwachsene?", created: -20, count: 1, notes: "Kein Erwachsenenkurs, an Nachbarverein verwiesen" },
+    { name: "Clara Wendt", email: "clara.wendt@example.org", dept: "schwimmen", status: "neu", source: "oeffentliche_seite", trial: false, message: "Platz im Kinderschwimmen frei?", created: -2, count: 1, waitlist: -2 },
+  ] as const;
+  for (const sp of specs) {
+    const created = day(sp.created);
+    const [row] = await db
+      .insert(clubLeads)
+      .values({
+        clubId: ctx.clubId,
+        name: sp.name,
+        email: sp.email,
+        departmentId: ctx.dept[sp.dept] ?? null,
+        message: sp.message,
+        source: sp.source,
+        status: sp.status,
+        trialRequested: sp.trial,
+        trialOn: "trialOn" in sp ? shiftDays(ctx.today, sp.trialOn) : null,
+        waitlistedAt: "waitlist" in sp ? day(sp.waitlist) : null,
+        notes: "notes" in sp ? sp.notes : null,
+        privacyAcceptedAt: sp.source === "oeffentliche_seite" ? created : null,
+        requestCount: sp.count,
+        lastRequestAt: created,
+        createdBy: sp.source === "manuell" ? board.memberId : null,
+        createdAt: created,
+        updatedAt: created,
+      })
+      .returning();
+    await writeAudit(db, { eventType: sp.source === "manuell" ? "club_lead.create" : "club_lead.request", subjectId: row!.id, clubId: ctx.clubId, actorUserId: sp.source === "manuell" ? board.userId : null, payload: sp.source === "manuell" ? { clubId: ctx.clubId, leadId: row!.id } : { clubId: ctx.clubId, leadId: row!.id, merged: false } });
+  }
+  ctx.log(`${specs.length} Interessenten-Anfragen (alle Status, Probetraining, Wartelisten Tennis und Schwimmen)`);
 }
