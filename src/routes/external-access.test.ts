@@ -8,6 +8,8 @@ import { closeDatabase, db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubExternalInvites } from "../db/schema/external-access.js";
+import { clubPlatformStatus } from "../db/schema/club-platform.js";
+import { createInvite } from "../lib/member-invites.js";
 import { locations } from "../db/schema/locations.js";
 import { sponsors } from "../db/schema/sponsors.js";
 import { ASSIGNABLE_ROLE_TYPES } from "../lib/club-permissions.js";
@@ -192,6 +194,24 @@ describe("external access API", () => {
     // The board sees everything.
     const accounts = (await json(await call(club.founder, "/external-access", { clubId: club.clubId }))).data.accounts;
     expect(accounts.map((a: { roleTypes: string[] }) => a.roleTypes[0]).sort()).toEqual(["dienstleister", "sponsor"]);
+  });
+
+  it("refuses previews and accepts of invitations (external and member) while the club is suspended", async () => {
+    const founderMember = (await db.query.member.findFirst({ where: and(eq(member.organizationId, club.clubId), eq(member.userId, club.founder.userId)) }))!.id;
+    const { token: extToken } = await createExternalInvite({ clubId: club.clubId, email: `ext-susp-${suffix}@example.com`, roleType: "dienstleister", displayName: "Susp", sponsorId: null, createdBy: founderMember });
+    const [row] = await db.insert(clubMembers).values({ clubId: club.clubId, displayName: "Ohne Konto", status: "aktiv", joinedAt: "2020-01-01" }).returning();
+    const { token: memberToken } = await createInvite(club.clubId, row!.id, `member-susp-${suffix}@example.com`, founderMember);
+    await db.insert(clubPlatformStatus).values({ clubId: club.clubId, suspendedAt: new Date(), suspensionReason: "Test" });
+    try {
+      for (const [path, token] of [["/external-access/invites/preview", extToken], ["/external-access/invites/accept", extToken], ["/club-members/invites/preview", memberToken], ["/club-members/invites/accept", memberToken]] as const) {
+        const res = await call(stranger, path, { method: "POST", body: { token } });
+        expect(res.status, path).toBe(403);
+        expect((await json(res)).error.code, path).toBe("CLUB_SUSPENDED");
+      }
+    } finally {
+      await db.delete(clubPlatformStatus).where(eq(clubPlatformStatus.clubId, club.clubId));
+    }
+    expect((await call(stranger, "/external-access/invites/preview", { method: "POST", body: { token: extToken } })).status).toBe(200);
   });
 
   it("revokes invitations and ends access (membership removed when nothing else is left)", async () => {

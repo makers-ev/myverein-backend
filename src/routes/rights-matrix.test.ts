@@ -306,13 +306,13 @@ const SUSPENSION_EXEMPT: Record<string, string> = {
   "/club-registrations": "the caller's own founding applications (platform level)",
   "/my-clubs": "lists the clubs with `suspended: true`, asserted in admin-clubs-platform.test.ts",
   "/club-members/apply": "applications to a suspended club are refused in assertMayApply (403 CLUB_SUSPENDED); the empty body fails validation first",
-  "/club-members/invites": "invitation token routes (account level); joining a suspended club is refused by the membership routes",
+  "/club-members/invites": "invitation token routes (account level, no clubGuard); for a suspended club preview and accept answer 403 CLUB_SUSPENDED (asserted in external-access.test.ts)",
   "/club-forms/:clubSlug/aufnahme": "public form by slug: 404 for a suspended club",
   "/form-submissions": "the applicant's own drafts; creating/submitting for a suspended club is refused in assertMayApply",
   "/feeds": "calendar feed tokens: 404 for a suspended club",
   "/public": "public token routes: 404 for a suspended club (eventByPublicToken)",
-  "/external-access/invites/preview": "external invitation token (account level)",
-  "/external-access/invites/accept": "external invitation token (account level)",
+  "/external-access/invites/preview": "external invitation token (account level); 403 CLUB_SUSPENDED for a suspended club (asserted in external-access.test.ts)",
+  "/external-access/invites/accept": "external invitation token (account level); 403 CLUB_SUSPENDED for a suspended club (asserted in external-access.test.ts)",
   "/media/:key{.+}": "signed media serving (no club context); every route that issues a signature is locked",
 };
 

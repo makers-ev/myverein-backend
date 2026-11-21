@@ -12,6 +12,7 @@ import { guardianLinks } from "../db/schema/guardian-links.js";
 import { locations } from "../db/schema/locations.js";
 import { sponsors } from "../db/schema/sponsors.js";
 import { writeAudit } from "./audit.js";
+import { assertClubNotSuspended } from "./club-platform.js";
 import { EXTERNAL_ROLE_TYPES, type ExternalRoleType } from "./club-permissions.js";
 import { ensureClubMember, markDetachedMembersLeft } from "./club-members.js";
 import { ConflictError, ForbiddenError, NotFoundError } from "./errors.js";
@@ -94,6 +95,8 @@ export async function createExternalInvite(input: { clubId: string; email: strin
 async function usableInvite(token: string): Promise<ClubExternalInviteRow> {
   const [row] = await db.select().from(clubExternalInvites).where(eq(clubExternalInvites.tokenHash, hashInviteToken(token)));
   if (!row || inviteStatus(row) !== "pending") throw new NotFoundError(NOT_FOUND);
+  // Wave 15 B7: no new logins for a club suspended by the platform (preview and accept: 403 CLUB_SUSPENDED).
+  await assertClubNotSuspended(row.clubId);
   return row;
 }
 

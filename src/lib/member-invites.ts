@@ -41,6 +41,7 @@ import { inviteLinkContext } from "./invite-context.js";
 import { logger } from "./logger.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "./member-lifecycle.js";
 import { writeAudit } from "./audit.js";
+import { assertClubNotSuspended } from "./club-platform.js";
 
 /** Invitation validity in days (`MEMBER_INVITE_TTL_DAYS`, default 14, clamped to 1-60). */
 export function inviteTtlDays(): number {
@@ -99,6 +100,8 @@ async function findUsableInvite(token: string): Promise<{ invite: ClubMemberInvi
   if (!invite || invite.acceptedAt || invite.expiresAt.getTime() <= Date.now()) throw new NotFoundError(NOT_FOUND_MESSAGE);
   const row = await db.query.clubMembers.findFirst({ where: eq(clubMembers.id, invite.clubMemberId) });
   if (!row || row.memberId !== null || isLeftStatus(effectiveStatus(row, todayBerlin()))) throw new NotFoundError(NOT_FOUND_MESSAGE);
+  // Wave 15 B7: nobody joins a club suspended by the platform (preview and accept: 403 CLUB_SUSPENDED).
+  await assertClubNotSuspended(row.clubId);
   return { invite, row };
 }
 
