@@ -23,7 +23,7 @@ export async function loadClubStatsInput(clubId: string): Promise<ClubStatsInput
     db.select({ id: memberCategories.id, key: memberCategories.key, name: memberCategories.name, archivedAt: memberCategories.archivedAt, sortOrder: memberCategories.sortOrder }).from(memberCategories).where(eq(memberCategories.clubId, clubId)).orderBy(memberCategories.sortOrder, memberCategories.name),
     db.select({ id: departments.id, name: departments.name }).from(departments).where(eq(departments.clubId, clubId)).orderBy(departments.name),
     db
-      .select({ clubMemberId: clubMemberDepartments.clubMemberId, departmentId: clubMemberDepartments.departmentId, until: clubMemberDepartments.until })
+      .select({ clubMemberId: clubMemberDepartments.clubMemberId, departmentId: clubMemberDepartments.departmentId, until: clubMemberDepartments.until, since: clubMemberDepartments.since })
       .from(clubMemberDepartments)
       .innerJoin(clubMembers, eq(clubMembers.id, clubMemberDepartments.clubMemberId))
       .where(eq(clubMembers.clubId, clubId)),
