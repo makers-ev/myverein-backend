@@ -1,4 +1,6 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
+
+import { member as accountMember, user } from "../auth/auth-schema.js";
 
 import { db } from "../db/client.js";
 import { clubLeads, type ClubLeadRow, type LeadStatus } from "../db/schema/club-leads.js";
@@ -135,12 +137,23 @@ export async function notifyLeadToBoard(clubId: string, leadId: string, name: st
  * Turns a lead into a member record without account (status `interessent`, no member number, default category, department
  * assigned) and closes the lead as `mitglied`. The account invitation / admission then runs through the existing member routes.
  */
-export async function convertLead(clubId: string, leadId: string, actorMemberId: string): Promise<{ lead: ClubLeadRow; clubMemberId: string }> {
+export async function convertLead(clubId: string, leadId: string, actorMemberId: string, options: { confirmDuplicate?: boolean } = {}): Promise<{ lead: ClubLeadRow; clubMemberId: string }> {
   await ensureDefaultCategories(clubId);
   return db.transaction(async (tx) => {
     const [lead] = await tx.select().from(clubLeads).where(and(eq(clubLeads.id, leadId), eq(clubLeads.clubId, clubId))).for("update");
     if (!lead) throw new NotFoundError("Lead not found");
     if (lead.convertedClubMemberId || lead.status === "mitglied") throw new ConflictError("The lead was already converted", { details: { code: "lead_already_converted" } });
+    // Duplicate guard: a member record of the club with the same e-mail (contact or account address) is probably this person.
+    if (lead.email && !options.confirmDuplicate) {
+      const [dup] = await tx
+        .select({ id: clubMembers.id })
+        .from(clubMembers)
+        .leftJoin(accountMember, eq(accountMember.id, clubMembers.memberId))
+        .leftJoin(user, eq(user.id, accountMember.userId))
+        .where(and(eq(clubMembers.clubId, clubId), or(sql`lower(${clubMembers.contactEmail}) = ${lead.email}`, sql`lower(${user.email}) = ${lead.email}`)))
+        .limit(1);
+      if (dup) throw new ConflictError("A member record with this e-mail address exists already; confirm to create another one", { details: { code: "possible_duplicate", clubMemberId: dup.id } });
+    }
     const category = await findCategoryByKey(tx, clubId, DEFAULT_CATEGORY_KEY);
     const [member] = await tx
       .insert(clubMembers)

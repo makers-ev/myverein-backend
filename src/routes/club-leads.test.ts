@@ -152,6 +152,19 @@ describe("club leads", () => {
     expect((await call(board, "/club-leads", { method: "POST", clubId: club.clubId, body: { name: "X Y", departmentId: randomUUID() } })).status).toBe(422);
   });
 
+  it("converts only with members:write and warns about a probable duplicate", async () => {
+    const created = await json(await call(board, "/club-leads", { method: "POST", clubId: club.clubId, body: { name: "Doppelt Da", email: `dup-${suffix}@example.com` } }));
+    const id = created.data.id as string;
+    // Department leads manage enquiries but create no member records.
+    expect((await call(club.members.abt!, `/club-leads/${id}/convert`, { method: "POST", clubId: club.clubId })).status).toBe(403);
+    const [existing] = await db.insert(clubMembers).values({ clubId: club.clubId, displayName: "Doppelt Da", contactEmail: `Dup-${suffix}@example.com`, status: "aktiv", joinedAt: "2020-01-01" }).returning();
+    const dup = await call(board, `/club-leads/${id}/convert`, { method: "POST", clubId: club.clubId });
+    expect(dup.status).toBe(409);
+    expect((await json(dup)).error.details).toMatchObject({ code: "possible_duplicate", clubMemberId: existing!.id });
+    const confirmed = await call(board, `/club-leads/${id}/convert`, { method: "POST", clubId: club.clubId, body: { confirmDuplicate: true } });
+    expect(confirmed.status).toBe(201);
+  });
+
   it("converts a lead into a member record (interessent, department, no number) exactly once", async () => {
     const [row] = await db.select().from(clubLeads).where(and(eq(clubLeads.clubId, club.clubId), eq(clubLeads.email, `ina-${suffix}@example.com`)));
     const res = await call(board, `/club-leads/${row!.id}/convert`, { method: "POST", clubId: club.clubId });

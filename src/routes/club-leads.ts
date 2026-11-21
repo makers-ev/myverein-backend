@@ -162,8 +162,13 @@ clubLeadRoutes.delete("/:id", async (c) => {
   return c.body(null, 204);
 });
 
-clubLeadRoutes.post("/:id/convert", async (c) => {
+/**
+ * Creates a member record, so it additionally needs `members:write` (department leads manage enquiries but create no member
+ * records). A probable duplicate (same e-mail) is `409 possible_duplicate` unless `{ confirmDuplicate: true }`.
+ */
+clubLeadRoutes.post("/:id/convert", zValidator("json", z.object({ confirmDuplicate: z.boolean().optional() }).optional().default({}), hook), async (c) => {
+  if (!hasClubPermission(c.get("clubRoleTypes"), "members:write")) throw new ForbiddenError("Missing members:write permission");
   const lead = await loadLead(c);
-  const result = await convertLead(c.get("clubId"), lead.id, c.get("membership").id);
+  const result = await convertLead(c.get("clubId"), lead.id, c.get("membership").id, { confirmDuplicate: c.req.valid("json")?.confirmDuplicate === true });
   return c.json({ data: { lead: (await shapeLeads([result.lead]))[0], clubMemberId: result.clubMemberId } }, 201);
 });
