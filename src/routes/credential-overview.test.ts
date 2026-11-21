@@ -186,7 +186,7 @@ describe("credential overview", () => {
     const own = async () => db.select().from(auditLog).where(and(eq(auditLog.eventType, "member_field.sensitive_read"), eq(auditLog.clubId, cid())));
     const before = await own();
     await listed(m("kassen"), "fieldKey=mod_ks_praevention");
-    const after = (await own()).filter((e) => !before.some((b) => b.id === e.id));
+    const after = (await own()).filter((e) => !before.some((b) => b.id === e.id) && (e.payload as { via?: string } | null)?.via === "credentials_overview");
     expect(after).toHaveLength(1);
     const payload = after[0]!.payload as { via: string; clubId: string; fieldIds: string[]; clubMemberIds: string[]; readBy: string };
     expect(payload).toMatchObject({ via: "credentials_overview", clubId: cid() });

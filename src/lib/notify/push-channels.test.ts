@@ -119,7 +119,8 @@ describe("push for reminders", () => {
     const p = payload("loan_due");
     await handleReminder(ctx("notify_reminder", p));
     await handleReminder(ctx("notify_reminder", p));
-    expect((await rowsOf("reminder.loan_due")).filter((r) => r.channel === "push")).toHaveLength(1);
+    // Scoped to this reminder: other test files write reminder deliveries into the shared DB at the same time.
+    expect((await rowsOf("reminder.loan_due")).filter((r) => r.channel === "push" && r.clubId === clubId)).toHaveLength(1);
   });
 
   it("rsvp reminders deep-link to the meeting, not to an event", () => {
