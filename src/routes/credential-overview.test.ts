@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -182,9 +182,11 @@ describe("credential overview", () => {
   });
 
   it("audits reads of sensitive credentials with ids only", async () => {
-    const before = await db.select().from(auditLog).where(eq(auditLog.eventType, "member_field.sensitive_read"));
+    // Scoped to this test club: other test files write the same event type concurrently into the shared DB.
+    const own = async () => db.select().from(auditLog).where(and(eq(auditLog.eventType, "member_field.sensitive_read"), eq(auditLog.clubId, cid())));
+    const before = await own();
     await listed(m("kassen"), "fieldKey=mod_ks_praevention");
-    const after = (await db.select().from(auditLog).where(eq(auditLog.eventType, "member_field.sensitive_read"))).filter((e) => !before.some((b) => b.id === e.id));
+    const after = (await own()).filter((e) => !before.some((b) => b.id === e.id));
     expect(after).toHaveLength(1);
     const payload = after[0]!.payload as { via: string; clubId: string; fieldIds: string[]; clubMemberIds: string[]; readBy: string };
     expect(payload).toMatchObject({ via: "credentials_overview", clubId: cid() });
