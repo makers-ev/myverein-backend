@@ -992,4 +992,15 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
       expect(((await list.json()) as { error: { details: { code: string } } }).error.details.code).toBe("external_role_restricted");
     }
   }, 240_000);
+  // Wave 15 review: Better Auth's organization endpoints bypass clubGuard; over HTTP only the board (members:write) may read members.
+  it("closes the Better Auth organization member endpoints (/api/auth/organization/*) for everybody but the board", async () => {
+    const base = process.env.BACKEND_URL ?? "http://localhost:3000";
+    const call = (cookie: string, path: string) => auth.handler(new Request(`${base}/api/auth/organization/${path}`, { headers: { cookie, origin: process.env.WEB_ORIGIN ?? "http://localhost:3001" } }));
+    for (const path of [`list-members?organizationId=${clubId}`, `get-full-organization?organizationId=${clubId}`, `list-invitations?organizationId=${clubId}`, `get-active-member?organizationId=${clubId}`]) {
+      for (const [label, cookie] of [["plain", cookiePlain], ["guest", cookieGuest], ["sponsor", cookieSponsor], ["provider", cookieProvider]] as const) {
+        expect((await call(cookie, path)).status, `${label} ${path}`).toBe(403);
+      }
+    }
+    expect((await call(cookieFounder, `list-members?organizationId=${clubId}`)).status).toBe(200);
+  });
 });

@@ -2,6 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { auth } from "../auth/auth.js";
 import { member } from "../auth/auth-schema.js";
 import { closeDatabase, db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
@@ -29,6 +30,7 @@ app.route("/external-access", externalAccessRoutes);
 app.route("/external", externalRoutes);
 app.route("/club-members", clubMemberRoutes);
 app.route("/sponsors", sponsorRoutes);
+app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 installErrorHandler(app);
 const call = requester(app);
 const suffix = Date.now();
@@ -134,6 +136,25 @@ describe("external access API", () => {
       expect((await json(res)).error.details.code).toBe("external_role_restricted");
     }
     expect((await call(sponsorUser, "/club-members/me", { clubId: club.clubId })).status).toBe(200);
+  });
+
+  it("keeps Better Auth's organization member/invitation endpoints closed for external logins, guests and plain members", async () => {
+    const authCall = (who: Account, path: string, init: { method?: string; body?: unknown } = {}) =>
+      app.request(`/api/auth/organization/${path}`, { method: init.method ?? "GET", headers: { cookie: who.cookie, "content-type": "application/json", origin: process.env.WEB_ORIGIN ?? "http://localhost:3001" }, body: init.body === undefined ? undefined : JSON.stringify(init.body) });
+    const gated = [`list-members?organizationId=${club.clubId}`, `get-full-organization?organizationId=${club.clubId}`, `list-invitations?organizationId=${club.clubId}`, `get-active-member?organizationId=${club.clubId}`];
+    for (const who of [sponsorUser, club.members.plain!, club.members.kasse!]) {
+      for (const path of gated) {
+        const res = await authCall(who, path);
+        expect(res.status, path).toBe(403);
+        expect(await res.text()).not.toContain("@example.com");
+      }
+      // Without an explicit id the active organization is used; still closed.
+      expect((await authCall(who, "list-members")).status).toBe(403);
+      expect((await authCall(who, "get-full-organization", { method: "GET" })).status).toBe(403);
+    }
+    // The board (members:write) keeps access; self-service paths stay open.
+    expect((await authCall(club.founder, `list-members?organizationId=${club.clubId}`)).status).toBe(200);
+    expect((await authCall(sponsorUser, "list")).status).toBe(200);
   });
 
   it("gives service providers time-boxed assignments; details only once the window started", async () => {
