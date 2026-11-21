@@ -8,6 +8,8 @@ import { clubExitRequests } from "../../db/schema/club-exit-requests.js";
 import { clubMemberInvites } from "../../db/schema/club-member-invites.js";
 import { clubMemberDepartments, clubMembers, clubMemberStatusHistory, memberCategories } from "../../db/schema/club-members.js";
 import { clubMemberships } from "../../db/schema/club-memberships.js";
+import { clubLeads } from "../../db/schema/club-leads.js";
+import { externalAccessAssignments } from "../../db/schema/external-access.js";
 import { clubRoles } from "../../db/schema/club-roles.js";
 import { clubAnnouncements, messageDeliveries, notificationPreferences } from "../../db/schema/communication.js";
 import { departments } from "../../db/schema/departments.js";
@@ -472,6 +474,37 @@ const assemblyData: PrivacyContributor = {
   },
 };
 
+/**
+ * Wave 15: the enquiry a member record was converted from (`club_leads.converted_club_member_id`) and the location assignments
+ * of an external service-provider login (`external_access_assignments.member_id`). Both are exported and deleted with the person.
+ */
+const outreachData: PrivacyContributor = {
+  key: "outreach",
+  tables: ["club_leads", "external_access_assignments"],
+  async exportSubject(ex, s) {
+    const leads = await ex
+      .select({ name: clubLeads.name, email: clubLeads.email, phone: clubLeads.phone, message: clubLeads.message, source: clubLeads.source, status: clubLeads.status, trialOn: clubLeads.trialOn, createdAt: clubLeads.createdAt })
+      .from(clubLeads)
+      .where(and(eq(clubLeads.clubId, s.clubId), eq(clubLeads.convertedClubMemberId, s.clubMemberId)));
+    const assignments = s.accountMemberId
+      ? await ex
+          .select({ title: externalAccessAssignments.title, note: externalAccessAssignments.note, validFrom: externalAccessAssignments.validFrom, validUntil: externalAccessAssignments.validUntil })
+          .from(externalAccessAssignments)
+          .where(and(eq(externalAccessAssignments.clubId, s.clubId), eq(externalAccessAssignments.memberId, s.accountMemberId)))
+          .orderBy(asc(externalAccessAssignments.validFrom))
+      : [];
+    return {
+      enquiries: leads.map((r) => ({ ...r, createdAt: iso(r.createdAt) })),
+      serviceAssignments: assignments.map((r) => ({ ...r, validFrom: iso(r.validFrom), validUntil: iso(r.validUntil) })),
+    };
+  },
+  async eraseSubject(tx, s) {
+    const leads = await rowCount(tx.delete(clubLeads).where(and(eq(clubLeads.clubId, s.clubId), eq(clubLeads.convertedClubMemberId, s.clubMemberId))));
+    const assignments = s.accountMemberId ? await rowCount(tx.delete(externalAccessAssignments).where(and(eq(externalAccessAssignments.clubId, s.clubId), eq(externalAccessAssignments.memberId, s.accountMemberId)))) : 0;
+    return { deleted: leads + assignments, anonymized: 0, kept: 0 };
+  },
+};
+
 /** Files registered for the person (listed in the export; removal happens through the contributors above). */
 export async function listFilesOf(ex: DbExecutor, s: PrivacySubject): Promise<Array<{ kind: string; filename: string; mimeType: string; sizeBytes: number; uploadedAt: string }>> {
   const [row] = await ex.select({ photoKey: clubMembers.photoKey }).from(clubMembers).where(and(eq(clubMembers.id, s.clubMemberId), eq(clubMembers.clubId, s.clubId)));
@@ -490,4 +523,4 @@ export async function listFilesOf(ex: DbExecutor, s: PrivacySubject): Promise<Ar
 }
 
 /** Registration order = erasure order: form data first (lock order submission -> member row), master data last of the member rows. */
-export const BUILT_IN_CONTRIBUTORS: PrivacyContributor[] = [formsAndApplications, exitRequests, absences, guardianship, consents, communication, accountData, assemblyData, eventParticipation, documentData, memberCore];
+export const BUILT_IN_CONTRIBUTORS: PrivacyContributor[] = [formsAndApplications, exitRequests, absences, guardianship, consents, communication, accountData, assemblyData, eventParticipation, documentData, outreachData, memberCore];
