@@ -74,6 +74,20 @@ describe("media layer grep gate", () => {
     expect(violations(/\bsignMediaKey\s*\(/, ["lib/media-url.ts"])).toEqual([]);
   });
 
+  it("public (unsigned) media links exist only for explicitly released files (Wave 15 BM)", () => {
+    // Unsigned URLs are minted in the media layer only, and only public-profile.ts decides what is released.
+    expect(violations(/\bbuildPublicMediaUrl\s*\(/, ["lib/media.ts", "lib/media-url.ts"])).toEqual([]);
+    expect(violations(/\bpublicMediaUrls\s*\(/, ["lib/media.ts", "lib/public-profile.ts"])).toEqual([]);
+    expect(violations(/\bsyncPublicOptIn\s*\(/, ["lib/media.ts", "lib/public-profile.ts"])).toEqual([]);
+    expect(violations(/\bsetMediaVisibility\s*\(/, ["lib/media.ts"])).toEqual([]);
+    expect(violations(/visibility:\s*["'`]public_opt_in["'`]/, ["lib/media.ts"])).toEqual([]);
+    // The public endpoints never hand out signed (member) URLs.
+    for (const file of ["routes/public-clubs.ts", "lib/public-profile.ts"]) {
+      const source = files.find((f) => f.file === file)!.source;
+      expect(source, file).not.toMatch(/\bsignedMediaUrls?\s*\(|\bbuildMediaUrl\s*\(/);
+    }
+  });
+
   it("feature tables hold keys, never URLs of files (no photo_url/image_url/... columns)", () => {
     const schemaFiles = files.filter((f) => f.file.startsWith("db/schema/"));
     expect(schemaFiles.length).toBeGreaterThan(10);

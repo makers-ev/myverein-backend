@@ -14,6 +14,7 @@ import { checkStorageThresholds } from "../lib/media-quota.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
 import { likePattern } from "../lib/club-search.js";
 import { loadSponsor, shapeContact, shapeSponsors, SPONSOR_LOGO_OWNER, SPONSOR_STATUSES, sponsorStatus, isExpiringSoon } from "../lib/sponsors.js";
+import { syncPublicMedia } from "../lib/public-profile.js";
 import { cleanText } from "../lib/text-policy.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -23,7 +24,8 @@ import { sessionGuard } from "../middleware/session-guard.js";
  * Sponsors and partners of a club (Wave 15 B1), mounted at `/sponsors`. Deny-by-default: reading needs `sponsors:read` (board),
  * every change `sponsors:write` (vorsitz, stellv_vorsitz, kassenwart, schriftfuehrer); plain members, guardians and external
  * roles get 403. The logo goes through the central media layer (PNG/JPEG/WebP, magic bytes, EXIF strip, quota) and is handed out
- * as a signed URL only. No amounts, no invoices: billing is outside MyVerein.
+ * as a signed URL only; it becomes `public_opt_in` only while the sponsor is active, `oeffentlich` and shown on the live public
+ * page (`syncPublicMedia` after every change, Wave 15 BM). No amounts, no invoices: billing is outside MyVerein.
  */
 export const sponsorRoutes = new Hono<ClubEnv>();
 
@@ -155,6 +157,7 @@ sponsorRoutes.post("/", zValidator("json", createSchema, hook), async (c) => {
     await writeAudit(tx, { eventType: "sponsor.create", subjectId: row!.id, payload: { clubId, sponsorId: row!.id, visibility: row!.visibility, contacts: contacts.length } });
     return row!;
   });
+  await syncPublicMedia(clubId);
   return c.json({ data: (await shapeSponsors(clubId, [created], todayBerlin()))[0] }, 201);
 });
 
@@ -173,6 +176,7 @@ sponsorRoutes.patch("/:id", zValidator("json", updateSchema, hook), async (c) =>
     await writeAudit(tx, { eventType: "sponsor.update", subjectId: row.id, payload: { clubId, sponsorId: row.id, changedFields: Object.keys(set) } });
     return row;
   });
+  await syncPublicMedia(clubId);
   return c.json({ data: (await shapeSponsors(clubId, [updated], todayBerlin()))[0] });
 });
 
@@ -185,6 +189,7 @@ sponsorRoutes.delete("/:id", async (c) => {
     await writeAudit(tx, { eventType: "sponsor.delete", subjectId: existing.id, payload: { clubId, sponsorId: existing.id, hadLogo: existing.logoKey !== null } });
   });
   if (existing.logoKey) await deleteMedia(existing.logoKey, clubId);
+  await syncPublicMedia(clubId);
   return c.body(null, 204);
 });
 
@@ -235,6 +240,7 @@ sponsorRoutes.put("/:id/logo", rateLimit({ windowMs: 60_000, max: 30, key: (c) =
   }
   if (oldKey) await deleteMedia(oldKey, clubId);
   await checkStorageThresholds(clubId);
+  await syncPublicMedia(clubId);
   return c.json({ data: (await shapeSponsors(clubId, [await loadSponsor(clubId, existing.id)], todayBerlin()))[0] });
 });
 
@@ -250,6 +256,7 @@ sponsorRoutes.delete("/:id/logo", async (c) => {
     return locked.key;
   });
   if (oldKey) await deleteMedia(oldKey, clubId);
+  await syncPublicMedia(clubId);
   return c.body(null, 204);
 });
 

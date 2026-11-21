@@ -14,6 +14,7 @@ import { writeAudit } from "../lib/audit.js";
 import { ConflictError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { registerCheckOf } from "../lib/club-platform.js";
 import { COUNTED_STATUSES } from "../lib/member-lifecycle.js";
+import { syncPublicMedia } from "../lib/public-profile.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { adminGuard, type SessionEnv } from "../middleware/session-guard.js";
 
@@ -202,6 +203,8 @@ adminClubRoutes.post("/clubs/:clubId/suspend", zValidator("json", suspendBody, a
     await tx.insert(clubStatusHistory).values({ clubId, action: "suspend", reason: body.reason, note, actorUserId: actorId });
     await writeAudit(tx, { eventType: "admin.club_suspend", subjectId: clubId, clubId, payload: { clubId, withNote: note !== null } });
   });
+  // Wave 15 BM: a suspended club releases no media (public page and sponsor logos become unreachable at once).
+  await syncPublicMedia(clubId);
   return c.json({ data: await clubDetail(clubId) });
 });
 
@@ -218,6 +221,7 @@ adminClubRoutes.post("/clubs/:clubId/unsuspend", zValidator("json", unsuspendBod
     await tx.insert(clubStatusHistory).values({ clubId, action: "unsuspend", reason: body.reason, actorUserId: actorId });
     await writeAudit(tx, { eventType: "admin.club_unsuspend", subjectId: clubId, clubId, payload: { clubId } });
   });
+  await syncPublicMedia(clubId);
   return c.json({ data: await clubDetail(clubId) });
 });
 
