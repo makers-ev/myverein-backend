@@ -204,9 +204,12 @@ describe("association report route", () => {
       const audits = await db.select().from(auditLog).where(eq(auditLog.eventType, "association_report.export"));
       const mine = audits.filter((a) => a.clubId === fx.clubId);
       expect(mine).toHaveLength(2);
-      expect(mine[0]!.actorUserId).toBe(u.userId);
-      expect(mine[0]!.payload).toMatchObject({ clubId: fx.clubId, stichtag: "2026-06-30", columns: "department,ageGroup" });
-      expect(Object.keys(mine[0]!.payload as object).sort()).toEqual(["clubId", "columns", "rows", "stichtag"]);
+      // The select has no ORDER BY, so pick the first export by its payload instead of by row position.
+      const first = mine.find((a) => (a.payload as { columns?: string }).columns === "department,ageGroup");
+      expect(first).toBeDefined();
+      expect(first!.actorUserId).toBe(u.userId);
+      expect(first!.payload).toMatchObject({ clubId: fx.clubId, stichtag: "2026-06-30", columns: "department,ageGroup" });
+      expect(Object.keys(first!.payload as object).sort()).toEqual(["clubId", "columns", "rows", "stichtag"]);
     } finally {
       await db.update(departments).set({ name: "Schach Verband" }).where(eq(departments.id, chess));
     }
