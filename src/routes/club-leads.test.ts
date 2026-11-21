@@ -12,6 +12,7 @@ import { clubSettings } from "../db/schema/club-settings.js";
 import { messageDeliveries } from "../db/schema/communication.js";
 import { departments } from "../db/schema/departments.js";
 import { EMPTY_CONTENT } from "../lib/public-profile.js";
+import { publishNotice } from "../lib/privacy-notice.js";
 import { clubLeadsOld } from "../lib/retention/categories.js";
 import { clubLeadRoutes } from "./club-leads.js";
 import { createClub, dropClubs, installErrorHandler, requester, type Account } from "./forms-test-support.js";
@@ -68,6 +69,11 @@ describe("club leads", () => {
     expect((await post(club.slug, lead())).status).toBe(404);
     const on = { ...content, leadFormEnabled: true };
     await db.update(clubPublicProfiles).set({ published: on, leadFormEnabled: true }).where(eq(clubPublicProfiles.clubId, club.clubId));
+    // Form switched on but no published privacy notice: still the same 404, and the page does not offer the form.
+    expect((await post(club.slug, lead())).status).toBe(404);
+    const page = await json(await app.request(`/public/clubs/${club.slug}`, { headers: { "x-forwarded-for": randomUUID() } }));
+    expect(page.data.leadForm).toMatchObject({ enabled: false, privacyNotice: null });
+    await publishNotice(club.clubId, "Datenschutzhinweis des Vereins: Wir verarbeiten deine Anfrage nur, um dich zu kontaktieren. Verantwortlich ist der Vorstand.", club.founder.userId);
   });
 
   it("validates, ignores the honeypot and stores a new lead with a board notice", async () => {

@@ -158,6 +158,7 @@ export async function shapePublicClub(club: { id: string; name: string; slug: st
   ]);
   const urls = await publicMediaUrls(club.id, [...imageKeysOf(content), ...sponsorRows.map((s) => s.logoKey)]);
   const notice = content.leadFormEnabled ? await latestPublishedNotice(club.id) : null;
+  const formOn = content.leadFormEnabled && notice !== null;
   const url = (key: string | null) => (key ? (urls.get(key) ?? null) : null);
   const departmentList = depts.map((d) => ({ id: d.id, name: d.name }));
   return {
@@ -174,10 +175,11 @@ export async function shapePublicClub(club: { id: string; name: string; slug: st
     departments: departmentList,
     events: evs.map((e) => ({ title: e.title, startsAt: e.startsAt, endsAt: e.endsAt, allDay: e.allDay, cancelled: e.cancelledAt !== null, locationName: e.locationName ?? null })),
     sponsors: sponsorRows.map((s) => ({ name: s.name, website: s.website, logoUrl: url(s.logoKey) })),
+    // The form is only offered together with a published privacy notice (it collects personal data).
     leadForm: {
-      enabled: content.leadFormEnabled,
-      trialTraining: content.leadFormEnabled && content.trialTrainingEnabled,
-      departments: content.leadFormEnabled ? departmentList : [],
+      enabled: formOn,
+      trialTraining: formOn && content.trialTrainingEnabled,
+      departments: formOn ? departmentList : [],
       // The club's published privacy notice (a public legal text) for the enquiry form; only while the form is on.
       privacyNotice: notice ? { version: notice.version, body: notice.body, publishedAt: notice.publishedAt } : null,
     },

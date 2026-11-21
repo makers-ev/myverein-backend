@@ -13,6 +13,7 @@ import { mediaFiles } from "../db/schema/media-files.js";
 import { sponsors } from "../db/schema/sponsors.js";
 import { makePng } from "../lib/media-fixtures.js";
 import { PUBLIC_CLUB_KEYS, syncPublicMedia } from "../lib/public-profile.js";
+import { publishNotice } from "../lib/privacy-notice.js";
 import { clubPublicProfileRoutes } from "./club-public-profile.js";
 import { createClub, dropClubs, installErrorHandler, requester, type Account } from "./forms-test-support.js";
 import { mediaRoutes } from "./media.js";
@@ -137,6 +138,11 @@ describe("public club page", () => {
       body: { tagline: "Sport für alle", description: "Wir sind ein Verein.", city: "Wiesbach", contactEmail: "info@verein.example", website: "https://verein.example", logoKey, departmentIds: [deptId], eventCalendarIds: [calendarId], showSponsors: true, leadFormEnabled: true, trialTrainingEnabled: true },
     });
     expect(put.status).toBe(200);
+    // The enquiry form needs the club's published privacy notice.
+    const noNotice = await call(board, "/club-public-profile/publish", { method: "POST", clubId: club.clubId, body: { contactConsentConfirmed: true } });
+    expect(noNotice.status).toBe(422);
+    expect((await json(noNotice)).error.details.code).toBe("privacy_notice_required");
+    await publishNotice(club.clubId, "Datenschutzhinweis des Vereins: Wir verarbeiten deine Anfrage nur, um dich zu kontaktieren. Verantwortlich ist der Vorstand.", club.founder.userId);
     const noConsent = await call(board, "/club-public-profile/publish", { method: "POST", clubId: club.clubId, body: {} });
     expect(noConsent.status).toBe(422);
     expect((await json(noConsent)).error.details.code).toBe("contact_consent_required");
@@ -164,7 +170,7 @@ describe("public club page", () => {
     expect(Object.keys(data.events[0]).sort()).toEqual(["allDay", "cancelled", "endsAt", "locationName", "startsAt", "title"]);
     expect(data.sponsors.map((s: { name: string }) => s.name)).toEqual(["Aktiv GmbH"]);
     expect(Object.keys(data.sponsors[0]).sort()).toEqual(["logoUrl", "name", "website"]);
-    expect(data.leadForm).toEqual({ enabled: true, trialTraining: true, departments: [{ id: deptId, name: "Fußball" }], privacyNotice: null });
+    expect(data.leadForm).toMatchObject({ enabled: true, trialTraining: true, departments: [{ id: deptId, name: "Fußball" }], privacyNotice: { version: 1, body: expect.stringContaining("Datenschutzhinweis") } });
     // Nothing internal: no hidden department, no board calendar, no sponsor notes, no member names/addresses, no signatures.
     for (const forbidden of ["Geheimrat", "Vorstandssitzung", "GEHEIME-NOTIZ", "Intern AG", "Vorbei KG", "Founder public", "@example.com", "sig=", hiddenDeptId]) expect(text).not.toContain(forbidden);
 

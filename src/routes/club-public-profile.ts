@@ -16,6 +16,7 @@ import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, ValidationError } from "../lib/errors.js";
 import { deleteMedia, IMAGE_TYPES, MAX_PHOTO_BYTES, signedMediaUrls, storeUpload } from "../lib/media.js";
 import { draftOf, imageKeysOf, loadProfileRow, MAX_GALLERY_IMAGES, MAX_PROFILE_IMAGES, normalizeContent, PUBLIC_PROFILE_OWNER, publicSettings, sameContent, syncPublicMedia } from "../lib/public-profile.js";
+import { latestPublishedNotice } from "../lib/privacy-notice.js";
 import { cleanText } from "../lib/text-policy.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -178,6 +179,17 @@ clubPublicProfileRoutes.post("/images", rateLimit({ windowMs: 60_000, max: 30, k
   return c.json({ data: { key: row.storageKey, previewUrl: urls.get(row.storageKey) ?? null, mimeType: row.mimeType, sizeBytes: row.sizeBytes } }, 201);
 });
 
+/**
+ * The enquiry form collects personal data, so it may only go public together with the club's published privacy notice
+ * (Wave 10 B11): otherwise `422 privacy_notice_required`.
+ */
+async function assertNoticeForLeadForm(clubId: string, leadFormEnabled: boolean): Promise<void> {
+  if (!leadFormEnabled) return;
+  if (!(await latestPublishedNotice(clubId))) {
+    throw new ValidationError("Publish the club's privacy notice before switching the enquiry form on", { details: { code: "privacy_notice_required" } });
+  }
+}
+
 const publishSchema = z.object({ contactConsentConfirmed: z.boolean().optional(), enable: z.boolean().optional() });
 
 clubPublicProfileRoutes.post("/publish", zValidator("json", publishSchema, hook), async (c) => {
@@ -186,6 +198,7 @@ clubPublicProfileRoutes.post("/publish", zValidator("json", publishSchema, hook)
   const row = await loadProfileRow(clubId);
   const draft = draftOf(row);
   await assertReferences(clubId, draft);
+  await assertNoticeForLeadForm(clubId, draft.leadFormEnabled);
   const hasContact = draft.contactEmail !== null || draft.contactPhone !== null;
   if (hasContact && body.contactConsentConfirmed !== true) {
     throw new ValidationError("Confirm that the contact may be published (club address or consent of the person)", { details: { code: "contact_consent_required" } });
@@ -223,6 +236,10 @@ const settingsSchema = z
 clubPublicProfileRoutes.put("/settings", zValidator("json", settingsSchema, hook), async (c) => {
   const clubId = c.get("clubId");
   const body = c.req.valid("json");
+  if (body.publicProfileEnabled) {
+    const row = await loadProfileRow(clubId);
+    await assertNoticeForLeadForm(clubId, row?.published ? normalizeContent(row.published).leadFormEnabled : false);
+  }
   const set = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined));
   await db.transaction(async (tx) => {
     await tx.insert(clubSettings).values({ clubId, ...set }).onConflictDoUpdate({ target: clubSettings.clubId, set: { ...set, updatedAt: new Date() } });

@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { BadRequestError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { recordPublicLead } from "../lib/club-leads.js";
+import { latestPublishedNotice } from "../lib/privacy-notice.js";
 import { cleanText } from "../lib/text-policy.js";
 import { stripControlChars } from "../lib/search-text.js";
 import { SLUG_RE } from "../lib/forms.js";
@@ -114,7 +115,8 @@ publicClubRoutes.post("/clubs/:slug/leads", async (c) => {
   await enforceLimit({ bucket: "public_lead.ip", subject: caller.subject, windowMs: HOUR_MS, max: caller.subject === "trusted-server" ? publicTrustedLimit() : leadIpLimit() });
   const slug = c.req.param("slug");
   const live = SLUG_RE.test(slug) ? await liveClubBySlug(slug) : null;
-  if (!live || !live.content.leadFormEnabled) return publicNotFound(c);
+  // No form without the club's published privacy notice (same 404 as a page without form).
+  if (!live || !live.content.leadFormEnabled || !(await latestPublishedNotice(live.club.id))) return publicNotFound(c);
   const parsed = leadSchema.safeParse(await readJson(c));
   if (!parsed.success) throw new ValidationError("Invalid request body", { details: parsed.error.issues });
   const body = parsed.data;
