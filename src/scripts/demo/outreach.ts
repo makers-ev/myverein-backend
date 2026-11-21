@@ -1,6 +1,9 @@
 import { db } from "../../db/client.js";
+import { clubPublicProfiles, type PublicProfileContent } from "../../db/schema/club-public-profiles.js";
+import { clubSettings } from "../../db/schema/club-settings.js";
 import { sponsorContacts, sponsors } from "../../db/schema/sponsors.js";
 import { writeAudit } from "../../lib/audit.js";
+import { syncPublicMedia } from "../../lib/public-profile.js";
 import { accountOf, shiftDays, type DemoCtx } from "./context.js";
 
 /**
@@ -97,4 +100,36 @@ export async function seedSponsors(ctx: DemoCtx): Promise<void> {
     await writeAudit(db, { eventType: "sponsor.create", subjectId: row!.id, clubId: ctx.clubId, actorUserId: board.userId, payload: { clubId: ctx.clubId, sponsorId: row!.id, visibility: spec.visibility, contacts: spec.contacts.length } });
   }
   ctx.log(`${SPONSORS.length} Sponsoren (aktiv, läuft bald aus, geplant, abgelaufen, intern)`);
+}
+
+/**
+ * Public club page (Wave 15 B3): published and switched on, and findable in the club search, so the website page `/v/<slug>`,
+ * the enquiry form and "Verein finden" can be tried with the demo club. (Real clubs start with both switches OFF.) The draft has
+ * one unpublished change (a new tagline) to show the "not yet published" state of the editor.
+ */
+export async function seedPublicProfile(ctx: DemoCtx): Promise<void> {
+  const board = accountOf(ctx, "vorsitz");
+  const published: PublicProfileContent = {
+    tagline: "Sport, Gemeinschaft und Ehrenamt in Wiesbach",
+    description: "Wir sind ein Mehrspartenverein mit Fußball, Tennis, Turnen und Schwimmen. Schnuppern ist jederzeit möglich: melde dich einfach über das Formular, wir laden dich zum Probetraining ein.",
+    city: "Wiesbach",
+    address: "Sportplatz am Lindenweg 3, 65555 Wiesbach",
+    contactEmail: "info@demo-sportverein-wiesbach.example",
+    contactPhone: null,
+    website: null,
+    logoKey: null,
+    coverKey: null,
+    galleryKeys: [],
+    departmentIds: ["fussball", "tennis", "turnen", "schwimmen"].map((k) => ctx.dept[k]!).filter(Boolean),
+    eventCalendarIds: [ctx.cal.fussball].filter((v): v is string => !!v),
+    showSponsors: true,
+    leadFormEnabled: true,
+    trialTrainingEnabled: true,
+  };
+  const now = new Date();
+  await db.insert(clubPublicProfiles).values({ clubId: ctx.clubId, ...published, tagline: "Sport, Gemeinschaft und Ehrenamt in Wiesbach seit 1921", published, publishedAt: now, publishedBy: board.memberId, contactConsentAt: now, updatedBy: board.memberId });
+  await db.insert(clubSettings).values({ clubId: ctx.clubId, publicProfileEnabled: true, discoverable: true }).onConflictDoUpdate({ target: clubSettings.clubId, set: { publicProfileEnabled: true, discoverable: true } });
+  await writeAudit(db, { eventType: "public_profile.publish", subjectId: ctx.clubId, clubId: ctx.clubId, actorUserId: board.userId, payload: { clubId: ctx.clubId, contactConfirmed: true, enabled: true } });
+  await syncPublicMedia(ctx.clubId);
+  ctx.log("Öffentliche Vereinsseite veröffentlicht und auffindbar (Entwurf mit einer unveröffentlichten Änderung)");
 }

@@ -160,6 +160,7 @@ describe("seed:demo", () => {
     expect(first.sponsors).toBe(5);
     expect(first.sponsors_public).toBe(4);
     expect(first.sponsor_contacts).toBeGreaterThanOrEqual(4);
+    expect(first.public_profile_live).toBe(1);
     expect(first.time_entries_over_midnight).toBe(1);
     expect(first.time_entries_stempeln).toBeGreaterThan(0);
     expect(first.time_entries_aus_termin).toBeGreaterThan(0);

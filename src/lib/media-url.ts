@@ -50,3 +50,12 @@ export function buildMediaUrl(key: string, ttlMs = mediaUrlTtlMs(), now = Date.n
   const path = key.split("/").map(encodeURIComponent).join("/");
   return `${backendBase()}/media/${path}?exp=${exp}&sig=${signMediaKey(key, exp)}`;
 }
+
+/**
+ * Absolute UNSIGNED URL for a file the club explicitly released (`public_opt_in`, Wave 15 BM). Only `publicMediaUrls` in
+ * `src/lib/media.ts` calls this, and only for live, non-sensitive, opted-in images; `GET /media/<key>` serves such a file without
+ * a signature and refuses it (403) the moment the opt-in is revoked.
+ */
+export function buildPublicMediaUrl(key: string): string {
+  return `${backendBase()}/media/${key.split("/").map(encodeURIComponent).join("/")}`;
+}

@@ -306,6 +306,10 @@ export const AUDIT_EVENTS = {
   "admin.club_unsuspend": spec(["clubId"]),
   "admin.club_plan_set": spec(["clubId", "memberLimit", "tier", "validUntil"]),
   "admin.club_plan_clear": spec(["clubId"]),
+  "public_profile.update": spec(["changedFields", "clubId"]),
+  "public_profile.publish": spec(["clubId", "contactConfirmed", "enabled"]),
+  "public_profile.unpublish": spec(["clubId"]),
+  "public_profile.settings": spec(["clubId", "discoverable", "publicProfileEnabled"]),
 } as const satisfies Record<string, AuditEventSpec>;
 
 export type AuditEventType = keyof typeof AUDIT_EVENTS;

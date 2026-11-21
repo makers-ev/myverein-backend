@@ -83,6 +83,8 @@ import { notificationRoutes } from "./notifications.js";
 import { pushTokenRoutes } from "./push-tokens.js";
 import { rateCardRoutes, timeEntryRoutes, timeReportRoutes } from "./time-tracking.js";
 import { sponsorRoutes } from "./sponsors.js";
+import { clubPublicProfileRoutes } from "./club-public-profile.js";
+import { publicClubRoutes } from "./public-clubs.js";
 
 /**
  * Rights matrix (Wave 7 B12 part, deny-by-default): EVERY registered writing route (POST/PATCH/PUT/DELETE)
@@ -161,6 +163,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/attendance", "attendanceReportRoutes", attendanceReportRoutes],
   ["/events.ics", "icsRoutes", icsRoutes],
   ["/public", "publicEventRoutes", publicEventRoutes],
+  ["/public", "publicClubRoutes", publicClubRoutes],
   ["/time-entries", "timeEntryRoutes", timeEntryRoutes],
   ["/rate-cards", "rateCardRoutes", rateCardRoutes],
   ["/time-report", "timeReportRoutes", timeReportRoutes],
@@ -172,6 +175,7 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/inventory-items", "inventoryItemRoutes", inventoryItemRoutes],
   ["/media", "mediaRoutes", mediaRoutes],
   ["/sponsors", "sponsorRoutes", sponsorRoutes],
+  ["/club-public-profile", "clubPublicProfileRoutes", clubPublicProfileRoutes],
 ];
 
 const app = new Hono();
@@ -344,6 +348,7 @@ const GUEST_DENIED_READS: Array<[string, string]> = [
   ["GET", "/departments"],
   ["GET", `/departments/${"00000000-0000-4000-8000-000000000001"}`],
   ["GET", "/sponsors"],
+  ["GET", "/club-public-profile"],
 ];
 
 /** Routes whose body validation runs before the permission check need a valid sample body. Default `{}`. */
@@ -423,6 +428,8 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "PATCH /sponsors/:id": { name: "Neu" },
   "POST /sponsors/:id/contacts": { name: "Kontakt" },
   "PATCH /sponsors/:id/contacts/:contactId": { name: "Neu" },
+  "PUT /club-public-profile": { tagline: "Hallo" },
+  "PUT /club-public-profile/settings": { publicProfileEnabled: true },
 };
 
 function fillParams(path: string) {

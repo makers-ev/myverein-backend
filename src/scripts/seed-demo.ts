@@ -36,7 +36,7 @@ import { seedInventory, seedLocations } from "./demo/places.js";
 import { seedConsents, seedPrivacy } from "./demo/privacy.js";
 import { seedRoles } from "./demo/roles.js";
 import { seedTimeTracking, TIME_LOGIN_HINTS } from "./demo/time.js";
-import { seedSponsors } from "./demo/outreach.js";
+import { seedPublicProfile, seedSponsors } from "./demo/outreach.js";
 
 /**
  * Demo club seed (`npm run seed:demo`): ONE fully populated club ("Demo Sportverein Wiesbach e.V.") so the whole MyVerein
@@ -98,6 +98,7 @@ const STEPS: Step[] = [
   { name: "Bestätigungen", run: seedAcknowledgements },
   { name: "Mitgliedsausweise", run: seedMemberCards },
   { name: "Sponsoren und Partner", run: seedSponsors },
+  { name: "Öffentliche Vereinsseite", run: seedPublicProfile },
   { name: "Versand abschließen", run: async (ctx) => void (await neutralizeOutbound(ctx)) },
 ];
 

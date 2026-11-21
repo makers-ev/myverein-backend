@@ -9,6 +9,7 @@ import { auditLog } from "../db/schema/audit-log.js";
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubPlans, clubPlatformStatus, clubStatusHistory } from "../db/schema/club-platform.js";
 import { clubRegistrations } from "../db/schema/club-registrations.js";
+import { clubSettings } from "../db/schema/club-settings.js";
 import { writeAudit } from "../lib/audit.js";
 import { ConflictError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { registerCheckOf } from "../lib/club-platform.js";
@@ -83,7 +84,7 @@ const clubListQuery = z.object({
 
 async function clubRows(clubIdsWanted: string[]) {
   if (clubIdsWanted.length === 0) return [];
-  const [orgs, members, accounts, activity, statuses, plans] = await Promise.all([
+  const [orgs, members, accounts, activity, statuses, plans, settings] = await Promise.all([
     db.select().from(organization).where(inArray(organization.id, clubIdsWanted)),
     db
       .select({ clubId: clubMembers.clubId, n: count() })
@@ -94,6 +95,7 @@ async function clubRows(clubIdsWanted: string[]) {
     db.select({ clubId: auditLog.clubId, at: max(auditLog.createdAt) }).from(auditLog).where(inArray(auditLog.clubId, clubIdsWanted)).groupBy(auditLog.clubId),
     db.select().from(clubPlatformStatus).where(inArray(clubPlatformStatus.clubId, clubIdsWanted)),
     db.select().from(clubPlans).where(inArray(clubPlans.clubId, clubIdsWanted)),
+    db.select({ clubId: clubSettings.clubId, publicProfileEnabled: clubSettings.publicProfileEnabled, discoverable: clubSettings.discoverable }).from(clubSettings).where(inArray(clubSettings.clubId, clubIdsWanted)),
   ]);
   const by = <T extends { clubId: string | null }>(rows: T[]) => new Map(rows.map((r) => [r.clubId as string, r]));
   const memberBy = by(members);
@@ -101,6 +103,7 @@ async function clubRows(clubIdsWanted: string[]) {
   const activityBy = by(activity);
   const statusBy = by(statuses);
   const planBy = by(plans);
+  const settingsBy = by(settings);
   const orgBy = new Map(orgs.map((o) => [o.id, o]));
   return clubIdsWanted
     .filter((id) => orgBy.has(id))
@@ -121,6 +124,8 @@ async function clubRows(clubIdsWanted: string[]) {
         lastActivityAt: activityBy.get(id)?.at ?? null,
         plan: plan ? { tier: plan.tier, validFrom: plan.validFrom, validUntil: plan.validUntil, memberLimit: plan.memberLimit } : null,
         overMemberLimit: plan?.memberLimit != null && memberCount > plan.memberLimit,
+        publicProfileEnabled: settingsBy.get(id)?.publicProfileEnabled ?? false,
+        discoverable: settingsBy.get(id)?.discoverable ?? false,
       };
     });
 }

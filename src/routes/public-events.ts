@@ -29,12 +29,16 @@ const registerIpLimit = () => envInt("PUBLIC_EVENT_REGISTER_IP_LIMIT_PER_HOUR", 
 const registerTokenLimit = () => envInt("PUBLIC_EVENT_REGISTER_TOKEN_LIMIT_PER_HOUR", 200);
 const registerEmailLimit = () => envInt("PUBLIC_EVENT_REGISTER_EMAIL_LIMIT_PER_HOUR", 3);
 
-publicEventRoutes.use("*", async (c, next) => {
+// Scoped to the own paths: this router shares the `/public` mount with the public club routes (Wave 15), which have their own
+// cache headers and limits.
+const guestMiddleware = async (c: Context, next: () => Promise<void>) => {
   c.header("Cache-Control", "no-store");
   c.header("X-Robots-Tag", "noindex, nofollow");
   await enforceLimit({ bucket: "public_event.ip", subject: ipSubject(c), windowMs: HOUR_MS, max: ipLimit() });
   await next();
-});
+};
+publicEventRoutes.use("/events/*", guestMiddleware);
+publicEventRoutes.use("/registrations/*", guestMiddleware);
 
 /** One 404 for everything that is not a valid credential; counts against the strict "invalid" budget of the client. */
 async function notFound(c: Context): Promise<never> {
