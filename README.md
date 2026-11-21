@@ -1854,6 +1854,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `form_not_published` | 409 | `routes/event-registration.ts` |
 | `form_purpose_exists` | 409 | `routes/forms.ts` |
 | `form_required` | 409 | `routes/club-members.ts` |
+| `gender_field_required` | 422 | `routes/club-stats.ts` |
 | `grantor_present` | 409 | `lib/ballots.ts` |
 | `guardian_cannot_consent` | 403 | `routes/member-consents.ts` |
 | `guardian_cannot_report_absence` | 403 | `routes/guardian.ts` |
@@ -1868,6 +1869,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `import_not_confirmed` | 422 | `routes/club-members.ts` |
 | `import_nothing_to_do` | 422 | `routes/club-members.ts` |
 | `in_future` | 422 | `lib/time-tracking.ts` |
+| `invalid_age_bands` | 422 | `routes/club-stats.ts` |
 | `invalid_candidate_transition` | 409 | `lib/elections.ts` |
 | `invalid_key` | 422 | `routes/consent-purposes.ts` |
 | `invalid_lot` | 422 | `lib/elections.ts` |
@@ -1992,6 +1994,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `unknown_column` | 422 | `routes/club-members.ts`, `routes/event-participants.ts` |
 | `unknown_department` | 422 | `routes/club-public-profile.ts` |
 | `unknown_entry` | 422 | `routes/event-attendance.ts` |
+| `unknown_gender_field` | 422 | `routes/club-stats.ts` |
 | `unknown_image` | 422 | `routes/club-public-profile.ts` |
 | `unknown_member` | 422 | `routes/event-attendance.ts` |
 | `unknown_option` | 422 | `lib/ballots.ts` |
@@ -2030,6 +2033,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `/club-members/:id/transition` | POST | session + `clubGuard` (`members:write`) | Status and/or category change with history, see [Member lifecycle](#member-lifecycle). Body `{ toStatus?, categoryId? \| categoryKey?, effectiveOn? (YYYY-MM-DD), reason?, reopen? }` (at least `toStatus` or a category). `200 { data: <member shape>, transition: { kind: "status\|category\|scheduled_exit\|cancel_exit", fromStatus, toStatus, fromCategoryId, toCategoryId, effectiveOn } }`. `409` for a status outside the matrix (`details.allowed`), no-op or same category, `422` for invalid dates / missing `reopen`+`reason`, `404` for foreign ids, `403` without `members:write`. Audit `club_member.transition` (ids and dates, the free-text reason stays in the history) |
 | `/club-members/:id/history` | GET | session + `clubGuard` (`members:read_sensitive`) | `club_member_status_history` of one member, newest first: `[{ id, fromStatus, toStatus, fromCategoryId, toCategoryId, effectiveOn, reason, changedBy, createdAt }]` (exit reasons are personal data → sensitive) |
 | `/club-stats` | GET | session + `clubGuard` (`club_stats:read`: `vorsitz`, `stellv_vorsitz`, `schriftfuehrer`, `kassenwart`, `beisitzer`) | Club KPIs (B11), aggregates only — see [Club KPIs](#club-kpis). `403` for everybody else (including `owner` without a club role, trainers, plain members) |
+| `/club-stats/association-report` | GET | session + `clubGuard` (`club_stats:read`; a `gender` column from a *sensitive* custom field also needs `members:read_sensitive`, else `403`) | Wave 15 B6, Verbandsmeldung: member counts on a reference day by department / age group / gender / category, counts only — see [Association report](#association-report). Query: `stichtag` (`YYYY-MM-DD`, default today Berlin), `columns` (`department,ageGroup,gender,category`, default `department,ageGroup`; order is kept), `ageBands` (ascending upper bounds, default `6,14,18,26,40,60`), `ageMode` (`jahrgang` default \| `stichtag`), `genderField` (key of a `select`/`text` member custom field; required with `gender`), `format` (`json` default \| `csv`), `delimiter` (`;` default \| `,`). `422` for bad parameters (`gender_field_required`, `unknown_gender_field`, `invalid_age_bands`). `Cache-Control: private, no-store`; 10 requests/minute per user (`429`) |
 | `/clubs/:clubId/today` | GET | session + `clubGuard` (any member of the club; foreign club `404`; 120/min per IP and per user) | Wave 14 "Heute" overview of the caller. `200 { data: { generatedAt, openRsvps: [{ eventId, title, startsAt }], cancelled: [{ eventId, title, startsAt }], unreadAnnouncements, dueReturns: [{ loanId, itemName, dueAt }], openBallots, board?, setup? } }`. `openRsvps`: events of visible calendars in the next 14 days, not cancelled, without an RSVP row of the caller (max 10, by start). `cancelled`: cancelled events in the same window for which the caller has an RSVP row (max 10). `unreadAnnouncements`: unread in-app deliveries (same rules as `/club-inbox/unread-count`). `dueReturns`: the caller's own unreturned loans due within 3 days or overdue (max 10, by due date). `openBallots`: open ballots in their voting window where the caller is eligible and has not voted (in-session ballots only after check-in; always 0 for external guests). `board` (whole key omitted if empty; each key only with its permission): `openApplications`, `openExits` (`members:write`), `maintenanceDue` (`inventory:write`), `memberCount` (`club_stats:read`, effective status probe/aktiv/ruhend). `setup` (`club_info:write` only, omitted once everything is done): `{ done, open }` with keys `logo`, `departments`, `calendar` (at least one event), `location`, `members` (more than the founder). `Cache-Control: private, no-store` |
 | `/clubs/:clubId/search` | GET | session + `clubGuard` (any member; foreign club `404`; 60/min per IP and per user) | Wave 14 global search. Query `q` (control characters incl. NUL removed, trimmed, at least 2 characters, at most 100; otherwise **`400` `QUERY_TOO_SHORT`** with `details.code = "query_too_short"`), `limit` per group (default 5, max 10, invalid values fall back to 5). `%`, `_` and `\` match literally. `200 { data: { members?: [{ id, name, departmentNames? }], events: [{ id, title, startsAt }], documents: [{ id, title, folderId }], locations: [{ id, name }] } }`. `members` = same visibility as `GET /club-members` (name only; plain members get no former members/interessenten; `departmentNames` = current assignments) and is omitted for external guests; `events` = visible calendars only (upcoming first, nearest first, then past); `documents` = active archive documents in folders the caller may read (folder rights, trash excluded, personal storage never searched; empty for external guests); `locations` = all locations of the club. The query text is never logged. `Cache-Control: private, no-store` |
 | `/audit-log` | GET | session + `clubGuard` (`privacy:read`: `vorsitz`, `stellv_vorsitz`; others `403`, foreign club `404`) | Wave 10 B2. Access and change log of the caller's club only (`audit_log.club_id`; platform events without a club never appear). Query: `subjectId` (exact), `actorId` (user id), `type` (exact event type or prefix with trailing `*`, e.g. `club_member.*`), `kind` (`read` = somebody saw data / export / download, `change` = everything else), `from` / `to` (ISO date or date-time; a plain `to` date includes that day), `page` (default 1), `pageSize` (default 50, max 100). `200 { data: [{ id, eventType, kind, subjectId, subjectMember: { id, name } \| null, actor: { userId, name } \| null, payload, createdAt }], page, pageSize, total }`, newest first. `422` for a bad filter. 60 requests/min per IP. |
@@ -2649,6 +2653,23 @@ Backward-compatibility decisions: `category` was a string key before Wave 7 and 
 
 Rules: a member counts independent of an account (ADR-003). `members.total` = effective status `probe`, `aktiv` or `ruhend` (`interessent` and everyone who left are not counted); `active` = `aktiv`; `withAccount` + `withoutAccount` = `total`. `byStatus` covers the whole club history with the effective status (a stored `aktiv` with `left_at <= today` counts as `ausgetreten`). `byCategory`/`byDepartment` (current assignments)/`ageBuckets` describe the counted population; archived categories only appear while they still have members; `ageUnknown` = counted members without `birth_date`. `movement.joined` = `joined_at` in the month (not `interessent`), `movement.left` = `left_at` of members who have left plus exits from the status history of members who were reopened later. **Accepted limitation (no k-anonymity):** the KPIs are exact counts with no minimum group size, so in a tiny category or age bucket a count of 1 identifies a person. This is deliberate — the readers are the board, who know their members anyway, and plain members have no access (`403`); it must be revisited before the numbers are shown to anyone else (e.g. a member-facing dashboard).
 
+<a id="association-report"></a>**Association report (`GET /club-stats/association-report`, Wave 15 B6)** — the annual stock report to a sports federation (Bestandsmeldung): counts of members on a reference day, split by `department` (Sparte), `ageGroup`, `gender` and `category`. Same permission as the KPIs (`club_stats:read`, board roles; everybody else `403`, deny-by-default). **Counts only** — no names, ids or birth dates, so the CSV can be handed over as is. Code: `src/lib/association-report.ts` (pure, tested with fixed days) on the rows of `loadClubStatsInput`, route in `src/routes/club-stats.ts`.
+
+```jsonc
+{ "data": {
+  "stichtag": "2026-12-31", "columns": ["department", "ageGroup"], "ageMode": "jahrgang",
+  "ageGroups": ["0-6", "7-14", "15-18", "19-26", "27-40", "41-60", "61+"],
+  "rows": [{ "department": "Fußball", "ageGroup": "7-14", "count": 12 }],
+  "total": 87, "note": "Nur Zähldaten, keine Namen. …"
+} }
+```
+
+- **Who counts on the reference day:** joined on or before it, not `interessent`, not left (`left_at <= stichtag` = left, like the effective status). Probe, aktiv and ruhend count; future joiners and people who left on or before the day do not.
+- **Department:** an assignment counts when `since <= stichtag` and it is open or `until > stichtag`. A member in two departments counts in both rows when `department` is a column; `total` (and the `Summe` row) counts every member once. No department: `ohne Abteilung`.
+- **Age groups:** ascending upper bounds, `ageBands=6,14` gives `0-6`, `7-14`, `15+` (at most 10 bounds of 0..120, else `422 invalid_age_bands`). `ageMode=jahrgang` (default, usual for federations) = reference year minus birth year; `stichtag` = completed years on the day. No birth date: `unbekannt`.
+- **Gender** is not a member master field: pass `genderField` = key of a custom field of type `select` (shown by option label) or `text`; missing value: `unbekannt`. `gender` without it: `422 gender_field_required`; unknown key, other type or a foreign club's field: `422 unknown_gender_field`. A field flagged `sensitive` additionally needs `members:read_sensitive` (kassenwart/vorsitz/stellv_vorsitz yes, beisitzer/schriftfuehrer no: `403`). `category` = member category name (`ohne Kategorie`).
+- **CSV** (`format=csv`): UTF-8 BOM, CRLF, `;` (or `,`), German header (`Abteilung`, `Altersgruppe`, `Geschlecht`, `Kategorie`, `Anzahl`) in the requested column order, closing `Summe` row, cells formula-neutralised (`'` prefix, same helper as the member/acknowledgement exports), `Content-Disposition: attachment; filename="verbandsmeldung-<stichtag>.csv"`. Every CSV export writes the audit event `association_report.export` (`clubId`, `stichtag`, `columns`, `rows`; no personal data, no gender field key); the JSON preview writes none.
+
 Member category shape: `{ id, key, name, votingRight, minAge, maxAge, autoTransitionToKey, sortOrder, archived, archivedAt, memberCount? }`.
 
 <a id="exit-workflow"></a>**Exit workflow (B6).** Routes: `/club-settings`, `/club-exit-requests` (see the API table). Everything that changes the member goes through `transitionMember` — the same history, the same Stichtag derivation, the same matrix as `POST /club-members/:id/transition`.
@@ -2683,7 +2704,7 @@ Member category shape: `{ id, key, name, votingRight, minAge, maxAge, autoTransi
 
 ## Configuration
 
-All variables live in `.env.example`. Wave 10 B1/B2 (privacy foundation, audit log) add **no** environment variables; the privacy parameters are database settings in `club_settings` (`consent_age_limit` default 18, `consent_both_guardians`, `privacy_contact`, `privacy_controller`; API exposure follows with the consent/privacy packages). The ones worth calling out specifically:
+All variables live in `.env.example`. Wave 10 B1/B2 (privacy foundation, audit log) add **no** environment variables; the privacy parameters are database settings in `club_settings` (`consent_age_limit` default 18, `consent_both_guardians`, `privacy_contact`, `privacy_controller`; API exposure follows with the consent/privacy packages). The ones worth calling out specifically: Wave 15 B6 (association report) adds **no** environment variables; its rate limit (10 requests per minute per user) is fixed in code.
 
 | Variable | Required | Purpose |
 |---|---|---|

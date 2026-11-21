@@ -24,6 +24,7 @@ export const AUDIT_EVENTS = {
   "absence.create": spec(["absenceId", "clubId", "clubMemberId", "reportedByKind"], "clubMemberId"),
   "absence.update": spec(["absenceId", "changedFields", "clubId", "clubMemberId"], "clubMemberId"),
   "absence.withdraw": spec(["absenceId", "clubId", "clubMemberId"], "clubMemberId"),
+  "association_report.export": spec(["clubId", "stichtag", "columns", "rows"]),
   "acknowledgement.export": spec(["clubId", "documentId", "rows"]),
   "acknowledgement.paper": spec(["acknowledgementId", "clubId", "documentId", "status"], "subject"),
   "acknowledgement.remind": spec(["clubId", "count", "documentId"]),
