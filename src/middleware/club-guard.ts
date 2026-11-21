@@ -6,6 +6,7 @@ import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditContext } from "../lib/audit.js";
 import { resolveClubRoleTypes } from "../lib/club-access.js";
+import { assertClubNotSuspended } from "../lib/club-platform.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../lib/errors.js";
 import { dpaGate } from "./dpa-gate.js";
 import type { SessionEnv } from "./session-guard.js";
@@ -55,6 +56,10 @@ export const clubGuard = createMiddleware<ClubEnv>(async (c: Context, next: Next
   if (effective === null) {
     throw new NotFoundError("Club not found");
   }
+
+  // Wave 15 B7: a club suspended by the platform is locked for every club route (after the membership check, so a stranger
+  // still learns nothing about the club).
+  await assertClubNotSuspended(clubId);
 
   c.set("clubId", clubId);
   const auditStore = auditContext.getStore();

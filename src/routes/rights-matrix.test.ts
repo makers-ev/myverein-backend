@@ -12,6 +12,7 @@ import { ballotOptions, ballotVotesOpen, ballots } from "../db/schema/assembly.j
 import { clubMembers } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubSettings } from "../db/schema/club-settings.js";
+import { clubPlatformStatus } from "../db/schema/club-platform.js";
 import { inventoryItems, inventoryLoans } from "../db/schema/inventory.js";
 import { calendars } from "../db/schema/calendars.js";
 import { calendarVisibility } from "../db/schema/calendar-visibility.js";
@@ -273,6 +274,32 @@ const SELF_SERVICE: Record<string, string> = {
   "POST /club-members/me/erasure-request": "the member's own erasure request (a request with a deadline for the board; nothing is erased by it)",
   "POST /guardian/wards/:wardId/erasure-request": "guardian files an erasure request for a ward (guardianScope: a ward that is not the caller's is 404)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
+};
+
+/**
+ * Route prefixes that are NOT club-scoped (no clubGuard), so the suspension sweep skips them. Public token routes of a
+ * suspended club (guest event links, calendar feeds, public club page) answer 404 instead, asserted in their own tests.
+ */
+const SUSPENSION_EXEMPT: Record<string, string> = {
+  "/health": "liveness, no club",
+  "/ready": "readiness, no club",
+  "/internal": "platform metrics (token)",
+  "/admin": "platform admin: the admin manages suspended clubs",
+  "/my-wards": "session-level overview across clubs; every ward route behind it (/guardian) is locked",
+  "/notification-preferences": "account-level preferences",
+  "/unsubscribe": "signed unsubscribe link of a mail (account-level)",
+  "/push-tokens": "account-level device registration",
+  "/notifications": "platform notifications of the account",
+  "/clubs/:slug/privacy-notice": "public privacy notice by slug (legal information stays readable)",
+  "/club-registrations": "the caller's own founding applications (platform level)",
+  "/my-clubs": "lists the clubs with `suspended: true`, asserted in admin-clubs-platform.test.ts",
+  "/club-members/apply": "applications to a suspended club are refused in assertMayApply (403 CLUB_SUSPENDED); the empty body fails validation first",
+  "/club-members/invites": "invitation token routes (account level); joining a suspended club is refused by the membership routes",
+  "/club-forms/:clubSlug/aufnahme": "public form by slug: 404 for a suspended club",
+  "/form-submissions": "the applicant's own drafts; creating/submitting for a suspended club is refused in assertMayApply",
+  "/feeds": "calendar feed tokens: 404 for a suspended club",
+  "/public": "public token routes: 404 for a suspended club (eventByPublicToken)",
+  "/media/:key{.+}": "signed media serving (no club context); every route that issues a signature is locked",
 };
 
 /** Routes that may answer 404 instead of 403 (the resource is resolved/scoped before the permission check). */
@@ -884,4 +911,24 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
       expect(JSON.stringify(rows)).not.toContain(founderEmail);
     });
   });
+  // Wave 15 B7: a club suspended by the platform is locked on EVERY club route. Every registered route (all methods) is called
+  // by the founder (vorsitz) of a suspended club; only routes that are not club-scoped (no clubGuard) may answer differently.
+  it("locks every clubGuard route of a suspended club with 403 CLUB_SUSPENDED (Wave 15 B7)", async () => {
+    await db.insert(clubPlatformStatus).values({ clubId, suspendedAt: new Date(), suspensionReason: "Matrix", suspensionNote: null });
+    try {
+      const routes = [...new Set(app.routes.filter((r) => r.method !== "ALL").map((r) => `${r.method} ${r.path}`))];
+      const problems: string[] = [];
+      for (const key of routes) {
+        const [method, path] = key.split(" ") as [string, string];
+        if (Object.keys(SUSPENSION_EXEMPT).some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) continue;
+        const filled = fillParams(path.replace(":clubId", clubId));
+        const res = await req(filled, cookieFounder, { method, body: method === "GET" ? undefined : (SAMPLE_BODIES[key] ?? {}) });
+        const body = (await res.json().catch(() => null)) as { error?: { code?: string } } | null;
+        if (res.status !== 403 || body?.error?.code !== "CLUB_SUSPENDED") problems.push(`${key} -> ${res.status} ${body?.error?.code ?? ""}`);
+      }
+      expect(problems, problems.join("\n")).toEqual([]);
+    } finally {
+      await db.delete(clubPlatformStatus).where(eq(clubPlatformStatus.clubId, clubId));
+    }
+  }, 180_000);
 });

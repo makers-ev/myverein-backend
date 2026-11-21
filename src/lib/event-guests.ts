@@ -4,6 +4,7 @@ import { and, count, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm
 
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
+import { isClubSuspended } from "./club-platform.js";
 import { eventAttendees, type EventAttendeeRow } from "../db/schema/event-attendees.js";
 import { events, type EventRow } from "../db/schema/events.js";
 import { calendars } from "../db/schema/calendars.js";
@@ -47,7 +48,9 @@ export async function eventByPublicToken(token: string): Promise<{ event: EventR
     .from(events)
     .innerJoin(calendars, eq(calendars.id, events.calendarId))
     .where(eq(events.publicRegistrationTokenHash, hashToken(token)));
-  return row ?? null;
+  // A club suspended by the platform (Wave 15 B7) has no reachable public links.
+  if (!row || (await isClubSuspended(row.clubId))) return null;
+  return row;
 }
 
 async function languageFor(clubId: string, requested: unknown): Promise<MailLanguage> {

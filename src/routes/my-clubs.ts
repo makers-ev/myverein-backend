@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { member, organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubMembers } from "../db/schema/club-members.js";
+import { suspendedClubIds } from "../lib/club-platform.js";
 import { effectiveStatus, isLeftStatus, todayBerlin } from "../lib/member-lifecycle.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard, type SessionEnv } from "../middleware/session-guard.js";
@@ -36,9 +37,10 @@ myClubRoutes.get("/", async (c) => {
     .where(eq(member.userId, currentUser.id))
     .orderBy(asc(member.createdAt), asc(member.id));
 
-  const clubs = rows
-    .filter((r) => r.status === null || !isLeftStatus(effectiveStatus({ status: r.status, leftAt: r.leftAt }, today)))
-    .map((r) => ({ clubId: r.membership.organizationId, memberId: r.membership.id, clubName: r.clubName, orgRole: r.membership.role }));
+  const visible = rows.filter((r) => r.status === null || !isLeftStatus(effectiveStatus({ status: r.status, leftAt: r.leftAt }, today)));
+  // Wave 15 B7: clients show the suspension hint before they call a club route (which would answer 403 CLUB_SUSPENDED).
+  const suspended = await suspendedClubIds(visible.map((r) => r.membership.organizationId));
+  const clubs = visible.map((r) => ({ clubId: r.membership.organizationId, memberId: r.membership.id, clubName: r.clubName, orgRole: r.membership.role, suspended: suspended.has(r.membership.organizationId) }));
 
   return c.json({ data: clubs });
 });

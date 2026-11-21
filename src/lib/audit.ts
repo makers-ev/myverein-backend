@@ -302,6 +302,10 @@ export const AUDIT_EVENTS = {
   "sponsor.update": spec(["changedFields", "clubId", "sponsorId"]),
   "sponsor.delete": spec(["clubId", "hadLogo", "sponsorId"]),
   "sponsor.contact_change": spec(["action", "clubId", "contactId", "sponsorId"]),
+  "admin.club_suspend": spec(["clubId", "withNote"]),
+  "admin.club_unsuspend": spec(["clubId"]),
+  "admin.club_plan_set": spec(["clubId", "memberLimit", "tier", "validUntil"]),
+  "admin.club_plan_clear": spec(["clubId"]),
 } as const satisfies Record<string, AuditEventSpec>;
 
 export type AuditEventType = keyof typeof AUDIT_EVENTS;

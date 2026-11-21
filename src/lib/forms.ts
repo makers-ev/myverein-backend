@@ -2,6 +2,7 @@ import { and, asc, eq, isNull } from "drizzle-orm";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
+import { assertClubNotSuspended } from "./club-platform.js";
 import { clubApplications } from "../db/schema/club-applications.js";
 import { clubMembers, memberCategories } from "../db/schema/club-members.js";
 import { clubRoles } from "../db/schema/club-roles.js";
@@ -180,6 +181,8 @@ export async function clubRoleTypesOf(userId: string, clubId: string, executor: 
 export async function assertMayApply(executor: DbExecutor, clubId: string, userId: string, onBehalfOf: SubmissionOnBehalfOf = "self"): Promise<void> {
   // A parent applying for a child (B8) is not the applicant: being a member (even a guest guardian) or having applied for
   // oneself or another child is no obstacle. Their account must merely not be a former one (checked by the caller).
+  // Wave 15 B7: a club suspended by the platform accepts no applications.
+  await assertClubNotSuspended(clubId);
   if (onBehalfOf === "guardian") return;
   const existing = await executor.query.member.findFirst({ where: and(eq(member.organizationId, clubId), eq(member.userId, userId)) });
   if (existing) {

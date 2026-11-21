@@ -22,5 +22,6 @@ export const ERROR_CODES: Record<ErrorCode, { status: number; meaning: string }>
   FORM_VERSION_OUTDATED: { status: 409, meaning: "The form was republished; re-render it and keep the answers by key" },
   RECIPIENT_CONFIRMATION_REQUIRED: { status: 422, meaning: "The announcement reaches many people; resend with `confirmRecipients` set to the shown number" },
   DPA_REQUIRED: { status: 403, meaning: "The club has not accepted the processor agreement (AV-Vertrag) yet; writing is locked" },
-  QUERY_TOO_SHORT: { status: 400, meaning: "Search text shorter than 2 characters (`details.code = query_too_short`)" },
+  QUERY_TOO_SHORT: { status: 400, meaning: "Search text too short: 2 characters for the club search inside a club, 3 (name) / 2 (city) for the public club search (`details.code = query_too_short`)" },
+  CLUB_SUSPENDED: { status: 403, meaning: "The club was suspended by the platform; every club route is locked. `details: { code: \"club_suspended\", suspendedAt, note }` (`note` = the text for members, may be null)" },
 };

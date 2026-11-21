@@ -44,6 +44,7 @@ import * as mediaFilesSchema from "./schema/media-files.js";
 import * as meetingsSchema from "./schema/meetings.js";
 import * as notificationsSchema from "./schema/notifications.js";
 import * as sponsorsSchema from "./schema/sponsors.js";
+import * as clubPlatformSchema from "./schema/club-platform.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -114,6 +115,7 @@ export const schema = {
   ...clubPrivacyNoticesSchema,
   ...privacySchema,
   ...sponsorsSchema,
+  ...clubPlatformSchema,
 };
 
 export const db = drizzle(pool, { schema });
