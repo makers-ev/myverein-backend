@@ -85,6 +85,7 @@ import { rateCardRoutes, timeEntryRoutes, timeReportRoutes } from "./time-tracki
 import { sponsorRoutes } from "./sponsors.js";
 import { clubPublicProfileRoutes } from "./club-public-profile.js";
 import { publicClubRoutes } from "./public-clubs.js";
+import { externalAccessRoutes, externalRoutes } from "./external-access.js";
 
 /**
  * Rights matrix (Wave 7 B12 part, deny-by-default): EVERY registered writing route (POST/PATCH/PUT/DELETE)
@@ -176,6 +177,8 @@ const MOUNTS: Array<[string, string, Hono<any>]> = [
   ["/media", "mediaRoutes", mediaRoutes],
   ["/sponsors", "sponsorRoutes", sponsorRoutes],
   ["/club-public-profile", "clubPublicProfileRoutes", clubPublicProfileRoutes],
+  ["/external-access", "externalAccessRoutes", externalAccessRoutes],
+  ["/external", "externalRoutes", externalRoutes],
 ];
 
 const app = new Hono();
@@ -277,6 +280,8 @@ const SELF_SERVICE: Record<string, string> = {
   "DELETE /guardian/wards/:wardId/absences/:id": "guardian withdraws an absence of a ward (guardianScope + can_report_absence)",
   "POST /club-members/me/erasure-request": "the member's own erasure request (a request with a deadline for the board; nothing is erased by it)",
   "POST /guardian/wards/:wardId/erasure-request": "guardian files an erasure request for a ward (guardianScope: a ward that is not the caller's is 404)",
+  "POST /external-access/invites/preview": "external invitation token (session only, the invitee is not a member yet; unknown tokens 404)",
+  "POST /external-access/invites/accept": "accepting an own external invitation (session only, bound to the secret token and the verified account e-mail)",
   "POST /club-exit-requests/:id/withdraw": "the requester withdraws the own request (the board may too; others get 403/404)",
 };
 
@@ -303,6 +308,8 @@ const SUSPENSION_EXEMPT: Record<string, string> = {
   "/form-submissions": "the applicant's own drafts; creating/submitting for a suspended club is refused in assertMayApply",
   "/feeds": "calendar feed tokens: 404 for a suspended club",
   "/public": "public token routes: 404 for a suspended club (eventByPublicToken)",
+  "/external-access/invites/preview": "external invitation token (account level)",
+  "/external-access/invites/accept": "external invitation token (account level)",
   "/media/:key{.+}": "signed media serving (no club context); every route that issues a signature is locked",
 };
 
@@ -430,6 +437,8 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "PATCH /sponsors/:id/contacts/:contactId": { name: "Neu" },
   "PUT /club-public-profile": { tagline: "Hallo" },
   "PUT /club-public-profile/settings": { publicProfileEnabled: true },
+  "POST /external-access/invites": { email: "nobody@example.com", roleType: "sponsor", displayName: "Niemand" },
+  "POST /external-access/accounts/:memberId/assignments": { title: "Reinigung", validFrom: "2030-01-01T08:00:00Z", validUntil: "2030-01-01T12:00:00Z" },
 };
 
 function fillParams(path: string) {
@@ -449,6 +458,10 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
   let cookieFounder: string;
   let cookiePlain: string;
   let cookieGuest: string;
+  let sponsorUserId: string;
+  let providerUserId: string;
+  let cookieSponsor: string;
+  let cookieProvider: string;
 
   const req = (path: string, cookie: string, init: { method?: string; body?: unknown } = {}) =>
     app.request(`${path}${path.includes("?") ? "&" : "?"}clubId=${clubId}`, {
@@ -485,6 +498,18 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
     adminMemberId = (await find(founderId))!.id;
     plainMemberId = (await find(plainId))!.id;
     guestMemberId = (await find(guestId))!.id;
+
+    // Wave 15 B2: external logins (guest + sponsor / dienstleister role, no implicit mitglied).
+    const sponsorAccount = await signUp("sponsor");
+    const providerAccount = await signUp("provider");
+    sponsorUserId = sponsorAccount.userId;
+    providerUserId = providerAccount.userId;
+    cookieSponsor = sponsorAccount.cookie;
+    cookieProvider = providerAccount.cookie;
+    await auth.api.addMember({ body: { userId: sponsorUserId, organizationId: clubId, role: "guest" } });
+    await auth.api.addMember({ body: { userId: providerUserId, organizationId: clubId, role: "guest" } });
+    await db.insert(clubRoles).values({ memberId: (await find(sponsorUserId))!.id, roleType: "sponsor" });
+    await db.insert(clubRoles).values({ memberId: (await find(providerUserId))!.id, roleType: "dienstleister" });
     await db.insert(clubRoles).values({ memberId: adminMemberId, roleType: "vorsitz" });
 
     const [item] = await db.insert(inventoryItems).values({ clubId, name: "Matrix Zelt", condition: "gut" }).returning();
@@ -493,7 +518,7 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
 
   afterAll(async () => {
     await db.delete(organization).where(eq(organization.id, clubId));
-    for (const id of [founderId, plainId, guestId]) await db.delete(user).where(eq(user.id, id));
+    for (const id of [founderId, plainId, guestId, sponsorUserId, providerUserId]) await db.delete(user).where(eq(user.id, id));
     await closeDatabase();
   });
 
@@ -938,4 +963,27 @@ describe("rights matrix (deny-by-default for the implicit role mitglied)", () =>
       await db.delete(clubPlatformStatus).where(eq(clubPlatformStatus.clubId, clubId));
     }
   }, 180_000);
+  // Wave 15 B2: external logins never reach member data. Every registered route (writes AND reads) is called by a sponsor and a
+  // service provider; only their own view, own profile and own inbox (EXTERNAL_ALLOWED) and the non-club routes may answer
+  // anything but 403/404 (401 for the admin routes).
+  it("keeps every club route closed for external logins except their own view (Wave 15 B2)", async () => {
+    const OWN = new Set(["GET /external/me", "GET /club-members/me", "GET /club-inbox", "GET /club-inbox/unread-count", "POST /club-inbox/:id/read"]);
+    const routes = [...new Set(app.routes.filter((r) => r.method !== "ALL").map((r) => `${r.method} ${r.path}`))];
+    for (const cookie of [cookieSponsor, cookieProvider]) {
+      const problems: string[] = [];
+      for (const key of routes) {
+        const [method, path] = key.split(" ") as [string, string];
+        if (OWN.has(key) || Object.keys(SUSPENSION_EXEMPT).some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) continue;
+        const res = await req(fillParams(path.replace(":clubId", clubId)), cookie, { method, body: method === "GET" ? undefined : (SAMPLE_BODIES[key] ?? {}) });
+        if (![403, 404].includes(res.status)) problems.push(`${key} -> ${res.status}`);
+      }
+      expect(problems, problems.join("\n")).toEqual([]);
+      const me = await req("/external/me", cookie);
+      expect(me.status).toBe(200);
+      expect(((await me.json()) as { data: { externalOnly: boolean } }).data.externalOnly).toBe(true);
+      const list = await req("/club-members", cookie);
+      expect(list.status).toBe(403);
+      expect(((await list.json()) as { error: { details: { code: string } } }).error.details.code).toBe("external_role_restricted");
+    }
+  }, 240_000);
 });

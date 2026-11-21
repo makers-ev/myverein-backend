@@ -199,3 +199,22 @@ export function buildMemberInviteEmail({ name, clubName, url, expiresOn, lang = 
     ctaUrl: escapeHtml(url),
   });
 }
+
+/** Invitation to an external login of a club (Wave 15 B2: sponsor or service provider). */
+export function buildExternalInviteEmail({ name, clubName, roleLabel, url, expiresOn, lang = "de" }: { name: string; clubName: string; roleLabel: string; url: string; expiresOn: string; lang?: "de" | "en" }): string {
+  if (lang === "en") {
+    return layout({
+      greeting: `Hello ${escapeHtml(name)},`,
+      bodyHtml: `<strong>${escapeHtml(clubName)}</strong> invites you to a login at ${escapeHtml(APP_NAME)} as ${escapeHtml(roleLabel)}. There you see only what the club shares with you (no member data). Sign up with this e-mail address, or sign in with it and confirm the invitation. The link is valid until ${escapeHtml(expiresOn)} and can only be used once. If you do not know the club, you can ignore this e-mail.`,
+      ctaLabel: "Accept invitation",
+      ctaUrl: escapeHtml(url),
+      lang,
+    });
+  }
+  return layout({
+    greeting: `Hallo ${escapeHtml(name)},`,
+    bodyHtml: `<strong>${escapeHtml(clubName)}</strong> lädt dich zu einem Zugang bei ${escapeHtml(APP_NAME)} als ${escapeHtml(roleLabel)} ein. Dort siehst du nur, was der Verein mit dir teilt (keine Mitgliederdaten). Registriere dich mit dieser E-Mail-Adresse oder melde dich damit an und bestätige die Einladung. Der Link ist bis zum ${escapeHtml(expiresOn)} gültig und kann nur einmal verwendet werden. Falls du den Verein nicht kennst, kannst du diese E-Mail ignorieren.`,
+    ctaLabel: "Einladung annehmen",
+    ctaUrl: escapeHtml(url),
+  });
+}

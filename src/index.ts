@@ -77,6 +77,7 @@ import { rateCardRoutes, timeEntryRoutes, timeReportRoutes } from "./routes/time
 import { sponsorRoutes } from "./routes/sponsors.js";
 import { clubPublicProfileRoutes } from "./routes/club-public-profile.js";
 import { publicClubRoutes } from "./routes/public-clubs.js";
+import { externalAccessRoutes, externalRoutes } from "./routes/external-access.js";
 import { trustedOrigins } from "./lib/trusted-origins.js";
 
 const app = new Hono<LoggerEnv>();
@@ -203,6 +204,8 @@ app.route("/inventory-items", inventoryItemRoutes);
 app.route("/media", mediaRoutes);
 app.route("/sponsors", sponsorRoutes);
 app.route("/club-public-profile", clubPublicProfileRoutes);
+app.route("/external-access", externalAccessRoutes);
+app.route("/external", externalRoutes);
 
 const port = Number(process.env.PORT ?? 3000);
 // Loopback-only by default -- LAN testing (a browser hitting this machine's

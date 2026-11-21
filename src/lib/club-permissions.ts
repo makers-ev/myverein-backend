@@ -26,17 +26,25 @@ export const CLUB_ROLE_TYPES = [
   "abteilungsleitung",
   "trainer",
   "erziehungsberechtigt",
+  // Wave 15 B2: external logins (member.role = guest). They hold NO permission and reach only `/external/*` and their own
+  // profile (enforced in clubGuard, see lib/external-access.ts); never member data.
+  "sponsor",
+  "dienstleister",
 ] as const;
+
+/** External account roles (Wave 15 B2): assigned only by accepting an external invitation, never through the roles API. */
+export const EXTERNAL_ROLE_TYPES = ["sponsor", "dienstleister"] as const;
+export type ExternalRoleType = (typeof EXTERNAL_ROLE_TYPES)[number];
 
 export type ClubRoleType = (typeof CLUB_ROLE_TYPES)[number];
 
 /** The implicit base role every (non-guest) account member holds; has no write permissions. */
 export const IMPLICIT_ROLE_TYPE = "mitglied" as const;
 
-/** Role types the roles API may assign/revoke -- everything except the implicit `mitglied`. */
-export const ASSIGNABLE_ROLE_TYPES = CLUB_ROLE_TYPES.filter((r) => r !== IMPLICIT_ROLE_TYPE) as [
-  Exclude<ClubRoleType, "mitglied">,
-  ...Exclude<ClubRoleType, "mitglied">[],
+/** Role types the roles API may assign/revoke -- everything except the implicit `mitglied` and the external roles (invitation only). */
+export const ASSIGNABLE_ROLE_TYPES = CLUB_ROLE_TYPES.filter((r) => r !== IMPLICIT_ROLE_TYPE && !(EXTERNAL_ROLE_TYPES as readonly string[]).includes(r)) as [
+  Exclude<ClubRoleType, "mitglied" | ExternalRoleType>,
+  ...Exclude<ClubRoleType, "mitglied" | ExternalRoleType>[],
 ];
 
 export type ClubPermission =
@@ -181,6 +189,8 @@ const ROLE_PERMISSIONS: Record<ClubRoleType, ClubPermission[]> = {
   // Trainers may inform their own departments (never club-wide, never urgent); the scope comes from club_roles.department_id.
   trainer: ["announcements:write_department", "absences:read", "attendance:write", "attendance:read", "registrations:read", "documents:generate", "member_cards:verify"],
   erziehungsberechtigt: [],
+  sponsor: [],
+  dienstleister: [],
 };
 
 /** True if any of the caller's club_roles grants `permission`. */

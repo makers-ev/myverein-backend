@@ -47,7 +47,19 @@ export async function assertClubNotSuspended(clubId: string): Promise<void> {
 }
 
 /** Manual check link to the register portal (E4): no automatic register query, the admin compares by hand. */
-export const registerPortalUrl = (): string => process.env.REGISTER_PORTAL_URL?.trim() || "https://www.handelsregister.de/rp_web/erweitertesuche.xhtml";
+export const DEFAULT_REGISTER_PORTAL_URL = "https://www.handelsregister.de/rp_web/erweitertesuche.xhtml";
+
+/** `REGISTER_PORTAL_URL` if it is a well-formed `https:` URL, otherwise (unset, `http:`, `javascript:`, garbage) the default. */
+export function registerPortalUrl(): string {
+  const raw = process.env.REGISTER_PORTAL_URL?.trim();
+  if (!raw) return DEFAULT_REGISTER_PORTAL_URL;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.hostname ? url.toString() : DEFAULT_REGISTER_PORTAL_URL;
+  } catch {
+    return DEFAULT_REGISTER_PORTAL_URL;
+  }
+}
 
 export function registerCheckOf(reg: { registerCourt: string | null; registerNumber: string | null } | null | undefined) {
   if (!reg || (!reg.registerCourt && !reg.registerNumber)) return null;

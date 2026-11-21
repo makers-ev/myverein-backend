@@ -435,6 +435,13 @@
       "when": 1795260410140,
       "tag": "0061_public-club-profile",
       "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1795261029605,
+      "tag": "0062_external-access",
+      "breakpoints": true
     }
   ]
 }

@@ -245,7 +245,7 @@ src/
 
 ## Data model
 
-Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns forty-nine more: the Wave 1 set — `club_memberships` (deprecated since Wave 7, no longer written), `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_key_history` (Wave 7 B14), `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents` — and the Wave 7 member-foundation set — `club_members`, `member_categories`, `club_member_departments`, `club_member_status_history`, `club_settings`, `club_exit_requests`, `club_member_invites`, `media_files` (upload registry, B18) — and the Wave 8 form-builder set — `forms`, `form_versions`, `form_submissions`, `form_submission_files`, `member_field_definitions`, `member_field_values` ([Form builder data model](#form-builder-data-model-wave-8)) — and the Wave 9 communication/queue set — `jobs`, `club_announcements`, `message_deliveries`, `push_tokens`, `notification_preferences` ([Communication and job queue data model](#communication-and-job-queue-data-model-wave-9)) — and the Wave 15 outreach/platform set — `sponsors`, `sponsor_contacts`, `club_platform_status`, `club_status_history`, `club_plans`, `club_public_profiles` ([Outreach and platform](#outreach-and-platform-wave-15)). See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
+Better Auth manages its own tables (generated into `src/auth/auth-schema.ts` by `npm run auth:generate` — do not hand-edit that file), including `organization`/`member`/`invitation` from the `organization()` plugin, which MyVerein uses as its club/membership fundament (a club **is** an `organization`). The app owns forty-nine more: the Wave 1 set — `club_memberships` (deprecated since Wave 7, no longer written), `club_applications` (Wave 5), `departments`, `club_roles`, `guardian_links`, `club_info_pages`, `audit_log`, and `notification`/`notification_state`/`notification_template` (unchanged from the suite) — the Wave 2 calendar/meeting set — `calendars`, `calendar_visibility`, `events`, `event_attendees`, `availability_slots`, `availability_exceptions`, `meetings`, `meeting_invitees`, `meeting_attendance`, `meeting_resolutions` — and the Wave 3 location/inventory set — `locations`, `location_key_holders`, `location_key_history` (Wave 7 B14), `location_wifi_networks`, `location_links`, `inventory_items`, `inventory_loans`, `inventory_damage_reports` — and the Wave 6 club-registration set — `club_registrations`, `club_registration_documents` — and the Wave 7 member-foundation set — `club_members`, `member_categories`, `club_member_departments`, `club_member_status_history`, `club_settings`, `club_exit_requests`, `club_member_invites`, `media_files` (upload registry, B18) — and the Wave 8 form-builder set — `forms`, `form_versions`, `form_submissions`, `form_submission_files`, `member_field_definitions`, `member_field_values` ([Form builder data model](#form-builder-data-model-wave-8)) — and the Wave 9 communication/queue set — `jobs`, `club_announcements`, `message_deliveries`, `push_tokens`, `notification_preferences` ([Communication and job queue data model](#communication-and-job-queue-data-model-wave-9)) — and the Wave 15 outreach/platform set — `sponsors`, `sponsor_contacts`, `club_external_invites`, `external_access_assignments`, `club_platform_status`, `club_status_history`, `club_plans`, `club_public_profiles` ([Outreach and platform](#outreach-and-platform-wave-15)). See the company vault's [Data Model - MyVerein Backend](../../lpj-its-vault/30_Engineering%20&%20Tech/System%20Design/MyVerein/Data%20Model%20-%20MyVerein%20Backend.md) for the full planning doc.
 
 ```mermaid
 erDiagram
@@ -1396,6 +1396,22 @@ Tables (migration `0059_sponsors`):
 
 Rights (deny-by-default, `src/lib/club-permissions.ts`): `sponsors:read` = `vorsitz`, `stellv_vorsitz`, `kassenwart`, `schriftfuehrer`, `beisitzer`; `sponsors:write` = the same without `beisitzer`. Plain members, trainers, guardians and external roles get `403`. The logo is uploaded through the media layer (`PUT /sponsors/:id/logo`: PNG/JPEG/WebP, max 2 MB, magic bytes, EXIF strip, quota; registry owner `sponsor_logo`, visibility `private`) and returned only as a short-lived signed URL (`logoUrl`) after the permission check. Audit: `sponsor.create`, `sponsor.update` (`changedFields`), `sponsor.delete`, `sponsor.contact_change` (ids and field names only). Tests: `src/routes/sponsors.test.ts`, rights matrix.
 
+<a id="external-logins-wave-15"></a>
+### External logins: sponsor and service provider (Wave 15 B2)
+
+New club role types `sponsor` and `dienstleister` (`CLUB_ROLE_TYPES`, **no permissions**; not assignable through `POST /club-members/:id/roles`, only by accepting an external invitation). The login is an account membership with `member.role = guest` (no implicit `mitglied`) and a `club_members` row with status `interessent` and no member number — the same pattern as external guardians, so it is never counted as a member.
+
+**Boundary in `clubGuard`:** an *external-only* account (guest whose roles are only `sponsor`/`dienstleister`, `isExternalOnly` in `src/lib/external-access.ts`) may call only `/external/*`, `GET /club-members/me`, `GET /club-inbox`, `GET /club-inbox/unread-count`, `POST /club-inbox/:id/read`; every other club route answers `403` with `details.code = "external_role_restricted"`, regardless of what the route would allow a guest. A guest who is also a guardian keeps the guardian behaviour; a member who is also a sponsor contact keeps the member behaviour. The rights matrix calls **every** registered route as a sponsor and as a service provider and fails on anything but `403`/`404` outside that list.
+
+Tables (migration `0062_external-access`):
+
+| Table | Columns | Notes |
+|---|---|---|
+| `club_external_invites` | `id`, `club_id`, `email` (lower case), `role_type` (CHECK sponsor/dienstleister), `display_name`, `sponsor_id` (FK `sponsors`, set null), `token_hash` (HMAC, unique), `expires_at` (`MEMBER_INVITE_TTL_DAYS`), `accepted_at`, `accepted_member_id`, `revoked_at`, `created_by`, `created_at` | Same token rules as the member invitation (Wave 7 B4): the token only exists in the mail, single use, the verified account e-mail must match; mail link `${WEB_ORIGIN}/einladung/extern?token=…` |
+| `external_access_assignments` | `id`, `club_id`, `member_id` (FK `member`, cascade), `location_id` (FK `locations`, cascade, optional), `title`, `note`, `valid_from`, `valid_until` (CHECK `valid_until > valid_from`, max 366 days), `created_by`, `created_at` | What a service provider sees: in `GET /external/me` only current and upcoming windows; an upcoming one shows only title and window, location/address/note appear when the window starts. The location's internal access note is never shown |
+
+A sponsor sees its linked sponsor profile(s) (`sponsors.linked_member_id`) without the internal `notes`, logo as signed URL. Management needs `roles:write` (vorsitz, stellv_vorsitz). Removing access deletes the external roles, assignments and sponsor links and the account membership if nothing else is left. Audit: `external_access.invite`, `.invite_resend`, `.invite_revoke`, `.invite_accept`, `.remove`, `.assignment_create`, `.assignment_delete`. Tests: `src/routes/external-access.test.ts`, rights matrix.
+
 <a id="public-club-page-wave-15"></a>
 ### Public club page (Wave 15 B3, media BM)
 
@@ -1845,6 +1861,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `exit_request_pending` | 409 | `routes/club-exit-requests.ts` |
 | `expired` | 409 | `routes/acknowledgements.ts` |
 | `export_too_large` | 422 | `routes/club-members.ts` |
+| `external_role_restricted` | 403 | `middleware/club-guard.ts` |
 | `field_key_required` | 422 | `routes/club-member-custom-fields.ts` |
 | `folder_depth` | 422 | `routes/documents.ts` |
 | `folder_not_empty` | 409 | `routes/documents.ts` |
@@ -1880,6 +1897,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `invalid_window` | 422 | `lib/ballots.ts` |
 | `invitation_not_supported` | 422 | `lib/assembly-invitation.ts` |
 | `invitation_period_violated` | 422 | `lib/assembly-invitation.ts`, `routes/meetings.ts` |
+| `invite_not_open` | 409 | `routes/external-access.ts` |
 | `lead_is_candidate` | 409 | `lib/elections.ts` |
 | `location_busy` | 409 | `routes/location-bookings.ts` |
 | `logo_dimensions` | 422 | `routes/club-branding.ts` |
@@ -1926,6 +1944,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `not_elected` | 409 | `lib/elections.ts` |
 | `not_eligible` | 403 | `lib/ballots.ts`, `routes/ballots.ts` |
 | `not_quorate` | 409 | `lib/ballots.ts` |
+| `not_service_provider` | 422 | `routes/external-access.ts` |
 | `nothing_to_add` | 422 | `lib/assembly-invitation.ts` |
 | `notice_length` | 422 | `lib/privacy-notice.ts` |
 | `online_not_allowed` | 422 | `lib/meeting-online.ts` |
@@ -1993,6 +2012,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `unknown_department` | 422 | `routes/club-public-profile.ts` |
 | `unknown_entry` | 422 | `routes/event-attendance.ts` |
 | `unknown_image` | 422 | `routes/club-public-profile.ts` |
+| `unknown_location` | 422 | `routes/external-access.ts` |
 | `unknown_member` | 422 | `routes/event-attendance.ts` |
 | `unknown_option` | 422 | `lib/ballots.ts` |
 | `use_voting_roll_override` | 422 | `routes/meetings.ts` |
@@ -2420,6 +2440,16 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `/club-public-profile/unpublish` | POST | `public_profile:write` | Removes the published snapshot; the page answers `404` and its media are revoked immediately |
 | `/club-public-profile/settings` | PUT | `public_profile:write` | `{ publicProfileEnabled?, discoverable? }` (both default off) -> editor shape; media opt-in follows |
 | `/public/clubs/:slug` | GET | none (public; `PUBLIC_CLUB_IP_LIMIT_PER_HOUR`, failed lookups `PUBLIC_CLUB_INVALID_LIMIT_PER_HOUR`) | Wave 15 B3. Live page only (enabled + published + not suspended), else the same `404`. `{ data: { slug, name, tagline, description, city, address, contact: { email, phone, website }, logoUrl, coverUrl, galleryUrls, departments: [{ id, name }], events: [{ title, startsAt, endsAt, allDay, cancelled, locationName }], sponsors: [{ name, website, logoUrl }], leadForm: { enabled, trialTraining, departments } } }`; URLs are unsigned links of released media. `Cache-Control: public, max-age=300` on hits, `no-store` otherwise |
+| `/external-access` | GET | session + `clubGuard` + `roles:write` | Wave 15 B2. `{ data: { invites: [{ id, email, roleType, displayName, sponsor: { id, name } \| null, status: pending\|expired\|accepted\|revoked, expiresAt, acceptedAt, createdAt }], accounts: [{ memberId, name, email, roleTypes, sponsors: [{ id, name }], assignments: [Assignment] }] } }` |
+| `/external-access/invites` | POST | `roles:write` (20/h per user) | `{ email, roleType: sponsor\|dienstleister, displayName (1-120), sponsorId? (sponsor of the club, only for sponsor) }` -> `201 { data: invite + emailSent }`; mail with the link `/einladung/extern?token=` |
+| `/external-access/invites/:id/resend` | POST | `roles:write` | New token (old one revoked) -> `201`; accepted/revoked `409 invite_not_open` |
+| `/external-access/invites/:id` | DELETE | `roles:write` | Revokes an open invitation -> `204`; accepted/revoked `409 invite_not_open` |
+| `/external-access/invites/preview` | POST | session only (no club membership; 20/min per user) | `{ token }` -> `{ data: { clubId, clubName, roleType, displayName, invitedEmail (masked), emailMatches, expiresAt } }`; unknown/expired/used/revoked `404` |
+| `/external-access/invites/accept` | POST | session only | `{ token }` -> `{ data: { clubId, clubName, memberId, roleType } }`; different or unverified e-mail `403`, excluded person `409`, used/expired `404` |
+| `/external-access/accounts/:memberId` | DELETE | `roles:write` | Ends the external access -> `204`; ids that are not an external account of the club `404` |
+| `/external-access/accounts/:memberId/assignments` | POST | `roles:write` | `{ title (1-120), note? (≤1000), locationId? (club location, else 422 unknown_location), validFrom, validUntil (ISO instants, > validFrom, ≤ 366 days) }` -> `201 { data: { id, title, note, validFrom, validUntil, active, location: { id, name, address } \| null } }`; account without `dienstleister` `422 not_service_provider` |
+| `/external-access/accounts/:memberId/assignments/:assignmentId` | DELETE | `roles:write` | `204`, unknown `404` |
+| `/external/me` | GET | session + `clubGuard` (any member; the one area external-only logins may use) | `{ data: { clubId, clubName, clubSlug, externalOnly, roleTypes, sponsors: [{ id, name, website, description, consideration, startsOn, endsOn, status, logoUrl (signed), contacts }], assignments: [Assignment] } }` — own sponsor profiles without notes; current + upcoming assignments (upcoming without location and note) |
 
 <a id="club-registration"></a>
 ### Club registration (Wave 6)

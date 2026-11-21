@@ -161,7 +161,7 @@ async function clubDetail(clubId: string) {
   const audit = await db.select({ eventType: auditLog.eventType, createdAt: auditLog.createdAt }).from(auditLog).where(eq(auditLog.clubId, clubId)).orderBy(desc(auditLog.createdAt)).limit(20);
   const userIds = [...new Set([status?.suspendedBy, ...history.map((h) => h.actorUserId)].filter((v): v is string => !!v))];
   const names = new Map((userIds.length ? await db.select({ id: user.id, name: user.name }).from(user).where(inArray(user.id, userIds)) : []).map((u) => [u.id, u.name]));
-  const actor = (id: string | null | undefined) => (id ? { userId: id, name: names.get(id) ?? "" } : null);
+  const actor = (id: string | null | undefined) => (id ? { userId: id, name: names.get(id) || null } : null);
   return {
     ...row,
     registration: reg ? { id: reg.id, status: reg.status, legalForm: reg.legalForm, registerCourt: reg.registerCourt, registerNumber: reg.registerNumber, city: reg.city, submittedAt: reg.submittedAt, reviewedAt: reg.reviewedAt } : null,

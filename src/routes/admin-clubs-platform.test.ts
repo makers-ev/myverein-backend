@@ -119,3 +119,23 @@ describe("admin clubs (Wave 15 B7)", () => {
     expect((await json(await call(admin, `/admin/clubs/${club.clubId}`))).data.plan).toBeNull();
   });
 });
+
+describe("register portal link (Wave 15 B7, E4)", () => {
+  it("only ever hands out an https link; anything else falls back to the default", async () => {
+    const { registerPortalUrl, DEFAULT_REGISTER_PORTAL_URL } = await import("../lib/club-platform.js");
+    const saved = process.env.REGISTER_PORTAL_URL;
+    try {
+      for (const bad of ["javascript:alert(1)", "http://register.example/search", "not a url", "https://"]) {
+        process.env.REGISTER_PORTAL_URL = bad;
+        expect(registerPortalUrl(), bad).toBe(DEFAULT_REGISTER_PORTAL_URL);
+      }
+      process.env.REGISTER_PORTAL_URL = "https://register.example/search";
+      expect(registerPortalUrl()).toBe("https://register.example/search");
+      delete process.env.REGISTER_PORTAL_URL;
+      expect(registerPortalUrl()).toBe(DEFAULT_REGISTER_PORTAL_URL);
+    } finally {
+      if (saved === undefined) delete process.env.REGISTER_PORTAL_URL;
+      else process.env.REGISTER_PORTAL_URL = saved;
+    }
+  });
+});
