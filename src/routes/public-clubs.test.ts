@@ -244,13 +244,17 @@ describe("public club page", () => {
     process.env.PUBLIC_API_TRUSTED_TOKEN = "trusted-token-0123456789abcdef";
     process.env.PUBLIC_CLUB_INVALID_LIMIT_PER_HOUR = "1";
     const server = randomUUID();
+    // Fresh visitor addresses per run: the DB-backed budget outlives a test run.
+    const n = Math.floor(Math.random() * 200) + 1;
+    const v = (i: number) => `10.${n}.${Math.floor(Math.random() * 250)}.${i}`;
+    const [v1, v2, v3, v4] = [v(1), v(2), v(3), v(4)];
     const headers = (visitor: string, token = "trusted-token-0123456789abcdef") => ({ "x-forwarded-for": server, "x-public-api-token": token, "x-public-client-ip": visitor });
-    expect((await pub(`/public/clubs/nope-a-${suffix}`, headers("10.0.0.1"))).status).toBe(404);
-    expect((await pub(`/public/clubs/nope-b-${suffix}`, headers("10.0.0.1"))).status).toBe(429);
+    expect((await pub(`/public/clubs/nope-a-${suffix}`, headers(v1))).status).toBe(404);
+    expect((await pub(`/public/clubs/nope-b-${suffix}`, headers(v1))).status).toBe(429);
     // Another visitor through the same server has its own budget; a wrong token falls back to the server IP.
-    expect((await pub(`/public/clubs/nope-c-${suffix}`, headers("10.0.0.2"))).status).toBe(404);
-    expect((await pub(`/public/clubs/nope-d-${suffix}`, headers("10.0.0.3", "wrong-token-0123456789abcdef"))).status).toBe(404);
-    expect((await pub(`/public/clubs/nope-e-${suffix}`, headers("10.0.0.4", "wrong-token-0123456789abcdef"))).status).toBe(429);
+    expect((await pub(`/public/clubs/nope-c-${suffix}`, headers(v2))).status).toBe(404);
+    expect((await pub(`/public/clubs/nope-d-${suffix}`, headers(v3, "wrong-token-0123456789abcdef"))).status).toBe(404);
+    expect((await pub(`/public/clubs/nope-e-${suffix}`, headers(v4, "wrong-token-0123456789abcdef"))).status).toBe(429);
     delete process.env.PUBLIC_CLUB_INVALID_LIMIT_PER_HOUR;
     delete process.env.PUBLIC_API_TRUSTED_TOKEN;
   });
