@@ -2,7 +2,7 @@ import "dotenv/config";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { expo } from "@better-auth/expo";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { eq } from "drizzle-orm";
 import { admin, bearer, openAPI, organization, twoFactor } from "better-auth/plugins";
 
@@ -23,6 +23,7 @@ import { APP_NAME, buildResetPasswordEmail, buildVerifyEmailEmail, LOGO_CID, LOG
 import { isHttpsDeployment, trustedOrigins } from "../lib/trusted-origins.js";
 import { accessControl, adminRole, userRole } from "./permissions.js";
 import { writeAudit } from "../lib/audit.js";
+import { isGatedOrgPath, mayUseOrgEndpoints, targetOrganizationId } from "../lib/org-access.js";
 
 if (!process.env.WEB_ORIGIN) {
   throw new Error("WEB_ORIGIN is not set. Copy .env.example to .env and configure it.");
@@ -269,6 +270,14 @@ export const auth = betterAuth({
     before: createAuthMiddleware(async (ctx) => {
       if (ctx.path === "/organization/check-slug") {
         throw new APIError("NOT_FOUND", { message: "Not found" });
+      }
+      // Wave 15 review: the organization plugin's member/invitation endpoints bypass clubGuard and its read scoping (they would
+      // hand every member's e-mail to guests and external logins). Over HTTP only the board may use them (lib/org-access.ts).
+      if (ctx.request && isGatedOrgPath(ctx.path)) {
+        const session = await getSessionFromCtx(ctx);
+        if (!session) throw new APIError("UNAUTHORIZED", { message: "Authentication required" });
+        const clubId = await targetOrganizationId(ctx.query as Record<string, unknown> | undefined, ctx.body as Record<string, unknown> | undefined, (session.session as { activeOrganizationId?: string | null }).activeOrganizationId);
+        if (!(await mayUseOrgEndpoints(session.user.id, clubId))) throw new APIError("FORBIDDEN", { message: "Not available; use the MyVerein club routes" });
       }
     }),
     // Security notice for a password changed while signed in (own change, or set by a platform admin) -- G8.

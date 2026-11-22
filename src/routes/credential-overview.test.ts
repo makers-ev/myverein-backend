@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -182,9 +182,11 @@ describe("credential overview", () => {
   });
 
   it("audits reads of sensitive credentials with ids only", async () => {
-    const before = await db.select().from(auditLog).where(eq(auditLog.eventType, "member_field.sensitive_read"));
+    // Scoped to this test club: other test files write the same event type concurrently into the shared DB.
+    const own = async () => db.select().from(auditLog).where(and(eq(auditLog.eventType, "member_field.sensitive_read"), eq(auditLog.clubId, cid()))).orderBy(asc(auditLog.createdAt), asc(auditLog.id));
+    const before = await own();
     await listed(m("kassen"), "fieldKey=mod_ks_praevention");
-    const after = (await db.select().from(auditLog).where(eq(auditLog.eventType, "member_field.sensitive_read"))).filter((e) => !before.some((b) => b.id === e.id));
+    const after = (await own()).filter((e) => !before.some((b) => b.id === e.id) && (e.payload as { via?: string } | null)?.via === "credentials_overview");
     expect(after).toHaveLength(1);
     const payload = after[0]!.payload as { via: string; clubId: string; fieldIds: string[]; clubMemberIds: string[]; readBy: string };
     expect(payload).toMatchObject({ via: "credentials_overview", clubId: cid() });
@@ -192,7 +194,9 @@ describe("credential overview", () => {
     expect(JSON.stringify(after[0]!.payload)).not.toContain("validUntil");
     // Non-sensitive overviews leave no entry; neither does a read without a single value (status=missing of a sensitive field).
     // Scoped to this test club: other test files write audit rows concurrently into the shared DB.
-    const count = async () => (await db.select().from(auditLog).where(eq(auditLog.eventType, "member_field.sensitive_read"))).filter((e) => (e.payload as { clubId?: string } | null)?.clubId === cid()).length;
+    const ownOverview = async () =>
+      (await db.select().from(auditLog).where(and(eq(auditLog.eventType, "member_field.sensitive_read"), eq(auditLog.clubId, cid()))).orderBy(asc(auditLog.createdAt), asc(auditLog.id))).filter((e) => (e.payload as { via?: string } | null)?.via === "credentials_overview");
+    const count = async () => (await ownOverview()).length;
     const n = await count();
     await listed(board(), "fieldKey=mod_q_erste_hilfe");
     expect(await count()).toBe(n);
@@ -202,7 +206,8 @@ describe("credential overview", () => {
     expect(await count()).toBe(n + 1);
     await listed(board(), "fieldKey=mod_ks_praevention&page=900");
     expect(await count()).toBe(n + 2);
-    const last = (await db.select().from(auditLog).where(eq(auditLog.eventType, "member_field.sensitive_read"))).filter((e) => !before.some((b) => b.id === e.id) && e.id !== after[0]!.id).at(-1)!;
+    // The newest overview entry of THIS club (ordered; never a row of another test file).
+    const last = (await ownOverview()).at(-1)!;
     expect(last.payload).toMatchObject({ via: "credentials_overview", clubMemberIds: [] });
     expect((last.payload as { fieldIds: string[] }).fieldIds).toHaveLength(1);
     expect(JSON.stringify(logged)).not.toContain("validUntil");

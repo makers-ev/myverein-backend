@@ -43,6 +43,11 @@ import * as locationsSchema from "./schema/locations.js";
 import * as mediaFilesSchema from "./schema/media-files.js";
 import * as meetingsSchema from "./schema/meetings.js";
 import * as notificationsSchema from "./schema/notifications.js";
+import * as sponsorsSchema from "./schema/sponsors.js";
+import * as clubLeadsSchema from "./schema/club-leads.js";
+import * as clubPublicProfilesSchema from "./schema/club-public-profiles.js";
+import * as clubPlatformSchema from "./schema/club-platform.js";
+import * as externalAccessSchema from "./schema/external-access.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -112,6 +117,11 @@ export const schema = {
   ...assemblySchema,
   ...clubPrivacyNoticesSchema,
   ...privacySchema,
+  ...sponsorsSchema,
+  ...clubLeadsSchema,
+  ...clubPublicProfilesSchema,
+  ...clubPlatformSchema,
+  ...externalAccessSchema,
 };
 
 export const db = drizzle(pool, { schema });

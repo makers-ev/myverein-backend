@@ -6,6 +6,8 @@ import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { auditContext } from "../lib/audit.js";
 import { resolveClubRoleTypes } from "../lib/club-access.js";
+import { assertClubNotSuspended } from "../lib/club-platform.js";
+import { externalPathAllowed, isExternalOnly } from "../lib/external-access.js";
 import { BadRequestError, ForbiddenError, NotFoundError } from "../lib/errors.js";
 import { dpaGate } from "./dpa-gate.js";
 import type { SessionEnv } from "./session-guard.js";
@@ -54,6 +56,15 @@ export const clubGuard = createMiddleware<ClubEnv>(async (c: Context, next: Next
   const effective = await resolveClubRoleTypes(membership, clubId);
   if (effective === null) {
     throw new NotFoundError("Club not found");
+  }
+
+  // Wave 15 B7: a club suspended by the platform is locked for every club route (after the membership check, so a stranger
+  // still learns nothing about the club).
+  await assertClubNotSuspended(clubId);
+
+  // Wave 15 B2: external logins (sponsor / dienstleister) reach only their own view; never member data.
+  if (isExternalOnly(membership.role, effective) && !externalPathAllowed(c.req.method, c.req.path)) {
+    throw new ForbiddenError("Not available for external logins", { details: { code: "external_role_restricted" } });
   }
 
   c.set("clubId", clubId);

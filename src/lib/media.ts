@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 
-import { and, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, notInArray, sql } from "drizzle-orm";
 import type { Context } from "hono";
 
 import { db } from "../db/client.js";
@@ -15,7 +15,7 @@ import {
 import { ConflictError, NotFoundError, ValidationError } from "./errors.js";
 import { MalformedImageError, stripImageMetadata } from "./image-sanitize.js";
 import { logger } from "./logger.js";
-import { buildMediaUrl } from "./media-url.js";
+import { buildMediaUrl, buildPublicMediaUrl } from "./media-url.js";
 import { checkStorageThresholds, effectiveQuotaBytes, platformQuotaBytes, usedBytes } from "./media-quota.js";
 import { deleteObject, getObject, listObjects, objectMtimeMs, objectSize, openObjectStream, putObject, sanitizeFilename, writeObject } from "./storage.js";
 import { writeAudit } from "./audit.js";
@@ -374,6 +374,48 @@ export async function setMediaVisibility(storageKey: string, visibility: MediaVi
 }
 
 /**
+ * Public opt-in of feature images (Wave 15 BM): makes exactly `wanted` of the club's live, non-sensitive images of the given
+ * owner types `public_opt_in` and puts every other `public_opt_in` file of those owner types back to `private` (revocation is
+ * immediate: `GET /media/<key>` without a signature then answers 403). The caller decides `wanted` from its own rules (published
+ * club page, active public sponsors); nothing outside the owner types is touched. Returns the number of changed rows.
+ */
+export async function syncPublicOptIn(clubId: string, ownerTypes: readonly string[], wanted: ReadonlySet<string>, executor: DbExecutor = db): Promise<number> {
+  if (ownerTypes.length === 0) return 0;
+  const keys = [...wanted];
+  const scope = and(eq(mediaFiles.clubId, clubId), inArray(mediaFiles.ownerType, [...ownerTypes]), isNull(mediaFiles.deletedAt));
+  const revoked = await executor
+    .update(mediaFiles)
+    .set({ visibility: "private" })
+    .where(and(scope, eq(mediaFiles.visibility, "public_opt_in"), keys.length > 0 ? notInArray(mediaFiles.storageKey, keys) : undefined))
+    .returning({ id: mediaFiles.id });
+  const granted = keys.length
+    ? await executor
+        .update(mediaFiles)
+        .set({ visibility: "public_opt_in" })
+        .where(and(scope, inArray(mediaFiles.storageKey, keys), eq(mediaFiles.kind, "image"), eq(mediaFiles.sensitive, false), sql`${mediaFiles.visibility} <> 'public_opt_in'`))
+        .returning({ id: mediaFiles.id })
+    : [];
+  return revoked.length + granted.length;
+}
+
+/**
+ * Unsigned URLs of released files (Wave 15 BM) for the PUBLIC endpoints: only live, non-sensitive images of this club whose
+ * registry row is `public_opt_in`. Anything else (private/club files, foreign or deleted keys) is simply missing from the map,
+ * so a public response can never carry a link to a non-released file.
+ */
+export async function publicMediaUrls(clubId: string, keys: ReadonlyArray<string | null | undefined>): Promise<Map<string, string>> {
+  const wanted = [...new Set(keys.filter((k): k is string => typeof k === "string" && k.length > 0))];
+  const urls = new Map<string, string>();
+  if (wanted.length === 0) return urls;
+  const rows = await db
+    .select({ key: mediaFiles.storageKey })
+    .from(mediaFiles)
+    .where(and(inArray(mediaFiles.storageKey, wanted), eq(mediaFiles.clubId, clubId), isNull(mediaFiles.deletedAt), eq(mediaFiles.visibility, "public_opt_in"), eq(mediaFiles.sensitive, false), eq(mediaFiles.kind, "image")));
+  for (const r of rows) urls.set(r.key, buildPublicMediaUrl(r.key));
+  return urls;
+}
+
+/**
  * Files written before the registry existed (damage photos, wave 6 proofs) have no row. Registers such a file on first
  * use from what is on disk (content type from the magic bytes, never from the extension) -- "resign on read", no
  * backfill job. Returns null if the file is gone or not an allowed format.
@@ -551,10 +593,17 @@ export function respondRenderedPdf(c: Context, bytes: Buffer, filename: string, 
  */
 export async function serveSignedMedia(c: Context, row: MediaFileRow, maxAgeSeconds: number): Promise<Response> {
   if (row.sensitive) throw new NotFoundError("File not found");
-  const body = await streamOrNotFound(row);
   const isPublic = row.visibility === "public_opt_in";
   // `private`: a shared/CDN cache must never hand a signed response to someone else.
-  applyMediaHeaders(c, row, isPublic ? "public, max-age=300" : `private, max-age=${Math.max(0, maxAgeSeconds)}`, row.kind === "document" ? "attachment" : "inline");
+  // Released files: cacheable, but revalidated on every request (`no-cache` + ETag of the content hash), so revoking the opt-in
+  // takes effect immediately even behind a shared cache (Wave 15 BM).
+  if (isPublic) c.header("ETag", `"${row.sha256}"`);
+  if (isPublic && c.req.header("if-none-match") === `"${row.sha256}"`) {
+    c.header("Cache-Control", "public, no-cache");
+    return c.body(null, 304);
+  }
+  const body = await streamOrNotFound(row);
+  applyMediaHeaders(c, row, isPublic ? "public, no-cache" : `private, max-age=${Math.max(0, maxAgeSeconds)}`, row.kind === "document" ? "attachment" : "inline");
   return c.body(body);
 }
 

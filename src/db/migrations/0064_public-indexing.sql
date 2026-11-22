@@ -1,0 +1,1 @@
+ALTER TABLE "club_settings" ADD COLUMN "public_indexing_enabled" boolean DEFAULT true NOT NULL;

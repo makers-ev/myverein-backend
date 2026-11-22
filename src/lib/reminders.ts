@@ -1,5 +1,6 @@
 import { and, eq, gt, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 
+import { suspendedClubIds } from "./club-platform.js";
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { calendars } from "../db/schema/calendars.js";
@@ -99,8 +100,10 @@ async function loadClubs(onlyClubId?: string): Promise<Map<string, ReminderClub>
     .from(organization)
     .leftJoin(clubSettings, eq(clubSettings.clubId, organization.id))
     .where(onlyClubId ? eq(organization.id, onlyClubId) : undefined);
+  // Wave 15 B7: a club suspended by the platform gets no reminders.
+  const suspended = await suspendedClubIds(rows.map((r) => r.id));
   return new Map(
-    rows.map(({ id, s }) => [
+    rows.filter(({ id }) => !suspended.has(id)).map(({ id, s }) => [
       id,
       {
         clubId: id,

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { auth } from "../auth/auth.js";
 import { member, organization, user } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
+import { registerCheckOf } from "../lib/club-platform.js";
 import { clubRoles } from "../db/schema/club-roles.js";
 import { clubRegistrations, REGISTRATION_STATUSES, type ClubRegistrationRow } from "../db/schema/club-registrations.js";
 import { ensureDefaultCalendar } from "../lib/calendar-defaults.js";
@@ -121,6 +122,8 @@ async function shapeForAdmin(rows: ClubRegistrationRow[]) {
     ...registration,
     applicant: applicantById.get(rows[i]!.userId) ?? null,
     duplicateHints: hints[i]!,
+    // Wave 15 B7 (E4): manual check link to the register portal, no automatic query.
+    registerCheck: registerCheckOf(rows[i]),
   }));
 }
 

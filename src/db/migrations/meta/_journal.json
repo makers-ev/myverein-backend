@@ -414,6 +414,48 @@
       "when": 1793278280173,
       "tag": "0058_acknowledgement-status-check",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1795259337992,
+      "tag": "0059_sponsors",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "7",
+      "when": 1795259989641,
+      "tag": "0060_club-platform",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1795260410140,
+      "tag": "0061_public-club-profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "7",
+      "when": 1795261029605,
+      "tag": "0062_external-access",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1795261751254,
+      "tag": "0063_club-leads",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1795360600054,
+      "tag": "0064_public-indexing",
+      "breakpoints": true
     }
   ]
 }

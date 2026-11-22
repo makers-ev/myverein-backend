@@ -3,6 +3,7 @@ import { Hono } from "hono";
 
 import { organization } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
+import { isClubSuspended } from "../lib/club-platform.js";
 import { NotFoundError } from "../lib/errors.js";
 import { applicantCategories, applicantDefinition, ensureFormBasics, findCurrentForm, SLUG_RE } from "../lib/forms.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -21,7 +22,8 @@ clubFormRoutes.use("*", rateLimit({ windowMs: 60_000, max: 60, key: (c) => `club
 clubFormRoutes.get("/:clubSlug/aufnahme", async (c) => {
   const slug = c.req.param("clubSlug");
   const org = SLUG_RE.test(slug) ? await db.query.organization.findFirst({ where: eq(organization.slug, slug), columns: { id: true } }) : undefined;
-  if (!org) throw new NotFoundError("Club not found");
+  // A club suspended by the platform (Wave 15 B7) shows no application form.
+  if (!org || (await isClubSuspended(org.id))) throw new NotFoundError("Club not found");
   // Reading does not write: a club that is missing its standard form / categories is seeded once (first access).
   await ensureFormBasics(org.id);
 

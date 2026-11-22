@@ -7,6 +7,7 @@ import { z } from "zod";
 
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
+import { isClubSuspended } from "../lib/club-platform.js";
 import { calendarFeedTokens, type CalendarFeedTokenRow } from "../db/schema/calendar-feed-tokens.js";
 import { calendars } from "../db/schema/calendars.js";
 import { writeAudit } from "../lib/audit.js";
@@ -167,6 +168,8 @@ feedRoutes.get("/:file", async (c) => {
   const membership = await db.query.member.findFirst({ where: and(eq(member.id, row.memberId), eq(member.organizationId, row.clubId)) });
   const roleTypes = membership && membership.role !== "guest" ? await resolveClubRoleTypes(membership, row.clubId) : null;
   if (!membership || roleTypes === null) return notFound();
+  // Wave 15 B7: a suspended club serves no feed.
+  if (await isClubSuspended(row.clubId)) return notFound();
 
   let calendarIds = await getVisibleCalendarIds(row.clubId, membership.id, roleTypes);
   if (row.calendarId) calendarIds = calendarIds.filter((id) => id === row.calendarId);

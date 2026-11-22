@@ -74,6 +74,11 @@ import { notificationPreferenceRoutes, unsubscribeRoutes } from "./routes/notifi
 import { notificationRoutes } from "./routes/notifications.js";
 import { pushTokenRoutes } from "./routes/push-tokens.js";
 import { rateCardRoutes, timeEntryRoutes, timeReportRoutes } from "./routes/time-tracking.js";
+import { sponsorRoutes } from "./routes/sponsors.js";
+import { clubPublicProfileRoutes } from "./routes/club-public-profile.js";
+import { publicClubRoutes } from "./routes/public-clubs.js";
+import { externalAccessRoutes, externalRoutes } from "./routes/external-access.js";
+import { clubLeadRoutes } from "./routes/club-leads.js";
 import { trustedOrigins } from "./lib/trusted-origins.js";
 
 const app = new Hono<LoggerEnv>();
@@ -187,6 +192,7 @@ app.route("/events", eventRoutes);
 app.route("/attendance", attendanceReportRoutes);
 app.route("/events.ics", icsRoutes);
 app.route("/public", publicEventRoutes);
+app.route("/public", publicClubRoutes);
 app.route("/time-entries", timeEntryRoutes);
 app.route("/rate-cards", rateCardRoutes);
 app.route("/time-report", timeReportRoutes);
@@ -197,6 +203,11 @@ app.route("/elections", electionRoutes);
 app.route("/locations", locationRoutes);
 app.route("/inventory-items", inventoryItemRoutes);
 app.route("/media", mediaRoutes);
+app.route("/sponsors", sponsorRoutes);
+app.route("/club-public-profile", clubPublicProfileRoutes);
+app.route("/external-access", externalAccessRoutes);
+app.route("/external", externalRoutes);
+app.route("/club-leads", clubLeadRoutes);
 
 const port = Number(process.env.PORT ?? 3000);
 // Loopback-only by default -- LAN testing (a browser hitting this machine's

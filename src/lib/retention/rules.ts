@@ -42,6 +42,7 @@ export const RETENTION_RULES: readonly RetentionRule[] = [
   rule({ category: "consent_proofs", scope: "club", defaultDays: 1095, minDays: 365, maxDays: 3650, label: "Einwilligungsnachweise", description: "Nachweise widerrufener Einwilligungen (ab Widerruf) und Nachweise ehemaliger Mitglieder (ab Austritt)" }),
   rule({ category: "event_attendance", scope: "club", defaultDays: 1095, minDays: 90, maxDays: 3650, label: "Anwesenheitslisten", description: "Anwesenheitslisten von Terminen (Status je Person, Aufsichtspersonen, Korrekturprotokoll), gerechnet ab dem Ende des Termins" }),
   rule({ category: "event_guests", scope: "club", defaultDays: 90, minDays: 14, maxDays: 365, label: "Gäste-Anmeldungen", description: "Anmeldungen von Gästen ohne Konto (Name, E-Mail, Formularantworten): gelöscht zum bei der Anmeldung gesetzten Datum (Ende des Termins plus Frist des Termins), spätestens nach dieser Frist ab dem Ende des Termins" }),
+  rule({ category: "club_leads", scope: "club", defaultDays: 180, minDays: 30, maxDays: 1095, label: "Interessenten-Anfragen", description: "Anfragen und Probetraining-Wünsche von Interessent:innen (öffentliche Vereinsseite oder erfasst), gerechnet ab der letzten Änderung" }),
 ];
 
 export function ruleOf(category: string): RetentionRule | undefined {

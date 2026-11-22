@@ -31,7 +31,7 @@ describe("registration", () => {
   it("registers every B13 job type, the recurring ones with their interval", () => {
     registerAllJobs();
     const types = defaultRegistry.types();
-    for (const t of ["age_transition_sweep", "exit_effective_sweep", "exit_effective_notify", "age_transition_member_notify", "form_cleanup_sweep", "retention_sweep", "reminder-sweep", "notify_reminder"]) expect(types).toContain(t);
+    for (const t of ["age_transition_sweep", "exit_effective_sweep", "exit_effective_notify", "age_transition_member_notify", "form_cleanup_sweep", "retention_sweep", "reminder-sweep", "notify_reminder", "public_media_sync"]) expect(types).toContain(t);
     const recurring = Object.fromEntries(defaultRegistry.recurringSpecs().map((s) => [s.type, s.intervalMs]));
     expect(recurring).toMatchObject({ age_transition_sweep: 3_600_000, exit_effective_sweep: 3_600_000, form_cleanup_sweep: 3_600_000, retention_sweep: 86_400_000, "reminder-sweep": 900_000 });
   });

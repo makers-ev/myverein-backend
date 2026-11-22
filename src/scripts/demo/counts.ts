@@ -116,6 +116,13 @@ export async function demoCounts(clubId: string): Promise<Record<string, number>
     ["time_entries_manuell", sql`SELECT count(*) FROM time_entries WHERE club_id = ${clubId} AND source = 'manuell'`],
     ["time_people", sql`SELECT count(DISTINCT club_member_id) FROM time_entries WHERE club_id = ${clubId}`],
     ["time_events", sql`SELECT count(DISTINCT event_id) FROM time_entries WHERE club_id = ${clubId} AND event_id IS NOT NULL`],
+    ["sponsors", sql`SELECT count(*) FROM sponsors WHERE club_id = ${clubId}`],
+    ["sponsors_public", sql`SELECT count(*) FROM sponsors WHERE club_id = ${clubId} AND visibility = 'oeffentlich'`],
+    ["sponsor_contacts", sql`SELECT count(*) FROM sponsor_contacts c JOIN sponsors s ON s.id = c.sponsor_id WHERE s.club_id = ${clubId}`],
+    ["public_profile_live", sql`SELECT count(*) FROM club_public_profiles p JOIN club_settings s ON s.club_id = p.club_id WHERE p.club_id = ${clubId} AND p.published IS NOT NULL AND s.public_profile_enabled`],
+    ["leads", sql`SELECT count(*) FROM club_leads WHERE club_id = ${clubId}`],
+    ["leads_waitlisted", sql`SELECT count(*) FROM club_leads WHERE club_id = ${clubId} AND waitlisted_at IS NOT NULL`],
+    ["leads_statuses", sql`SELECT count(DISTINCT status) FROM club_leads WHERE club_id = ${clubId}`],
     ["audit_entries", sql`SELECT count(*) FROM audit_log WHERE club_id = ${clubId}`],
   ];
   const out: Record<string, number> = {};

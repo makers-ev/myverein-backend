@@ -36,7 +36,7 @@ export interface ClubStatsInput {
   members: StatsMember[];
   categories: Array<{ id: string; key: string; name: string; archivedAt: Date | null }>;
   departments: Array<{ id: string; name: string }>;
-  assignments: Array<{ clubMemberId: string; departmentId: string; until: string | null }>;
+  assignments: Array<{ clubMemberId: string; departmentId: string; until: string | null; /** Start of the assignment; used by the association report for a reference day in the past. */ since?: string }>;
   /** History rows whose target status is a "left" status (exits), used for members who were reopened later. */
   exits: Array<{ clubMemberId: string; effectiveOn: string }>;
 }

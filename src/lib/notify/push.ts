@@ -1,5 +1,6 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 
+import { suspendedClubIds } from "../club-platform.js";
 import { meetingInvitations } from "../../db/schema/assembly.js";
 import { organization } from "../../auth/auth-schema.js";
 import { db } from "../../db/client.js";
@@ -196,7 +197,11 @@ export async function handlePushDelivery(job: JobContext): Promise<void> {
   const skipOptout = rows.filter((r) => !skipWithdrawn.includes(r.id) && optedOut.has(r.id)).map((r) => r.id);
   if (skipWithdrawn.length) await db.update(messageDeliveries).set({ status: "skipped", errorCode: "withdrawn" }).where(and(inArray(messageDeliveries.id, skipWithdrawn), eq(messageDeliveries.status, "queued")));
   if (skipOptout.length) await db.update(messageDeliveries).set({ status: "skipped_optout" }).where(and(inArray(messageDeliveries.id, skipOptout), eq(messageDeliveries.status, "queued")));
-  const skipped = new Set([...skipWithdrawn, ...skipOptout]);
+  // Wave 15 B7: pushes still queued when the club was suspended are not sent.
+  const suspended = await suspendedClubIds([...new Set(rows.map((r) => r.clubId).filter((v): v is string => !!v))]);
+  const skipSuspended = rows.filter((r) => r.clubId !== null && suspended.has(r.clubId) && !skipWithdrawn.includes(r.id) && !skipOptout.includes(r.id)).map((r) => r.id);
+  if (skipSuspended.length) await db.update(messageDeliveries).set({ status: "skipped", errorCode: "club_suspended" }).where(and(inArray(messageDeliveries.id, skipSuspended), eq(messageDeliveries.status, "queued")));
+  const skipped = new Set([...skipWithdrawn, ...skipOptout, ...skipSuspended]);
   rows = rows.filter((r) => !skipped.has(r.id));
   if (rows.length === 0) return;
 

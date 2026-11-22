@@ -172,3 +172,22 @@ describe("Wave 13 permissions (documents, cards, branding, storage)", () => {
     for (const p of NEW) expect(hasClubPermission([], p)).toBe(false);
   });
 });
+
+describe("Wave 15 permissions", () => {
+  it("lets the board and department leads manage enquiries, nobody else", () => {
+    for (const role of CLUB_ROLE_TYPES) expect(hasClubPermission([role], "leads:write"), role).toBe(["vorsitz", "stellv_vorsitz", "schriftfuehrer", "abteilungsleitung"].includes(role));
+  });
+
+  it("lets only vorsitz, stellv_vorsitz and schriftfuehrer edit and publish the public page", () => {
+    for (const role of CLUB_ROLE_TYPES) expect(hasClubPermission([role], "public_profile:write"), role).toBe(["vorsitz", "stellv_vorsitz", "schriftfuehrer"].includes(role));
+  });
+
+  it("lets the board read sponsors and the managing board roles write them; everybody else nothing", () => {
+    const read = ["vorsitz", "stellv_vorsitz", "kassenwart", "schriftfuehrer", "beisitzer"];
+    const write = ["vorsitz", "stellv_vorsitz", "kassenwart", "schriftfuehrer"];
+    for (const role of CLUB_ROLE_TYPES) {
+      expect(hasClubPermission([role], "sponsors:read"), `${role} read`).toBe(read.includes(role));
+      expect(hasClubPermission([role], "sponsors:write"), `${role} write`).toBe(write.includes(role));
+    }
+  });
+});

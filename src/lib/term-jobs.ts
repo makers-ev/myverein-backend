@@ -1,5 +1,6 @@
 import { and, eq, gte, isNotNull } from "drizzle-orm";
 
+import { suspendedClubIds } from "./club-platform.js";
 import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { clubRoles } from "../db/schema/club-roles.js";
@@ -40,7 +41,10 @@ export function crossedThreshold(daysLeft: number, warningDays: readonly number[
 export async function runTermSweep(now: Date = new Date(), scope: { clubId?: string } = {}): Promise<number> {
   let scheduled = 0;
   const clubs = await db.select({ clubId: clubSettings.clubId }).from(clubSettings).where(scope.clubId ? eq(clubSettings.clubId, scope.clubId) : undefined);
+  // Wave 15 B7: no term notices for a club suspended by the platform.
+  const suspended = await suspendedClubIds(clubs.map((c) => c.clubId));
   for (const { clubId } of clubs) {
+    if (suspended.has(clubId)) continue;
     try {
       const rules = await loadAssemblyRules(db, clubId);
       if (!rules.termWarningDays || rules.termWarningDays.length === 0) continue;

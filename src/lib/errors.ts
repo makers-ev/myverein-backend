@@ -26,7 +26,8 @@ export type ErrorCode =
   | "FORM_VERSION_OUTDATED"
   | "RECIPIENT_CONFIRMATION_REQUIRED"
   | "DPA_REQUIRED"
-  | "QUERY_TOO_SHORT";
+  | "QUERY_TOO_SHORT"
+  | "CLUB_SUSPENDED";
 
 export interface AppErrorOptions {
   cause?: unknown;

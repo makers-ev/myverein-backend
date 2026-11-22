@@ -19,6 +19,7 @@ import { handleRenderJob, RENDER_JOB_TYPE } from "../pdf/render.js";
 import { registerNotifyJobs } from "../notify/index.js";
 import { installUnsubscribeProvider } from "../notify/unsubscribe-token.js";
 import { handleReminder, handleReminderSweep, REMINDER_JOB_TYPE, REMINDER_SWEEP_INTERVAL_MS, REMINDER_SWEEP_JOB_TYPE } from "../reminders.js";
+import { PUBLIC_MEDIA_SYNC_INTERVAL_MS, PUBLIC_MEDIA_SYNC_JOB_TYPE, syncAllPublicMedia } from "../public-profile.js";
 import { registerJob, registerRecurringJob } from "./registry.js";
 
 /**
@@ -64,5 +65,9 @@ export function registerAllJobs(): void {
   registerRecurringJob({ type: MEDIA_ORPHAN_SWEEP_JOB_TYPE, intervalMs: MEDIA_ORPHAN_SWEEP_INTERVAL_MS }, handleMediaOrphanSweep);
   registerRecurringJob({ type: DOCUMENT_TRASH_JOB_TYPE, intervalMs: DOCUMENT_TRASH_INTERVAL_MS }, handleDocumentTrashPurge);
   registerRetentionTasks();
+  // Wave 15 BM: takes the public opt-in back from logos of sponsors whose contract ended (and repairs any drift).
+  registerRecurringJob({ type: PUBLIC_MEDIA_SYNC_JOB_TYPE, intervalMs: PUBLIC_MEDIA_SYNC_INTERVAL_MS }, async () => {
+    await syncAllPublicMedia();
+  });
   registerRecurringJob({ type: RETENTION_SWEEP_JOB_TYPE, intervalMs: RETENTION_SWEEP_INTERVAL_MS }, handleRetentionSweep);
 }

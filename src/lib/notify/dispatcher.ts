@@ -1,5 +1,6 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 
+import { isClubSuspended } from "../club-platform.js";
 import { db } from "../../db/client.js";
 import { messageDeliveries, pushTokens, type CommunicationChannel } from "../../db/schema/communication.js";
 import { normalizeEmail, resolveClubAudience, type AudienceRecipient } from "../audience.js";
@@ -121,6 +122,12 @@ export async function notify(input: NotifyInput): Promise<NotifyResult> {
   if ((input.audience === undefined) === (input.recipients === undefined)) throw new Error("notify needs exactly one of audience / recipients");
   if (input.audience !== undefined && input.clubId === null) throw new Error("notify with an audience needs a clubId");
   if (input.announcementId !== undefined && input.clubId === null) throw new Error("notify for an announcement needs a clubId");
+
+  // Wave 15 B7: a club suspended by the platform sends nothing (central check for every route and job). Dropped, not queued.
+  if (input.clubId && (await isClubSuspended(input.clubId))) {
+    logger.info({ clubId: input.clubId, eventKey: input.eventKey }, "[notify] club suspended, message dropped");
+    return { recipients: 0, inApp: 0, queuedEmail: 0, queuedPush: 0, sentEmail: 0, skippedOptout: 0, skippedNoAddress: 0, alreadyDelivered: 0 };
+  }
 
   const template = templateOf(input);
   const category = categoryOf(input, template);

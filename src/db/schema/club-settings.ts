@@ -83,6 +83,13 @@ export const clubSettings = pgTable("club_settings", {
   storageQuotaBytes: bigint("storage_quota_bytes", { mode: "number" }),
   // Highest quota threshold already reported to the board (80 or 100); reset when usage falls below 80 %.
   storageNoticeLevel: integer("storage_notice_level").notNull().default(0),
+  // Wave 15 B3/B5 (E1/E2): public club page and club search, both strictly opt-in and OFF by default. `discoverable` only has
+  // an effect while the page is enabled and published.
+  publicProfileEnabled: boolean("public_profile_enabled").notNull().default(false),
+  discoverable: boolean("discoverable").notNull().default(false),
+  // Wave 15 E5: search engines may index the live public page (website `noindex` otherwise) and it is listed in the club sitemap.
+  // Default on (PO decision); only effective while the page is live and the club is not suspended.
+  publicIndexingEnabled: boolean("public_indexing_enabled").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
