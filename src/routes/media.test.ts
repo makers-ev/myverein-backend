@@ -423,7 +423,9 @@ describe("media routes and security layer", () => {
 
       const ctx = new Hono();
       ctx.get("/d", (c) => streamSensitiveMedia(c, doc, { accessedBy: founderAId, subjectId: "reg-1" }));
-      const before = (await db.select().from(auditLog).where(eq(auditLog.eventType, "media.sensitive_access"))).length;
+      // Only the entries of THIS file: other test files stream sensitive files into the shared DB at the same time.
+      const ofDoc = async () => (await db.select().from(auditLog).where(eq(auditLog.eventType, "media.sensitive_access"))).filter((e) => (e.payload as { mediaId?: string }).mediaId === doc.id);
+      const before = (await ofDoc()).length;
       const res = await ctx.request("/d");
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toBe("application/pdf");
@@ -432,7 +434,7 @@ describe("media routes and security layer", () => {
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
       expect(Buffer.from(await res.arrayBuffer()).equals(PDF_BYTES)).toBe(true);
       await ctx.request("/d");
-      const entries = await db.select().from(auditLog).where(eq(auditLog.eventType, "media.sensitive_access"));
+      const entries = await ofDoc();
       expect(entries.length - before).toBe(2);
       expect(entries.find((e) => (e.payload as { mediaId?: string }).mediaId === doc.id)?.payload).toMatchObject({ mediaId: doc.id, ownerType: "club_registration", accessedBy: founderAId });
       await deleteMedia(doc.storageKey);
