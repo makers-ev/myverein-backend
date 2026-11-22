@@ -313,6 +313,7 @@ export const AUDIT_EVENTS = {
   "external_access.invite_accept": spec(["clubId", "inviteId", "memberId", "newMembership", "roleType"]),
   "external_access.remove": spec(["clubId", "memberId", "membershipRemoved"]),
   "external_access.assignment_create": spec(["assignmentId", "clubId", "locationId", "memberId"]),
+  "external_access.assignment_update": spec(["assignmentId", "changedFields", "clubId", "memberId"]),
   "external_access.assignment_delete": spec(["assignmentId", "clubId", "memberId"]),
   "club_lead.request": spec(["clubId", "leadId", "merged"]),
   "club_lead.create": spec(["clubId", "leadId"]),

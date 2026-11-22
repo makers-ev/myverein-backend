@@ -185,6 +185,49 @@ externalAccessRoutes.post("/accounts/:memberId/assignments", zValidator("json", 
   return c.json({ data: (await shapeAssignments([row]))[0] }, 201);
 });
 
+const assignmentPatchSchema = z
+  .object({
+    title: cleanText(z.string().trim().min(1).max(120)).optional(),
+    note: z.union([cleanText(z.string().trim().max(1000), true), z.null()]).optional(),
+    locationId: z.uuid().nullable().optional(),
+    validFrom: z.iso.datetime({ offset: true }).optional(),
+    validUntil: z.iso.datetime({ offset: true }).optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, { message: "Nothing to change" });
+
+externalAccessRoutes.patch("/accounts/:memberId/assignments/:assignmentId", zValidator("json", assignmentPatchSchema, hook), async (c) => {
+  const clubId = c.get("clubId");
+  const memberId = c.req.param("memberId");
+  const [current] = await db
+    .select()
+    .from(externalAccessAssignments)
+    .where(and(eq(externalAccessAssignments.id, c.req.param("assignmentId")), eq(externalAccessAssignments.clubId, clubId), eq(externalAccessAssignments.memberId, memberId)));
+  if (!current) throw new NotFoundError("Assignment not found");
+  const body = c.req.valid("json");
+  if (body.locationId) {
+    const [loc] = await db.select({ id: locations.id }).from(locations).where(and(eq(locations.id, body.locationId), eq(locations.clubId, clubId)));
+    if (!loc) throw new ValidationError("Unknown location", { details: { code: "unknown_location" } });
+  }
+  const from = body.validFrom ? new Date(body.validFrom) : current.validFrom;
+  const until = body.validUntil ? new Date(body.validUntil) : current.validUntil;
+  if (until.getTime() <= from.getTime() || until.getTime() - from.getTime() > MAX_WINDOW_MS) {
+    throw new ValidationError("The window must end after it starts and cover at most 366 days", { details: { code: "invalid_window" } });
+  }
+  const set = {
+    ...(body.title !== undefined ? { title: body.title } : {}),
+    ...(body.note !== undefined ? { note: body.note || null } : {}),
+    ...(body.locationId !== undefined ? { locationId: body.locationId } : {}),
+    validFrom: from,
+    validUntil: until,
+  };
+  const row = await db.transaction(async (tx) => {
+    const [updated] = await tx.update(externalAccessAssignments).set(set).where(eq(externalAccessAssignments.id, current.id)).returning();
+    await writeAudit(tx, { eventType: "external_access.assignment_update", subjectId: current.id, payload: { clubId, assignmentId: current.id, memberId, changedFields: Object.keys(body) } });
+    return updated!;
+  });
+  return c.json({ data: (await shapeAssignments([row]))[0] });
+});
+
 externalAccessRoutes.delete("/accounts/:memberId/assignments/:assignmentId", async (c) => {
   const clubId = c.get("clubId");
   const memberId = c.req.param("memberId");

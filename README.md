@@ -1929,9 +1929,11 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `invalid_selection` | 422 | `lib/ballots.ts` |
 | `invalid_status_transition` | 409 | `lib/club-leads.ts` |
 | `invalid_time` | 422 | `lib/time-tracking.ts`, `routes/event-helpers.ts` |
-| `invalid_window` | 422 | `lib/ballots.ts` |
+| `invalid_window` | 422 | `lib/ballots.ts`, `routes/external-access.ts` |
 | `invitation_not_supported` | 422 | `lib/assembly-invitation.ts` |
 | `invitation_period_violated` | 422 | `lib/assembly-invitation.ts`, `routes/meetings.ts` |
+| `invite_email_mismatch` | 403 | `lib/external-access.ts` |
+| `invite_not_found` | 404 | `lib/external-access.ts` |
 | `invite_not_open` | 409 | `routes/external-access.ts` |
 | `lead_already_converted` | 409 | `lib/club-leads.ts` |
 | `lead_is_candidate` | 409 | `lib/elections.ts` |
@@ -2028,6 +2030,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `shift_full` | 409 | `routes/event-helpers.ts` |
 | `shift_over` | 409 | `routes/event-helpers.ts` |
 | `shift_overlap` | 409 | `lib/event-helpers.ts` |
+| `sponsor_only_for_sponsor_role` | 422 | `lib/external-access.ts` |
 | `submission_not_deletable` | 409 | `routes/form-submissions.ts` |
 | `submission_not_editable` | 409 | `routes/form-submissions.ts` |
 | `submission_not_withdrawable` | 409 | `routes/form-submissions.ts` |
@@ -2054,6 +2057,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `unknown_location` | 422 | `routes/external-access.ts` |
 | `unknown_member` | 422 | `routes/event-attendance.ts` |
 | `unknown_option` | 422 | `lib/ballots.ts` |
+| `unknown_sponsor` | 422 | `lib/external-access.ts` |
 | `use_convert` | 422 | `lib/club-leads.ts` |
 | `use_voting_roll_override` | 422 | `routes/meetings.ts` |
 | `version_immutable` | 409 | `routes/forms.ts` |
@@ -2481,15 +2485,15 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `/club-public-profile/unpublish` | POST | `public_profile:write` | Removes the published snapshot; the page answers `404` and its media are revoked immediately |
 | `/club-public-profile/settings` | PUT | `public_profile:write` | `{ publicProfileEnabled?, discoverable?, publicIndexingEnabled? }` (the first two default off, indexing default on) -> editor shape; media opt-in follows; switching on a published page with the enquiry form but without a published privacy notice `422 privacy_notice_required` |
 | `/public/clubs/:slug` | GET | none (public; `PUBLIC_CLUB_IP_LIMIT_PER_HOUR`, failed lookups `PUBLIC_CLUB_INVALID_LIMIT_PER_HOUR`) | Wave 15 B3. Live page only (enabled + published + not suspended), else the same `404`. `{ data: { slug, name, indexable, tagline, description, city, address, contact: { email, phone, website }, logoUrl, coverUrl, galleryUrls, departments: [{ id, name }], events: [{ title, startsAt, endsAt, allDay, cancelled, locationName }], sponsors: [{ name, website, logoUrl }], leadForm: { enabled (only with a published privacy notice), trialTraining, departments, privacyNotice: { version, body, publishedAt } \| null } } }`; URLs are unsigned links of released media. `Cache-Control: public, no-cache` on hits, `no-store` otherwise |
-| `/external-access` | GET | session + `clubGuard` + `roles:write` | Wave 15 B2. `{ data: { invites: [{ id, email, roleType, displayName, sponsor: { id, name } \| null, status: pending\|expired\|accepted\|revoked, expiresAt, acceptedAt, createdAt }], accounts: [{ memberId, name, email, roleTypes, sponsors: [{ id, name }], assignments: [Assignment] }] } }` |
-| `/external-access/invites` | POST | `roles:write` (20/h per user) | `{ email, roleType: sponsor\|dienstleister, displayName (1-120), sponsorId? (sponsor of the club, only for sponsor) }` -> `201 { data: invite + emailSent }`; mail with the link `/einladung/extern?token=` |
+| `/external-access` | GET | session + `clubGuard` + `roles:write` | Wave 15 B2. `{ data: { invites: [{ id, email, roleType, displayName, sponsor: { id, name } \| null, status: pending\|expired\|accepted\|revoked, expiresAt, acceptedAt, createdAt }], accounts: [{ memberId, name, email, status: "active", roleTypes, sponsors: [{ id, name }], assignments: [Assignment] }] } }` (a login whose access was removed appears only as an `accepted` invite) |
+| `/external-access/invites` | POST | `roles:write` (20/h per user) | `{ email, roleType: sponsor\|dienstleister, displayName (1-120), sponsorId? (sponsor of the club, only for sponsor) }` -> `201 { data: invite + emailSent }`; unknown sponsor `422 unknown_sponsor`, `sponsorId` with `dienstleister` `422 sponsor_only_for_sponsor_role`; mail with the link `/einladung/extern?token=` |
 | `/external-access/invites/:id/resend` | POST | `roles:write` | New token (old one revoked) -> `201`; accepted/revoked `409 invite_not_open` |
 | `/external-access/invites/:id` | DELETE | `roles:write` | Revokes an open invitation -> `204`; accepted/revoked `409 invite_not_open` |
-| `/external-access/invites/preview` | POST | session only (no club membership; 20/min per user) | `{ token }` -> `{ data: { clubId, clubName, roleType, displayName, invitedEmail (masked), emailMatches, expiresAt } }`; unknown/expired/used/revoked `404` |
-| `/external-access/invites/accept` | POST | session only | `{ token }` -> `{ data: { clubId, clubName, memberId, roleType } }`; different or unverified e-mail `403`, excluded person `409`, used/expired `404` |
+| `/external-access/invites/preview` | POST | session only (no club membership; 20/min per user) | `{ token }` -> `{ data: { clubId, clubName, roleType, displayName, invitedEmail (masked), emailMatches, expiresAt } }`; unknown/expired/used/revoked `404 invite_not_found`, suspended club `403 CLUB_SUSPENDED` |
+| `/external-access/invites/accept` | POST | session only | `{ token }` -> `{ data: { clubId, clubName, memberId, roleType } }`; different or unverified e-mail `403 invite_email_mismatch`, excluded person `409`, used/expired/revoked `404 invite_not_found`, suspended club `403 CLUB_SUSPENDED` |
 | `/external-access/accounts/:memberId` | DELETE | `roles:write` | Ends the external access -> `204`; ids that are not an external account of the club `404` |
 | `/external-access/accounts/:memberId/assignments` | POST | `roles:write` | `{ title (1-120), note? (≤1000), locationId? (club location, else 422 unknown_location), validFrom, validUntil (ISO instants, > validFrom, ≤ 366 days) }` -> `201 { data: { id, title, note, validFrom, validUntil, active, location: { id, name, address } \| null } }`; account without `dienstleister` `422 not_service_provider` |
-| `/external-access/accounts/:memberId/assignments/:assignmentId` | DELETE | `roles:write` | `204`, unknown `404` |
+| `/external-access/accounts/:memberId/assignments/:assignmentId` | PATCH, DELETE | `roles:write` | `PATCH { title?, note?, locationId?, validFrom?, validUntil? }` (at least one; the resulting window must end after it starts and cover ≤ 366 days, `422 invalid_window`; `422 unknown_location`) -> `{ data: Assignment }`, audit `external_access.assignment_update`; `DELETE` -> `204`; unknown `404` |
 | `/external/me` | GET | session + `clubGuard` (any member; the one area external-only logins may use) | `{ data: { clubId, clubName, clubSlug, externalOnly, roleTypes, sponsors: [{ id, name, website, description, consideration, startsOn, endsOn, status, logoUrl (signed), contacts }], assignments: [Assignment] } }` — own sponsor profiles without notes; current + upcoming assignments (upcoming without location and note) |
 | `/public/clubs` | GET | none (public; `PUBLIC_CLUB_SEARCH_LIMIT_PER_HOUR` per client) | Wave 15 B5 club search. `?q=` (name, ≥ 3) and/or `&city=` (≥ 2), else `400 QUERY_TOO_SHORT` (`details.min = 3`, `details.minCity = 2`). `{ data: [{ slug, name, city, logoUrl }] }` (max 10, by name, no total); only live **and** discoverable clubs |
 | `/public/clubs/:slug/leads` | POST | none (public; `PUBLIC_LEAD_IP_LIMIT_PER_HOUR` per client, `PUBLIC_LEAD_CLUB_LIMIT_PER_DAY` per club, 3/day per address) | Wave 15 B4 enquiry form. Body `{ name (2-100), email, phone? (≤40), departmentId? (one of `leadForm.departments`, else ignored), message? (≤2000), trialRequested?, privacyAccepted: true, website? (honeypot, keep empty and hidden) }` -> `202 { data: { status: "received" } }` for new, merged and honeypot alike; `404` when the page is not live, the form is off or the club has no published privacy notice, `422` validation, `429` limits |

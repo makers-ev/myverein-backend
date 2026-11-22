@@ -444,6 +444,7 @@ const SAMPLE_BODIES: Record<string, unknown> = {
   "POST /club-leads": { name: "Interessent" },
   "PATCH /club-leads/:id": { notes: "Notiz" },
   "POST /external-access/invites": { email: "nobody@example.com", roleType: "sponsor", displayName: "Niemand" },
+  "PATCH /external-access/accounts/:memberId/assignments/:assignmentId": { title: "Neu" },
   "POST /external-access/accounts/:memberId/assignments": { title: "Reinigung", validFrom: "2030-01-01T08:00:00Z", validUntil: "2030-01-01T12:00:00Z" },
 };
 

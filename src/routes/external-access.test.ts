@@ -101,6 +101,9 @@ describe("external access API", () => {
     expect(res.status).toBe(201);
     expect((await json(res)).data).toMatchObject({ roleType: "sponsor", status: "pending", sponsor: { id: sponsorId, name: "Sponsor GmbH" }, emailSent: expect.any(Boolean) });
     expect((await call(club.founder, "/external-access/invites", { method: "POST", clubId: club.clubId, body: { email: emails.sponsor, roleType: "mitglied", displayName: "X" } })).status).toBe(422);
+    const code = async (body: unknown) => (await json(await call(club.founder, "/external-access/invites", { method: "POST", clubId: club.clubId, body }))).error.details.code;
+    expect(await code({ email: "x@example.com", roleType: "sponsor", displayName: "X", sponsorId: "00000000-0000-4000-8000-000000000001" })).toBe("unknown_sponsor");
+    expect(await code({ email: "x@example.com", roleType: "dienstleister", displayName: "X", sponsorId })).toBe("sponsor_only_for_sponsor_role");
     const list = (await json(await call(club.founder, "/external-access", { clubId: club.clubId }))).data;
     expect(list.invites.length).toBe(1);
     expect(list.accounts).toEqual([]);
@@ -110,7 +113,12 @@ describe("external access API", () => {
     const { token } = await createExternalInvite({ clubId: club.clubId, email: emails.sponsor, roleType: "sponsor", displayName: "Sabine Sponsor", sponsorId, createdBy: (await db.query.member.findFirst({ where: and(eq(member.organizationId, club.clubId), eq(member.userId, club.founder.userId)) }))!.id });
     const preview = await json(await call(stranger, "/external-access/invites/preview", { method: "POST", body: { token } }));
     expect(preview.data).toMatchObject({ roleType: "sponsor", emailMatches: false, invitedEmail: expect.stringMatching(/^e\*\*\*@/) });
-    expect((await call(stranger, "/external-access/invites/accept", { method: "POST", body: { token } })).status).toBe(403);
+    const mismatch = await call(stranger, "/external-access/invites/accept", { method: "POST", body: { token } });
+    expect(mismatch.status).toBe(403);
+    expect((await json(mismatch)).error.details.code).toBe("invite_email_mismatch");
+    const unknown = await call(stranger, "/external-access/invites/preview", { method: "POST", body: { token: "x".repeat(43) } });
+    expect(unknown.status).toBe(404);
+    expect((await json(unknown)).error.details.code).toBe("invite_not_found");
 
     const accepted = await call(sponsorUser, "/external-access/invites/accept", { method: "POST", body: { token } });
     expect(accepted.status).toBe(200);
@@ -194,6 +202,20 @@ describe("external access API", () => {
     // The board sees everything.
     const accounts = (await json(await call(club.founder, "/external-access", { clubId: club.clubId }))).data.accounts;
     expect(accounts.map((a: { roleTypes: string[] }) => a.roleTypes[0]).sort()).toEqual(["dienstleister", "sponsor"]);
+    expect(accounts.every((a: { status: string; email: string }) => a.status === "active" && a.email.includes("@"))).toBe(true);
+
+    // Change an assignment: note, window; invalid window and foreign ids are refused; only the board.
+    const provider = accounts.find((a: { roleTypes: string[] }) => a.roleTypes.includes("dienstleister"));
+    const assignment = provider.assignments[0];
+    const patch = (body: unknown, who = club.founder, id = assignment.id) => call(who, `/external-access/accounts/${provider.memberId}/assignments/${id}`, { method: "PATCH", clubId: club.clubId, body });
+    const changed = await patch({ note: "Neuer Code im Kasten", validUntil: iso(5) });
+    expect(changed.status).toBe(200);
+    expect((await json(changed)).data).toMatchObject({ note: "Neuer Code im Kasten", active: true });
+    const badWindow = await patch({ validUntil: iso(-3) });
+    expect(badWindow.status).toBe(422);
+    expect((await json(badWindow)).error.details.code).toBe("invalid_window");
+    expect((await patch({ title: "X" }, club.founder, "00000000-0000-4000-8000-000000000001")).status).toBe(404);
+    expect((await patch({ title: "X" }, club.members.kasse!)).status).toBe(403);
   });
 
   it("refuses previews and accepts of invitations (external and member) while the club is suspended", async () => {

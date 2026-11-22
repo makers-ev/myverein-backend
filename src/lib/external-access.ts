@@ -15,7 +15,7 @@ import { writeAudit } from "./audit.js";
 import { assertClubNotSuspended } from "./club-platform.js";
 import { EXTERNAL_ROLE_TYPES, type ExternalRoleType } from "./club-permissions.js";
 import { ensureClubMember, markDetachedMembersLeft } from "./club-members.js";
-import { ConflictError, ForbiddenError, NotFoundError } from "./errors.js";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "./errors.js";
 import { inviteLinkContext } from "./invite-context.js";
 import { logger } from "./logger.js";
 import { hashInviteToken, inviteTtlDays, maskEmail } from "./member-invites.js";
@@ -77,8 +77,9 @@ export async function shapeInvites(rows: ClubExternalInviteRow[]) {
 
 export async function createExternalInvite(input: { clubId: string; email: string; roleType: ExternalRoleType; displayName: string; sponsorId: string | null; createdBy: string | null }): Promise<{ invite: ClubExternalInviteRow; token: string }> {
   if (input.sponsorId) {
+    if (input.roleType !== "sponsor") throw new ValidationError("A sponsor can only be linked to a sponsor login", { details: { code: "sponsor_only_for_sponsor_role" } });
     const [s] = await db.select({ id: sponsors.id }).from(sponsors).where(and(eq(sponsors.id, input.sponsorId), eq(sponsors.clubId, input.clubId)));
-    if (!s) throw new NotFoundError("Sponsor not found");
+    if (!s) throw new ValidationError("Unknown sponsor", { details: { code: "unknown_sponsor" } });
   }
   const token = randomBytes(32).toString("base64url");
   const invite = await db.transaction(async (tx) => {
@@ -94,7 +95,7 @@ export async function createExternalInvite(input: { clubId: string; email: strin
 
 async function usableInvite(token: string): Promise<ClubExternalInviteRow> {
   const [row] = await db.select().from(clubExternalInvites).where(eq(clubExternalInvites.tokenHash, hashInviteToken(token)));
-  if (!row || inviteStatus(row) !== "pending") throw new NotFoundError(NOT_FOUND);
+  if (!row || inviteStatus(row) !== "pending") throw new NotFoundError(NOT_FOUND, { details: { code: "invite_not_found" } });
   // Wave 15 B7: no new logins for a club suspended by the platform (preview and accept: 403 CLUB_SUSPENDED).
   await assertClubNotSuspended(row.clubId);
   return row;
@@ -113,13 +114,13 @@ export async function previewExternalInvite(token: string, accountEmail: string)
  */
 export async function acceptExternalInvite(token: string, account: { id: string; email: string; emailVerified: boolean }) {
   const invite = await usableInvite(token);
-  if (!account.emailVerified || invite.email.toLowerCase() !== account.email.toLowerCase()) throw new ForbiddenError("The invitation was issued for a different (or an unverified) e-mail address");
+  if (!account.emailVerified || invite.email.toLowerCase() !== account.email.toLowerCase()) throw new ForbiddenError("The invitation was issued for a different (or an unverified) e-mail address", { details: { code: "invite_email_mismatch" } });
   const [claimed] = await db
     .update(clubExternalInvites)
     .set({ acceptedAt: new Date() })
     .where(and(eq(clubExternalInvites.id, invite.id), isNull(clubExternalInvites.acceptedAt), isNull(clubExternalInvites.revokedAt), gt(clubExternalInvites.expiresAt, new Date())))
     .returning();
-  if (!claimed) throw new NotFoundError(NOT_FOUND);
+  if (!claimed) throw new NotFoundError(NOT_FOUND, { details: { code: "invite_not_found" } });
   const release = () => db.update(clubExternalInvites).set({ acceptedAt: null }).where(eq(clubExternalInvites.id, invite.id)).catch((err) => logger.error({ err, inviteId: invite.id }, "[external-access] could not release a claimed invite"));
 
   let createdMemberId: string | null = null;
@@ -220,7 +221,7 @@ export async function listExternalAccounts(clubId: string) {
   const linked = await db.select({ id: sponsors.id, name: sponsors.name, memberId: sponsors.linkedMemberId }).from(sponsors).where(and(eq(sponsors.clubId, clubId), inArray(sponsors.linkedMemberId, ids)));
   const out = [];
   for (const e of byMember.values()) {
-    out.push({ ...e, sponsors: linked.filter((s) => s.memberId === e.memberId).map((s) => ({ id: s.id, name: s.name })), assignments: await currentAssignments(clubId, e.memberId) });
+    out.push({ ...e, status: "active" as const, sponsors: linked.filter((s) => s.memberId === e.memberId).map((s) => ({ id: s.id, name: s.name })), assignments: await currentAssignments(clubId, e.memberId) });
   }
   return out;
 }
