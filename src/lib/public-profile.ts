@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
-import { and, asc, eq, gte, ilike, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, eq, gt, gte, ilike, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import type { Context } from "hono";
 
 import { organization } from "../auth/auth-schema.js";
@@ -85,9 +85,14 @@ export async function loadProfileRow(clubId: string): Promise<ClubPublicProfileR
   return row;
 }
 
-export async function publicSettings(clubId: string): Promise<{ publicProfileEnabled: boolean; discoverable: boolean }> {
-  const [row] = await db.select({ publicProfileEnabled: clubSettings.publicProfileEnabled, discoverable: clubSettings.discoverable }).from(clubSettings).where(eq(clubSettings.clubId, clubId)).limit(1);
-  return { publicProfileEnabled: row?.publicProfileEnabled ?? false, discoverable: row?.discoverable ?? false };
+export async function publicSettings(clubId: string): Promise<{ publicProfileEnabled: boolean; discoverable: boolean; publicIndexingEnabled: boolean }> {
+  const [row] = await db
+    .select({ publicProfileEnabled: clubSettings.publicProfileEnabled, discoverable: clubSettings.discoverable, publicIndexingEnabled: clubSettings.publicIndexingEnabled })
+    .from(clubSettings)
+    .where(eq(clubSettings.clubId, clubId))
+    .limit(1);
+  // No settings row = the column defaults (page off, not discoverable, indexing on once the page goes live).
+  return { publicProfileEnabled: row?.publicProfileEnabled ?? false, discoverable: row?.discoverable ?? false, publicIndexingEnabled: row?.publicIndexingEnabled ?? true };
 }
 
 /** The published content of a club whose page is live right now, or null (not enabled, not published, suspended). */
@@ -136,10 +141,10 @@ export const PUBLIC_MEDIA_SYNC_JOB_TYPE = "public_media_sync";
 export const PUBLIC_MEDIA_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /** Exactly the keys of the public page, nothing else (the data-leak tests compare against this list). */
-export const PUBLIC_CLUB_KEYS = ["slug", "name", "tagline", "description", "city", "address", "contact", "logoUrl", "coverUrl", "galleryUrls", "departments", "events", "sponsors", "leadForm"] as const;
+export const PUBLIC_CLUB_KEYS = ["slug", "name", "indexable", "tagline", "description", "city", "address", "contact", "logoUrl", "coverUrl", "galleryUrls", "departments", "events", "sponsors", "leadForm"] as const;
 
 /** Builds the public shape from the published snapshot, field by field (whitelist). */
-export async function shapePublicClub(club: { id: string; name: string; slug: string }, content: PublicProfileContent) {
+export async function shapePublicClub(club: { id: string; name: string; slug: string }, content: PublicProfileContent, indexable: boolean) {
   const now = new Date();
   const until = new Date(now.getTime() + PUBLIC_EVENT_DAYS * 86_400_000);
   const [depts, evs, sponsorRows] = await Promise.all([
@@ -164,6 +169,8 @@ export async function shapePublicClub(club: { id: string; name: string; slug: st
   return {
     slug: club.slug,
     name: club.name,
+    // E5: whether search engines may index the page (website sets `noindex` otherwise).
+    indexable,
     tagline: content.tagline,
     description: content.description,
     city: content.city,
@@ -187,11 +194,35 @@ export async function shapePublicClub(club: { id: string; name: string; slug: st
 }
 
 /** The live club behind a public slug, or null (unknown, not enabled, not published, suspended: indistinguishable). */
-export async function liveClubBySlug(slug: string): Promise<{ club: { id: string; name: string; slug: string }; content: PublicProfileContent } | null> {
+export async function liveClubBySlug(slug: string): Promise<{ club: { id: string; name: string; slug: string }; content: PublicProfileContent; indexable: boolean } | null> {
   const [club] = await db.select({ id: organization.id, name: organization.name, slug: organization.slug }).from(organization).where(eq(organization.slug, slug)).limit(1);
   if (!club) return null;
   const content = await liveContent(club.id);
-  return content ? { club, content } : null;
+  if (!content) return null;
+  return { club, content, indexable: (await publicSettings(club.id)).publicIndexingEnabled };
+}
+
+export const SITEMAP_DEFAULT_LIMIT = 500;
+export const SITEMAP_MAX_LIMIT = 1000;
+export const publicSitemapLimit = () => envInt("PUBLIC_CLUB_SITEMAP_LIMIT_PER_HOUR", 120);
+
+/**
+ * Sitemap of the public club pages (E5): slugs of clubs that are live (enabled + published), indexable and not suspended,
+ * sorted by slug, keyset-paginated (`cursor` = last slug of the previous page). Read live on every request, so unpublishing,
+ * switching off, `noindex` or a suspension removes the club at once. Nothing but slug and the last publish time.
+ */
+export async function sitemapPage(cursor: string | null, limit: number): Promise<{ data: Array<{ slug: string; updatedAt: Date | null }>; nextCursor: string | null }> {
+  const rows = await db
+    .select({ slug: organization.slug, updatedAt: clubPublicProfiles.publishedAt })
+    .from(organization)
+    .innerJoin(clubSettings, and(eq(clubSettings.clubId, organization.id), eq(clubSettings.publicProfileEnabled, true), eq(clubSettings.publicIndexingEnabled, true)))
+    .innerJoin(clubPublicProfiles, and(eq(clubPublicProfiles.clubId, organization.id), isNotNull(clubPublicProfiles.published)))
+    .leftJoin(clubPlatformStatus, eq(clubPlatformStatus.clubId, organization.id))
+    .where(and(isNull(clubPlatformStatus.suspendedAt), cursor ? gt(organization.slug, cursor) : undefined))
+    .orderBy(asc(organization.slug))
+    .limit(limit + 1);
+  const page = rows.slice(0, limit);
+  return { data: page.map((r) => ({ slug: r.slug, updatedAt: r.updatedAt })), nextCursor: rows.length > limit ? page[page.length - 1]!.slug : null };
 }
 
 // --- Caller identification of the public endpoints -----------------------------------------------------------------------

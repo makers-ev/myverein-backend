@@ -23,6 +23,16 @@ export async function isClubSuspended(clubId: string): Promise<boolean> {
   return (await suspensionOf(clubId)) !== null;
 }
 
+/** Member-facing suspension info of the given clubs (only the note meant for members, never the internal reason). */
+export async function suspensionsOf(clubIds: readonly string[]): Promise<Map<string, { since: Date; note: string | null }>> {
+  if (clubIds.length === 0) return new Map();
+  const rows = await db
+    .select({ clubId: clubPlatformStatus.clubId, since: clubPlatformStatus.suspendedAt, note: clubPlatformStatus.suspensionNote })
+    .from(clubPlatformStatus)
+    .where(and(inArray(clubPlatformStatus.clubId, [...clubIds]), isNotNull(clubPlatformStatus.suspendedAt)));
+  return new Map(rows.map((r) => [r.clubId, { since: r.since!, note: r.note }]));
+}
+
 /** Ids of the given clubs that are suspended (one query for lists). */
 export async function suspendedClubIds(clubIds: readonly string[]): Promise<Set<string>> {
   if (clubIds.length === 0) return new Set();

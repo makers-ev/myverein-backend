@@ -230,8 +230,8 @@ clubPublicProfileRoutes.post("/unpublish", async (c) => {
 });
 
 const settingsSchema = z
-  .object({ publicProfileEnabled: z.boolean().optional(), discoverable: z.boolean().optional() })
-  .refine((v) => v.publicProfileEnabled !== undefined || v.discoverable !== undefined, { message: "Nothing to change" });
+  .object({ publicProfileEnabled: z.boolean().optional(), discoverable: z.boolean().optional(), publicIndexingEnabled: z.boolean().optional() })
+  .refine((v) => v.publicProfileEnabled !== undefined || v.discoverable !== undefined || v.publicIndexingEnabled !== undefined, { message: "Nothing to change" });
 
 clubPublicProfileRoutes.put("/settings", zValidator("json", settingsSchema, hook), async (c) => {
   const clubId = c.get("clubId");
@@ -243,7 +243,7 @@ clubPublicProfileRoutes.put("/settings", zValidator("json", settingsSchema, hook
   const set = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined));
   await db.transaction(async (tx) => {
     await tx.insert(clubSettings).values({ clubId, ...set }).onConflictDoUpdate({ target: clubSettings.clubId, set: { ...set, updatedAt: new Date() } });
-    await writeAudit(tx, { eventType: "public_profile.settings", subjectId: clubId, payload: { clubId, publicProfileEnabled: body.publicProfileEnabled, discoverable: body.discoverable } });
+    await writeAudit(tx, { eventType: "public_profile.settings", subjectId: clubId, payload: { clubId, publicProfileEnabled: body.publicProfileEnabled, discoverable: body.discoverable, publicIndexingEnabled: body.publicIndexingEnabled } });
   });
   await syncPublicMedia(clubId);
   return c.json({ data: await editorView(clubId) });

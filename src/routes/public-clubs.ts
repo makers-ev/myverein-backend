@@ -13,7 +13,7 @@ import { DAY_MS, enforceLimit, envInt, HOUR_MS } from "../lib/rate-limits.js";
 
 const leadIpLimit = () => envInt("PUBLIC_LEAD_IP_LIMIT_PER_HOUR", 5);
 const leadClubLimit = () => envInt("PUBLIC_LEAD_CLUB_LIMIT_PER_DAY", 50);
-import { liveClubBySlug, publicCaller, publicInvalidLimit, publicIpLimit, publicSearchLimit, publicTrustedInvalidLimit, publicTrustedLimit, SEARCH_CITY_MIN, SEARCH_Q_MIN, searchPublicClubs, shapePublicClub } from "../lib/public-profile.js";
+import { liveClubBySlug, publicCaller, publicInvalidLimit, publicIpLimit, publicSearchLimit, publicTrustedInvalidLimit, publicTrustedLimit, SEARCH_CITY_MIN, SEARCH_Q_MIN, searchPublicClubs, shapePublicClub, SITEMAP_DEFAULT_LIMIT, SITEMAP_MAX_LIMIT, sitemapPage, publicSitemapLimit } from "../lib/public-profile.js";
 
 /**
  * Public club routes (Wave 15 B3), mounted at `/public` next to the guest event routes. NO session. Strictly opt-in: a club is
@@ -61,9 +61,28 @@ publicClubRoutes.get("/clubs/:slug", async (c) => {
   const slug = c.req.param("slug");
   const live = SLUG_RE.test(slug) ? await liveClubBySlug(slug) : null;
   if (!live) return publicNotFound(c);
-  const data = await shapePublicClub(live.club, live.content);
+  const data = await shapePublicClub(live.club, live.content, live.indexable);
   publicCacheHeaders(c);
   return c.json({ data });
+});
+
+/**
+ * Sitemap of the indexable public club pages (E5). Outside `/clubs/` on purpose (a slug can never shadow it). Own budget per
+ * client; always revalidated so a club leaves the sitemap the moment its page is withdrawn, set to noindex or suspended.
+ */
+const sitemapQuery = z.object({
+  cursor: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).optional(),
+  limit: z.coerce.number().int().min(1).max(SITEMAP_MAX_LIMIT).default(SITEMAP_DEFAULT_LIMIT),
+});
+publicClubRoutes.get("/club-sitemap", async (c) => {
+  publicHeaders(c);
+  const caller = publicCaller(c);
+  await enforceLimit({ bucket: caller.subject === "trusted-server" ? "public_club.trusted" : "public_club.sitemap", subject: caller.subject, windowMs: HOUR_MS, max: caller.subject === "trusted-server" ? publicTrustedLimit() : publicSitemapLimit() });
+  const parsed = sitemapQuery.safeParse(c.req.query());
+  if (!parsed.success) throw new ValidationError("Invalid request", { details: parsed.error.issues });
+  const page = await sitemapPage(parsed.data.cursor ?? null, parsed.data.limit);
+  publicCacheHeaders(c);
+  return c.json(page);
 });
 
 /** Club search (Wave 15 B5): opt-in clubs only (`discoverable`), at most 10 hits, no total, own rate limit per client. */

@@ -174,7 +174,7 @@ describe("public club page", () => {
     const data = (await json(res)).data;
     expect(Object.keys(data).sort()).toEqual([...PUBLIC_CLUB_KEYS].sort());
     expect(Object.keys(data.contact).sort()).toEqual(["email", "phone", "website"]);
-    expect(data).toMatchObject({ slug: club.slug, tagline: "Sport für alle", city: "Wiesbach", contact: { email: "info@verein.example" } });
+    expect(data).toMatchObject({ slug: club.slug, indexable: true, tagline: "Sport für alle", city: "Wiesbach", contact: { email: "info@verein.example" } });
     expect(data.departments).toEqual([{ id: deptId, name: "Fußball" }]);
     expect(data.events.map((e: { title: string }) => e.title)).toEqual(["Tag der offenen Tür"]);
     expect(Object.keys(data.events[0]).sort()).toEqual(["allDay", "cancelled", "endsAt", "locationName", "startsAt", "title"]);
@@ -275,6 +275,63 @@ describe("public club page", () => {
     for (let i = 0; i < 3; i++) statuses.push((await pub("/public/clubs?city=wiesb", { "x-forwarded-for": ip })).status);
     expect(statuses).toEqual([200, 200, 429]);
     delete process.env.PUBLIC_CLUB_SEARCH_LIMIT_PER_HOUR;
+  });
+
+  it("lists live, indexable, active clubs in the sitemap (slug + updatedAt only) and drops them at once (E5)", async () => {
+    const sitemap = async (qs = "", ip = randomUUID()) => pub(`/public/club-sitemap${qs}`, { "x-forwarded-for": ip });
+    const allSlugs = async () => {
+      const out: string[] = [];
+      let cursor: string | null = null;
+      for (let i = 0; i < 1000; i++) {
+        const res = await sitemap(`?limit=50${cursor ? `&cursor=${cursor}` : ""}`);
+        expect(res.status).toBe(200);
+        const body = await json(res);
+        for (const row of body.data) expect(Object.keys(row).sort()).toEqual(["slug", "updatedAt"]);
+        out.push(...body.data.map((r: { slug: string }) => r.slug));
+        cursor = body.nextCursor;
+        if (!cursor) break;
+      }
+      return out;
+    };
+    const first = await sitemap();
+    expect(first.headers.get("cache-control")).toBe("public, no-cache");
+    expect(Object.keys(await json(first)).sort()).toEqual(["data", "nextCursor"]);
+    expect(await allSlugs()).toContain(club.slug);
+    // Not live / not published clubs never appear.
+    expect(await allSlugs()).not.toContain(other.slug);
+
+    // Keyset pagination: limit 1 walks in slug order without repeats.
+    const p1 = await json(await sitemap("?limit=1"));
+    expect(p1.data).toHaveLength(1);
+    if (p1.nextCursor) {
+      const p2 = await json(await sitemap(`?limit=1&cursor=${p1.nextCursor}`));
+      expect(p2.data[0].slug > p1.data[0].slug).toBe(true);
+    }
+    expect((await sitemap("?limit=0")).status).toBe(422);
+    expect((await sitemap("?limit=5000")).status).toBe(422);
+    expect((await sitemap("?cursor=%25%25")).status).toBe(422);
+
+    // noindex: the page stays reachable but says so, and leaves the sitemap.
+    expect((await call(board, "/club-public-profile/settings", { method: "PUT", clubId: club.clubId, body: { publicIndexingEnabled: false } })).status).toBe(200);
+    expect((await json(await pub(`/public/clubs/${club.slug}`))).data.indexable).toBe(false);
+    expect(await allSlugs()).not.toContain(club.slug);
+    expect((await json(await call(board, "/club-public-profile", { clubId: club.clubId }))).data.settings.publicIndexingEnabled).toBe(false);
+    await call(board, "/club-public-profile/settings", { method: "PUT", clubId: club.clubId, body: { publicIndexingEnabled: true } });
+    expect(await allSlugs()).toContain(club.slug);
+    // Suspension and switching the page off remove it at once.
+    await db.insert(clubPlatformStatus).values({ clubId: club.clubId, suspendedAt: new Date(), suspensionReason: "Test" });
+    expect(await allSlugs()).not.toContain(club.slug);
+    await db.delete(clubPlatformStatus).where(eq(clubPlatformStatus.clubId, club.clubId));
+    await call(board, "/club-public-profile/settings", { method: "PUT", clubId: club.clubId, body: { publicProfileEnabled: false } });
+    expect(await allSlugs()).not.toContain(club.slug);
+    await call(board, "/club-public-profile/settings", { method: "PUT", clubId: club.clubId, body: { publicProfileEnabled: true } });
+
+    process.env.PUBLIC_CLUB_SITEMAP_LIMIT_PER_HOUR = "2";
+    const ip = randomUUID();
+    const statuses: number[] = [];
+    for (let i = 0; i < 3; i++) statuses.push((await sitemap("", ip)).status);
+    expect(statuses).toEqual([200, 200, 429]);
+    delete process.env.PUBLIC_CLUB_SITEMAP_LIMIT_PER_HOUR;
   });
 
   it("rate limits failed lookups and all requests per client", async () => {

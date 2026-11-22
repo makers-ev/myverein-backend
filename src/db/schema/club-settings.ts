@@ -87,6 +87,9 @@ export const clubSettings = pgTable("club_settings", {
   // an effect while the page is enabled and published.
   publicProfileEnabled: boolean("public_profile_enabled").notNull().default(false),
   discoverable: boolean("discoverable").notNull().default(false),
+  // Wave 15 E5: search engines may index the live public page (website `noindex` otherwise) and it is listed in the club sitemap.
+  // Default on (PO decision); only effective while the page is live and the club is not suspended.
+  publicIndexingEnabled: boolean("public_indexing_enabled").notNull().default(true),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

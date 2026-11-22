@@ -99,7 +99,10 @@ describe("admin clubs (Wave 15 B7)", () => {
     expect((await call(other.founder, `/club-forms/${club.slug}/aufnahme`)).status).toBe(404);
     expect((await call(club.founder, `/club-forms/${other.slug}/aufnahme`)).status).toBe(200);
     const mine = (await json(await call(club.founder, "/my-clubs"))).data;
-    expect(mine.find((x: { clubId: string }) => x.clubId === club.clubId).suspended).toBe(true);
+    const row = mine.find((x: { clubId: string }) => x.clubId === club.clubId);
+    expect(row).toMatchObject({ suspended: true, suspension: { since: expect.any(String), note: "Bitte wende dich an den Vorstand." } });
+    expect(JSON.stringify(mine)).not.toContain("Missbrauch");
+    expect(mine.find((x: { clubId: string }) => x.clubId === other.clubId)).toBeUndefined();
     expect((await json(await call(admin, `/admin/clubs?q=${suffix}&status=suspended`))).data.map((x: { clubId: string }) => x.clubId)).toEqual([club.clubId]);
   });
 
@@ -126,6 +129,8 @@ describe("admin clubs (Wave 15 B7)", () => {
     expect(detail.status).toBe("active");
     expect(detail.statusHistory.map((h: { action: string }) => h.action)).toEqual(["unsuspend", "suspend"]);
     expect((await call(club.founder, "/club-members/me", { clubId: club.clubId })).status).toBe(200);
+    const mine = (await json(await call(club.founder, "/my-clubs"))).data;
+    expect(mine.find((x: { clubId: string }) => x.clubId === club.clubId)).toMatchObject({ suspended: false, suspension: null });
     const audits = await db.select().from(auditLog).where(and(eq(auditLog.clubId, club.clubId), eq(auditLog.subjectId, club.clubId)));
     expect(audits.map((a) => a.eventType)).toEqual(expect.arrayContaining(["admin.club_suspend", "admin.club_unsuspend"]));
   });

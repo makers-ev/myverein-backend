@@ -322,7 +322,7 @@ export const AUDIT_EVENTS = {
   "public_profile.update": spec(["changedFields", "clubId"]),
   "public_profile.publish": spec(["clubId", "contactConfirmed", "enabled"]),
   "public_profile.unpublish": spec(["clubId"]),
-  "public_profile.settings": spec(["clubId", "discoverable", "publicProfileEnabled"]),
+  "public_profile.settings": spec(["clubId", "discoverable", "publicIndexingEnabled", "publicProfileEnabled"]),
 } as const satisfies Record<string, AuditEventSpec>;
 
 export type AuditEventType = keyof typeof AUDIT_EVENTS;
