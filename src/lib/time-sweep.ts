@@ -14,7 +14,7 @@ import { MAX_ENTRY_HOURS } from "./time-tracking.js";
  * Sweep of running time entries (Wave 16), recurring job every 15 minutes.
  * T4: an entry still running `TIME_AUTO_CLOSE_HOURS` (default 24, 17-720) after its start is ended at `startedAt + 16 h`, stays `offen`,
  * is flagged `autoClosed`, audited (`time_entry.auto_close`, no actor) and the person is told to check it (`time.auto_closed`); it is never
- * confirmed automatically. Idempotent: the update only touches rows that are still running (and takes the same per-person advisory lock as
+ * confirmed automatically. T5: a reminder after 10 h of running time, see `remindLongRunningEntries`. Idempotent: the update only touches rows that are still running (and takes the same per-person advisory lock as
  * clock-out), and the notification is deduplicated by its delivery reference. Clubs suspended by the platform are skipped (Wave 15 B7).
  */
 
@@ -63,9 +63,44 @@ export async function autoCloseRunningEntries(now: Date = new Date(), onlyClubId
   return closed;
 }
 
-export async function sweepTimeEntries(now: Date = new Date(), onlyClubId?: string): Promise<{ autoClosed: number }> {
+/** Hours of running time after which the person is reminded once ("Du bist seit 10 Stunden eingestempelt"). */
+export const REMIND_AFTER_HOURS = 10;
+
+/**
+ * T5: one reminder per entry once it has been running for 10 h (optional, category `reminders`: switchable in the notification
+ * settings). The entry is claimed by setting `long_run_reminder_at` in a conditional update, so parallel sweeps send it once.
+ */
+export async function remindLongRunningEntries(now: Date = new Date(), onlyClubId?: string): Promise<number> {
+  const threshold = new Date(now.getTime() - REMIND_AFTER_HOURS * HOUR_MS);
+  const candidates = await db
+    .select({ id: timeEntries.id })
+    .from(timeEntries)
+    .where(and(isNull(timeEntries.endedAt), isNull(timeEntries.longRunReminderAt), lte(timeEntries.startedAt, threshold), clubActive, onlyClubId ? eq(timeEntries.clubId, onlyClubId) : undefined))
+    .orderBy(asc(timeEntries.startedAt))
+    .limit(BATCH);
+  let reminded = 0;
+  for (const candidate of candidates) {
+    try {
+      const [claimed] = await db
+        .update(timeEntries)
+        .set({ longRunReminderAt: now })
+        .where(and(eq(timeEntries.id, candidate.id), isNull(timeEntries.endedAt), isNull(timeEntries.longRunReminderAt)))
+        .returning();
+      if (!claimed) continue;
+      reminded += 1;
+      await notifyTimeEntry("long_running", claimed);
+    } catch (err) {
+      logger.error({ entryId: candidate.id, errName: (err as Error)?.name }, "[time] long-running reminder failed for an entry");
+    }
+  }
+  return reminded;
+}
+
+export async function sweepTimeEntries(now: Date = new Date(), onlyClubId?: string): Promise<{ autoClosed: number; reminded: number }> {
+  // Close first: an entry that is ended now needs no "still clocked in?" reminder any more.
   const autoClosed = await autoCloseRunningEntries(now, onlyClubId);
-  return { autoClosed };
+  const reminded = await remindLongRunningEntries(now, onlyClubId);
+  return { autoClosed, reminded };
 }
 
 export async function handleTimeSweep(_job: JobContext): Promise<void> {

@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubPlatformStatus } from "../db/schema/club-platform.js";
-import { messageDeliveries } from "../db/schema/communication.js";
+import { messageDeliveries, notificationPreferences } from "../db/schema/communication.js";
 import { timeEntries } from "../db/schema/event-extras.js";
 import { createEventFixture, HOUR, type EventFixture } from "../routes/event-test-support.js";
 import { timeEntryRoutes } from "../routes/time-tracking.js";
@@ -81,5 +81,40 @@ describe("time entry sweep: automatic end", () => {
     expect((await load(entry.id)).endedAt).toBeNull();
     await db.update(clubPlatformStatus).set({ suspendedAt: null }).where(eq(clubPlatformStatus.clubId, fx.clubId));
     expect(await sweepTimeEntries(new Date(), fx.clubId)).toMatchObject({ autoClosed: 1 });
+  });
+
+  it("reminds once after 10 h of running time, respects the reminders switch, and never silences the automatic end", async () => {
+    const inbox = (id: string, kind: string) => db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, `${id}#${kind}`), eq(messageDeliveries.channel, "in_app")));
+    const long = await running(fx.users.trainerA.clubMemberId, 11);
+    const short = await running(fx.users.member1.clubMemberId, 9);
+    expect(await sweepTimeEntries(new Date(), fx.clubId)).toEqual({ autoClosed: 0, reminded: 1 });
+    const notes = await inbox(long.id, "long_running");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ eventKey: "time.long_running", clubMemberId: fx.users.trainerA.clubMemberId });
+    expect((notes[0]!.content as { category: string; class: string })).toMatchObject({ category: "reminders", class: "optional" });
+    expect((await load(long.id)).longRunReminderAt).not.toBeNull();
+    expect(await inbox(short.id, "long_running")).toHaveLength(0);
+    // Once per entry, also with parallel sweeps.
+    const again = await Promise.all([sweepTimeEntries(new Date(), fx.clubId), sweepTimeEntries(new Date(), fx.clubId)]);
+    expect(again.map((r) => r.reminded)).toEqual([0, 0]);
+    expect(await inbox(long.id, "long_running")).toHaveLength(1);
+    // Reminders switched off: no push (the in-app inbox copy stays the source of truth, ADR-006); the automatic end (mandatory) still pushes.
+    await db.delete(timeEntries).where(eq(timeEntries.clubId, fx.clubId));
+    const prefs = await db.insert(notificationPreferences).values(["in_app", "push"].map((channel) => ({ userId: fx.users.member2.userId, category: "reminders", channel, enabled: false }))).returning();
+    try {
+      const quiet = await running(fx.users.member2.clubMemberId, 12);
+      expect((await sweepTimeEntries(new Date(), fx.clubId)).reminded).toBe(1);
+      const pushOf = async (id: string, kind: string) => (await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, `${id}#${kind}`), eq(messageDeliveries.channel, "push"))))[0];
+      expect((await pushOf(quiet.id, "long_running"))?.status).toBe("skipped_optout");
+      const stuckEntry = await running(fx.users.member1.clubMemberId, 30);
+      await db.update(timeEntries).set({ clubMemberId: fx.users.member2.clubMemberId, startedAt: hoursAgo(40) }).where(eq(timeEntries.id, stuckEntry.id));
+      await db.update(timeEntries).set({ endedAt: hoursAgo(11) }).where(eq(timeEntries.id, quiet.id));
+      expect((await sweepTimeEntries(new Date(), fx.clubId)).autoClosed).toBe(1);
+      expect(await inbox(stuckEntry.id, "auto_closed")).toHaveLength(1);
+      expect((await pushOf(stuckEntry.id, "auto_closed"))?.status).not.toBe("skipped_optout");
+      expect(await inbox(stuckEntry.id, "long_running")).toHaveLength(0);
+    } finally {
+      for (const p of prefs) await db.delete(notificationPreferences).where(eq(notificationPreferences.id, p.id));
+    }
   });
 });
