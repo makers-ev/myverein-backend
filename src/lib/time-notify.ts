@@ -8,11 +8,12 @@ import type { NotifyResult } from "./notify/types.js";
 
 /**
  * Notifications about the person's own time entry (Wave 16), through the Wave 9 dispatcher (in-app inbox + push; push text is generic).
- * `long_running` (T5) is an optional reminder in the `reminders` category (switchable in the notification settings); `auto_closed` (T4)
+ * `long_running` (T5) is an optional reminder in the `reminders` category (switchable in the notification settings); `auto_closed` (T4),
+ * `auto_discarded` (T4, entries older than a year)
  * and `closed_by_other` (T3) change the person's own record and are mandatory (mail fallback). Idempotent through `refId` = `<entry>#<kind>`.
  * Push data: `{ type: "time_entry", timeEntryId }` (see `pushDataFor`).
  */
-export type TimeNotice = "long_running" | "auto_closed" | "closed_by_other";
+export type TimeNotice = "long_running" | "auto_closed" | "auto_discarded" | "closed_by_other";
 
 export async function notifyTimeEntry(kind: TimeNotice, entry: Pick<TimeEntryRow, "id" | "clubId" | "clubMemberId" | "startedAt" | "endedAt">): Promise<NotifyResult | null> {
   const lang = await clubMailLanguage(db, entry.clubId);
@@ -27,6 +28,12 @@ export async function notifyTimeEntry(kind: TimeNotice, entry: Pick<TimeEntryRow
           category: "reminders" as const,
           template: "reminder" as const,
         }
+      : kind === "auto_discarded"
+        ? {
+            title: tr(lang, "Dein Zeiteintrag wurde verworfen", "Your time entry was discarded"),
+            body: tr(lang, `Dein Eintrag vom ${since} lief über ein Jahr und wurde verworfen. Zeiten, die älter als ein Jahr sind, können nicht mehr erfasst werden.`, `Your entry from ${since} ran for more than a year and was discarded. Times older than a year can no longer be recorded.`),
+            template: "notice" as const,
+          }
       : kind === "auto_closed"
         ? {
             title: tr(lang, "Dein Zeiteintrag wurde automatisch beendet", "Your time entry was ended automatically"),

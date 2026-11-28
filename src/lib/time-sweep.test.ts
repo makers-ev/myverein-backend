@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { db } from "../db/client.js";
@@ -10,7 +10,7 @@ import { createEventFixture, HOUR, type EventFixture } from "../routes/event-tes
 import { timeEntryRoutes } from "../routes/time-tracking.js";
 import { defaultRegistry } from "./jobs/registry.js";
 import { registerAllJobs } from "./jobs/handlers.js";
-import { autoCloseHours, sweepTimeEntries, TIME_SWEEP_JOB_TYPE } from "./time-sweep.js";
+import { autoCloseHours, sweepTimeEntries, TIME_SWEEP_JOB_TYPE, warnOnInvalidTimeConfig } from "./time-sweep.js";
 
 /** Wave 16 T4: running entries are ended after TIME_AUTO_CLOSE_HOURS at start + 16 h, flagged, audited and announced; idempotent; suspended clubs skipped. */
 describe("time entry sweep: automatic end", () => {
@@ -20,6 +20,7 @@ describe("time entry sweep: automatic end", () => {
     (await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId, startedAt: hoursAgo(hours), source: "stempeln", status: "offen" }).returning())[0]!;
   const load = async (id: string) => (await db.select().from(timeEntries).where(eq(timeEntries.id, id)))[0]!;
   const original = process.env.TIME_AUTO_CLOSE_HOURS;
+  const originalBatch = process.env.TIME_SWEEP_BATCH;
 
   beforeAll(async () => {
     fx = await createEventFixture("timesweep", [["/time-entries", timeEntryRoutes]]);
@@ -27,6 +28,8 @@ describe("time entry sweep: automatic end", () => {
   afterEach(async () => {
     if (original === undefined) delete process.env.TIME_AUTO_CLOSE_HOURS;
     else process.env.TIME_AUTO_CLOSE_HOURS = original;
+    if (originalBatch === undefined) delete process.env.TIME_SWEEP_BATCH;
+    else process.env.TIME_SWEEP_BATCH = originalBatch;
     await db.delete(timeEntries).where(eq(timeEntries.clubId, fx.clubId));
     await db.delete(clubPlatformStatus).where(eq(clubPlatformStatus.clubId, fx.clubId));
   });
@@ -87,7 +90,7 @@ describe("time entry sweep: automatic end", () => {
     const inbox = (id: string, kind: string) => db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, `${id}#${kind}`), eq(messageDeliveries.channel, "in_app")));
     const long = await running(fx.users.trainerA.clubMemberId, 11);
     const short = await running(fx.users.member1.clubMemberId, 9);
-    expect(await sweepTimeEntries(new Date(), fx.clubId)).toEqual({ autoClosed: 0, reminded: 1 });
+    expect(await sweepTimeEntries(new Date(), fx.clubId)).toEqual({ autoClosed: 0, discarded: 0, reminded: 1 });
     const notes = await inbox(long.id, "long_running");
     expect(notes).toHaveLength(1);
     expect(notes[0]).toMatchObject({ eventKey: "time.long_running", clubMemberId: fx.users.trainerA.clubMemberId });
@@ -116,5 +119,41 @@ describe("time entry sweep: automatic end", () => {
     } finally {
       for (const p of prefs) await db.delete(notificationPreferences).where(eq(notificationPreferences.id, p.id));
     }
+  });
+
+  it("discards entries older than a year instead of asking for confirmation, with its own message", async () => {
+    const ancient = await running(fx.users.trainerA.clubMemberId, 400 * 24);
+    expect(await sweepTimeEntries(new Date(), fx.clubId)).toMatchObject({ autoClosed: 0, discarded: 1 });
+    const row = await load(ancient.id);
+    expect(row).toMatchObject({ status: "abgelehnt", autoClosed: true });
+    expect(row.endedAt!.getTime()).toBe(ancient.startedAt.getTime() + 16 * HOUR);
+    const notes = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, `${ancient.id}#auto_discarded`), eq(messageDeliveries.channel, "in_app")));
+    expect(notes).toHaveLength(1);
+    expect((notes[0]!.content as { body: string }).body).toContain("lief über ein Jahr und wurde verworfen");
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.clubId, fx.clubId), eq(auditLog.eventType, "time_entry.auto_close"), sql`${auditLog.payload}->>'entryId' = ${ancient.id}`));
+    expect(audit!.payload).toMatchObject({ entryId: ancient.id, discarded: true });
+  });
+
+  it("throttles to TIME_SWEEP_BATCH per run, finishes in the next runs, never notifies twice, no reminder for entries due to close", async () => {
+    process.env.TIME_SWEEP_BATCH = "2";
+    const stuckOnes = [];
+    for (const who of [fx.users.trainerA, fx.users.member1, fx.users.member2]) stuckOnes.push(await running(who.clubMemberId, 30));
+    expect(await sweepTimeEntries(new Date(), fx.clubId)).toEqual({ autoClosed: 2, discarded: 0, reminded: 0 });
+    expect(await sweepTimeEntries(new Date(), fx.clubId)).toEqual({ autoClosed: 1, discarded: 0, reminded: 0 });
+    expect(await sweepTimeEntries(new Date(), fx.clubId)).toEqual({ autoClosed: 0, discarded: 0, reminded: 0 });
+    for (const e of stuckOnes) {
+      const rows = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, `${e.id}#auto_closed`), eq(messageDeliveries.channel, "in_app")));
+      expect(rows).toHaveLength(1);
+      expect(await db.select().from(messageDeliveries).where(eq(messageDeliveries.refId, `${e.id}#long_running`))).toHaveLength(0);
+    }
+  });
+
+  it("warns at startup about invalid settings instead of falling back silently", () => {
+    process.env.TIME_AUTO_CLOSE_HOURS = "10";
+    process.env.TIME_SWEEP_BATCH = "0";
+    expect(warnOnInvalidTimeConfig()).toEqual(["TIME_AUTO_CLOSE_HOURS", "TIME_SWEEP_BATCH"]);
+    process.env.TIME_AUTO_CLOSE_HOURS = "48";
+    process.env.TIME_SWEEP_BATCH = "50";
+    expect(warnOnInvalidTimeConfig()).toEqual([]);
   });
 });

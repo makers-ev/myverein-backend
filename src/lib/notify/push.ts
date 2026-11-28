@@ -143,6 +143,7 @@ const GENERIC_TEXT_BY_KEY: Record<string, string> = {
   "absence.withdrawn": "Abwesenheitsmeldung zurückgezogen",
   "time.long_running": "Noch eingestempelt?",
   "time.auto_closed": "Zeiteintrag beendet – bitte prüfen",
+  "time.auto_discarded": "Zeiteintrag verworfen",
   "time.closed_by_other": "Zeiteintrag beendet – bitte prüfen",
 };
 
@@ -170,6 +171,7 @@ const GENERIC_TEXT_BY_KEY_EN: Record<string, string> = {
   "absence.withdrawn": "Absence report withdrawn",
   "time.long_running": "Still clocked in?",
   "time.auto_closed": "Time entry ended – please check",
+  "time.auto_discarded": "Time entry discarded",
   "time.closed_by_other": "Time entry ended – please check",
 };
 
