@@ -1,5 +1,6 @@
 import { and, asc, eq, gte, inArray, isNotNull, isNull, lte, or } from "drizzle-orm";
 
+import { member } from "../auth/auth-schema.js";
 import { db } from "../db/client.js";
 import { wardEventResponses } from "../db/schema/absences.js";
 import { availabilityExceptions, availabilitySlots } from "../db/schema/availability.js";
@@ -72,13 +73,21 @@ async function calendarPool(clubId: string, calendar: Pick<CalendarRow, "id" | "
   // Role grants: holders of the role (still in term); `mitglied` is the implicit role of every member with an account.
   const explicitRoles = roleTypes.filter((r) => r !== "mitglied");
   if (explicitRoles.length > 0) {
-    const holders = await db.select({ memberId: clubRoles.memberId }).from(clubRoles).where(and(inArray(clubRoles.roleType, explicitRoles), or(isNull(clubRoles.termEndsAt), gte(clubRoles.termEndsAt, today))));
+    const holders = await db
+      .select({ memberId: clubRoles.memberId })
+      .from(clubRoles)
+      .innerJoin(member, eq(member.id, clubRoles.memberId))
+      .where(and(eq(member.organizationId, clubId), inArray(clubRoles.roleType, explicitRoles), or(isNull(clubRoles.termEndsAt), gte(clubRoles.termEndsAt, today))));
     for (const h of holders) accountIds.add(h.memberId);
   }
   // Department grants: department members, and (as the visibility rule does) holders of a department-scoped role of that department.
   if (departmentIds.length > 0) {
     rows.push(...(await departmentMembers(clubId, departmentIds, today)));
-    const leads = await db.select({ memberId: clubRoles.memberId }).from(clubRoles).where(and(inArray(clubRoles.departmentId, departmentIds), inArray(clubRoles.roleType, [...DEPARTMENT_SCOPED_ROLES])));
+    const leads = await db
+      .select({ memberId: clubRoles.memberId })
+      .from(clubRoles)
+      .innerJoin(member, eq(member.id, clubRoles.memberId))
+      .where(and(eq(member.organizationId, clubId), inArray(clubRoles.departmentId, departmentIds), inArray(clubRoles.roleType, [...DEPARTMENT_SCOPED_ROLES])));
     for (const l of leads) accountIds.add(l.memberId);
   }
   if (roleTypes.includes("mitglied")) rows.push(...(await db.select(poolColumns).from(clubMembers).where(and(eq(clubMembers.clubId, clubId), isNotNull(clubMembers.memberId))).limit(MAX_POOL * 2)));

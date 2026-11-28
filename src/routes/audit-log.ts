@@ -1,5 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
-import { and, count, desc, eq, gte, like, lte, sql, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, gte, like, lte, or, sql, type SQL } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 
@@ -68,7 +68,9 @@ function upperBound(to: string): Date {
 
 function conditionsOf(clubId: string, f: Filters, clubMemberId?: string): SQL[] {
   const conditions: SQL[] = [eq(auditLog.clubId, clubId)];
-  if (clubMemberId) conditions.push(eq(auditLog.subjectMemberId, clubMemberId));
+  // Member-centric view: events about the person, and reads that named several people at once (`clubMemberIds` in the payload,
+  // e.g. member_field.sensitive_read via the credentials overview, availability.sensitive_read -- Wave 16 review).
+  if (clubMemberId) conditions.push(or(eq(auditLog.subjectMemberId, clubMemberId), sql`(${auditLog.payload} -> 'clubMemberIds') ? ${clubMemberId}`)!);
   if (f.subjectId) conditions.push(eq(auditLog.subjectId, f.subjectId));
   if (f.actorId) conditions.push(eq(auditLog.actorUserId, f.actorId));
   if (f.type) {

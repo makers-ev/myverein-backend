@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { db } from "../db/client.js";
@@ -8,6 +9,7 @@ import { calendarVisibility } from "../db/schema/calendar-visibility.js";
 import { calendars } from "../db/schema/calendars.js";
 import { clubMemberDepartments } from "../db/schema/club-members.js";
 import { eventAttendees } from "../db/schema/event-attendees.js";
+import { auditLogRoutes } from "./audit-log.js";
 import { createEventFixture, type EventFixture, type TestUser } from "./event-test-support.js";
 
 /** Wave 16 T6: "Wer hat Zeit?" while planning a calendar event -- counters for the planners, names of the unavailable only for calendar managers. */
@@ -51,7 +53,19 @@ describe("GET /events/availability-hints", () => {
     // The read with names is audited (ids and counts only).
     const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.clubId, fx.clubId), eq(auditLog.eventType, "availability.sensitive_read")));
     expect(audit).toMatchObject({ actorUserId: fx.users.board.userId });
-    expect(audit!.payload).toEqual({ clubId: fx.clubId, calendarId: fx.calA, eventId: null, count: 2 });
+    expect(audit!.payload).toEqual({ clubId: fx.clubId, calendarId: fx.calA, eventId: null, count: 2, clubMemberIds: [fx.users.leaderA.clubMemberId, fx.users.member2.clubMemberId], idsTruncated: false });
+  });
+
+  it("shows the read in the member-centric audit view of each named person (who saw my data)", async () => {
+    const app = new Hono();
+    app.route("/audit-log", auditLogRoutes);
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+    const res = await app.request(`/audit-log/members/${fx.users.member2.clubMemberId}?kind=read&clubId=${fx.clubId}`, { headers: { cookie: fx.users.board.cookie } });
+    expect(res.status).toBe(200);
+    const rows = ((await res.json()) as { data: Array<{ eventType: string }> }).data;
+    expect(rows.map((r) => r.eventType)).toContain("availability.sensitive_read");
+    const none = await app.request(`/audit-log/members/${fx.users.member1.clubMemberId}?kind=read&clubId=${fx.clubId}`, { headers: { cookie: fx.users.board.cookie } });
+    expect(((await none.json()) as { data: Array<{ eventType: string }> }).data.map((r) => r.eventType)).not.toContain("availability.sensitive_read");
   });
 
   it("uses winter time correctly and treats a window without end as its start", async () => {

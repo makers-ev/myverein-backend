@@ -31,6 +31,9 @@ const hook = (result: { success: boolean; error?: { issues: unknown } }) => {
 const instant = z.string().datetime({ offset: true });
 const query = z.object({ startsAt: instant, endsAt: instant.optional(), calendarId: z.uuid(), eventId: z.uuid().optional() });
 
+/** At most this many people are named in one audit entry (like `member_field.sensitive_read`); `idsTruncated` flags a cut list. */
+const AUDIT_MAX_IDS = 200;
+
 export const eventAvailabilityHintRoutes = new Hono<ClubEnv>();
 
 eventAvailabilityHintRoutes.get(
@@ -67,7 +70,7 @@ eventAvailabilityHintRoutes.get(
 
     const hints = await availabilityHints(clubId, calendar, { startsAt, endsAt, eventId: q.eventId ?? null }, withNames);
     if (withNames && hints.unavailablePeople.length > 0) {
-      await writeAudit(db, { eventType: "availability.sensitive_read", subjectId: null, payload: { clubId, calendarId: calendar.id, eventId: q.eventId ?? null, count: hints.unavailablePeople.length } });
+      await writeAudit(db, { eventType: "availability.sensitive_read", subjectId: null, payload: { clubId, calendarId: calendar.id, eventId: q.eventId ?? null, count: hints.unavailablePeople.length, clubMemberIds: hints.unavailablePeople.slice(0, AUDIT_MAX_IDS).map((p) => p.clubMemberId), idsTruncated: hints.unavailablePeople.length > AUDIT_MAX_IDS } });
     }
     c.header("Cache-Control", "private, no-store");
     return c.json({
