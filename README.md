@@ -1754,6 +1754,16 @@ Best effort after the commit (`notifySafely`), texts in the club's mail language
 
 The enquiring person gets **no** mail (the public form must not send mail to arbitrary addresses).
 
+### L. Time tracking (Wave 16)
+
+| Event key | Trigger | Recipients | Class / channels |
+|---|---|---|---|
+| `time.long_running` (`<entry>#long_running`) | Sweep: an entry has been running for 10 h (once per entry) | the person | optional, category `reminders` (switch "Erinnerungen"), in-app + push; push text `Noch eingestempelt?` |
+| `time.auto_closed` (`<entry>#auto_closed`) | Sweep: running for `TIME_AUTO_CLOSE_HOURS`, ended at start + 16 h | the person | mandatory, in-app + push + mail; push text `Zeiteintrag beendet – bitte prüfen` |
+| `time.closed_by_other` (`<entry>#closed_by_other`) | `POST /time-entries/:id/close` or reject of a stuck running entry | the person | mandatory, in-app + push + mail; same push text |
+
+Push data `{ type: "time_entry", timeEntryId, clubId }` (ids only): the app opens time tracking.
+
 ### States that deliberately send nothing
 
 Event created; event edit that changes only title, description, category or capacity; change of an already cancelled event; delete of an event without RSVP rows; `notify:false` (audited); RSVP, cancel of an RSVP (audit only; the person who moves up from the waitlist is told, see #36); meeting created, answer given, invitee removed, deleting a meeting that was held, cancelled or has no invitees; announcement draft, cancelled, withdrawn (no retraction notice, the entry just disappears from the inbox); member status changes, role and guardian-link changes, profile edits, imports; loans and keys: only the actor's own return/extension and key action, or a club with `notify_handover` off (otherwise see H); direct exits (booked by the board) at the effective day; dormant, left and deceased members as audience; empty audience; mandatory classes never get an unsubscribe link; account-less members get no in-app and no push.
@@ -1845,6 +1855,7 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `circular_not_allowed` | 422 | `lib/ballots.ts` |
 | `circular_without_meeting` | 422 | `lib/ballots.ts` |
 | `circular_yes_no_only` | 422 | `lib/ballots.ts` |
+| `closed_by_you` | 403 | `routes/time-tracking.ts` |
 | `closes_at_required` | 422 | `lib/ballots.ts` |
 | `club_already_suspended` | 409 | `routes/admin-clubs.ts` |
 | `club_child_application_limit` | 409 | `lib/form-children.ts` |
@@ -1983,7 +1994,9 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `not_editable` | 422 | `routes/retention-policies.ts` |
 | `not_elected` | 409 | `lib/elections.ts` |
 | `not_eligible` | 403 | `lib/ballots.ts`, `routes/ballots.ts` |
+| `not_overdue` | 409 | `routes/time-tracking.ts` |
 | `not_quorate` | 409 | `lib/ballots.ts` |
+| `not_running` | 409 | `routes/time-tracking.ts` |
 | `not_service_provider` | 422 | `routes/external-access.ts` |
 | `nothing_to_add` | 422 | `lib/assembly-invitation.ts` |
 | `notice_length` | 422 | `lib/privacy-notice.ts` |
@@ -2302,7 +2315,8 @@ Every client-facing error of this API has the body `{ "error": { "code": "...", 
 | `/time-entries` | POST | same | A forgotten stamp: `{ startedAt, endedAt, eventId? }`; `422` for end before start / future / more than 16 hours / older than 366 days, `409 entry_overlap`. Stays `offen` |
 | `/time-entries/suggestions`, `/time-entries/from-event` | GET, POST | same | Proposals from attendance lists: events that ended where the caller is a supervisor or was marked present, without an entry yet. Nothing is created automatically; `POST { eventId }` takes a proposal over (source `aus_termin`, the event's times; `404` without proposal, `409 entry_exists`) |
 | `/time-entries/:id` | PATCH, DELETE | same (no rate needed for a running entry or for DELETE) | Change or delete an own **open** entry (`409 entry_decided` afterwards). Wave 16: a **running** entry is ended with `PATCH { endedAt }` (rules of clock-out; `startedAt` may be sent too, then the normal window rules apply); without `endedAt` it stays `409 running`. `DELETE` of a running entry is the documented way out ("Eintrag verwerfen"). Audit `time_entry.update` (`corrected`, `endedRunning`) |
-| `/time-entries/:id/confirm`, `/time-entries/:id/reject` | POST | session + `clubGuard` (`time:write`, checked first; department leads only for members of their departments, others `404`) | Decide about a finished open entry. **Nobody decides about their own entry** (`403 no_self_decision`); `409 entry_decided`. Audit `time_entry.confirm|reject` |
+| `/time-entries/:id/confirm`, `/time-entries/:id/reject` | POST | session + `clubGuard` (`time:write`, checked first; department leads only for members of their departments, others `404`) | Decide about a finished open entry. **Nobody decides about their own entry** (`403 no_self_decision`); `409 entry_decided`; a running entry `409 running` -- except (Wave 16) **reject** of a running entry older than 16 h, which ends it at `startedAt + 16 h` (`closedByOther`) so it no longer blocks the person, who is notified (`time.closed_by_other`). Whoever closed the entry (`/close`) cannot confirm it (`403 closed_by_you`) until the owner edited the times; another `time:write` holder can. Audit `time_entry.confirm|reject` (`endedRunning`) |
+| `/time-entries/:id/close` | POST | session + `clubGuard` (`time:write`, checked first; same scope as confirm, others `404`) | Wave 16 T3. Ends someone else's entry that has been **running for more than 16 h**: body `{ endedAt }` (required), `startedAt < endedAt <= startedAt + 16 h` (`422 invalid_time` / `too_long`), `409 entry_overlap`; `403 no_self_decision` for one's own entry (use clock-out), `409 not_running`, `409 not_overdue` (running 16 h or less), `409 entry_decided`. Serialized with the person's own clock-out (advisory lock). The entry stays `offen` with `corrected` + `closedByOther`; audit `time_entry.close` (actor = caller, `minutes`); the person gets `time.closed_by_other` (mandatory, in-app + push + mail) |
 | `/rate-cards` | GET, POST, `/:id` PATCH, DELETE | session + `clubGuard` (`time:read_rates` for everything, confidential) | Hourly rates: `{ clubMemberId \| roleType, hourlyRateCents, validFrom, validUntil? }` (exactly one target, `validUntil >= validFrom`). A personal card beats a role card; the newest `validFrom` wins |
 | `/time-report` | GET | session + `clubGuard` (`time:write` for hours of the scope, `time:read_rates` for amounts) | Hours of **confirmed** entries for `from`/`to` (Europe/Berlin calendar days, default 30 days, max 366). All filters run in SQL; a report over more than 20,000 entries is refused with `422 report_too_large` (all formats, never truncated), narrow the period or selection. Event titles of calendars the viewer cannot see show as `Termin`. Responses are `Cache-Control: private, no-store`. Filters: `departmentId`, `clubMemberIds` (comma list, max 100), `roleTypes` (comma list), `eventId`; `groupBy=person\|event\|person_event` (default `person`); `format=json\|csv\|xlsx`. JSON: `rows` (grouped, with `eventTitle`/`eventDate` for event groupings), `people` (always per person), `totals` (`minutes`, `hours`, `amountCents`). With `time:read_rates`: `rateCents` (when constant), `amountCents` = sum of `round(minutes x rate / 60)` per entry, `rateMissing`; department leads get hours of their own departments only, never amounts (ids outside the scope or club just yield no rows). CSV `stundenbericht.csv` and XLSX `stundenbericht.xlsx` (sheet "Stundenbericht", note "Berechnungsgrundlage, keine Abrechnung", columns Name, Rolle(n), Termin, Datum, Stunden, plus Satz (EUR/h) and Betrag (EUR) and Satz fehlt only with `time:read_rates`, totals row) are formula-escaped, `Cache-Control: private, no-store`; audit `time_report.export` (format and row count, no names). XLSX is generated server-side with `fflate` (no template, no network). A calculation basis, not a payment |
 | `/time-report/people` | GET | same as `/time-report` | Selector data for the report (`from`/`to` as above): `truncated` (list cut at 1,000 people / 300 events), `people` (in-scope members with confirmed hours in the period; with `time:read_rates` also members with an applicable rate today), `roleTypes` present among them, `events` with confirmed hours |

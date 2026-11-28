@@ -4,7 +4,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema/audit-log.js";
 import { clubMemberDepartments } from "../db/schema/club-members.js";
+import { messageDeliveries } from "../db/schema/communication.js";
 import { timeEntries } from "../db/schema/event-extras.js";
+import { pushDataFor } from "../lib/notify/push.js";
 import { createEventFixture, HOUR, type EventFixture, type TestUser } from "./event-test-support.js";
 import { timeEntryRoutes } from "./time-tracking.js";
 
@@ -145,5 +147,56 @@ describe("a forgotten clock-in is never a dead end", () => {
     expect((await call(m, `/time-entries/${foreign.id}`, "DELETE")).status).toBe(404);
     await clear(m);
     await clear(fx.users.trainerA);
+  });
+
+  it("keeps closing someone else's entry to time:write in scope, never one's own, only stuck entries; the closer does not confirm", async () => {
+    const member = fx.users.trainerA;
+    await clear(member);
+    const codeOf = async (res: Response) => (await fx.json(res)).error.details.code;
+    const endAt = (e: { startedAt: Date }, h: number) => ({ endedAt: new Date(e.startedAt.getTime() + h * HOUR).toISOString() });
+    const entry = await stuck(member, 30);
+    // Plain members and trainers: 403 before anything is looked up; an unknown id: 404; a missing end: 422.
+    expect((await call(fx.users.member1, `/time-entries/${entry.id}/close`, "POST", endAt(entry, 1))).status).toBe(403);
+    expect((await call(fx.users.board, `/time-entries/${crypto.randomUUID()}/close`, "POST", endAt(entry, 1))).status).toBe(404);
+    expect((await call(fx.users.board, `/time-entries/${entry.id}/close`, "POST", {})).status).toBe(422);
+    // Department lead of A: not for a member of department B (404, existence not leaked).
+    const foreign = await fx.addAccountless("Abteilung B", { departmentId: fx.deptB });
+    const [foreignEntry] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: foreign, startedAt: hoursAgo(30), source: "stempeln", status: "offen" }).returning();
+    expect((await call(fx.users.leaderA, `/time-entries/${foreignEntry!.id}/close`, "POST", endAt(foreignEntry!, 1))).status).toBe(404);
+    // Own entry: use clock-out.
+    const ownStuck = (await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: fx.users.leaderA.clubMemberId, startedAt: hoursAgo(30), source: "stempeln", status: "offen" }).returning())[0]!;
+    let res = await call(fx.users.leaderA, `/time-entries/${ownStuck.id}/close`, "POST", endAt(ownStuck, 1));
+    expect([res.status, await codeOf(res)]).toEqual([403, "no_self_decision"]);
+    expect((await call(fx.users.leaderA, `/time-entries/${ownStuck.id}/reject`, "POST")).status).toBe(403);
+    // Not stuck yet: not_overdue; too long an end: too_long.
+    const fresh = await stuck(fx.users.member2, 3);
+    res = await call(fx.users.board, `/time-entries/${fresh.id}/close`, "POST", endAt(fresh, 1));
+    expect([res.status, await codeOf(res)]).toEqual([409, "not_overdue"]);
+    res = await call(fx.users.board, `/time-entries/${fresh.id}/reject`, "POST");
+    expect([res.status, await codeOf(res)]).toEqual([409, "running"]);
+    res = await call(fx.users.leaderA, `/time-entries/${entry.id}/close`, "POST", endAt(entry, 17));
+    expect([res.status, await codeOf(res)]).toEqual([422, "too_long"]);
+    // The lead of A closes; a second close: not_running; audited with the actor; the person is notified (in-app, push data type time_entry).
+    res = await call(fx.users.leaderA, `/time-entries/${entry.id}/close`, "POST", endAt(entry, 5));
+    expect(res.status).toBe(200);
+    expect((await fx.json(res)).data).toMatchObject({ minutes: 300, corrected: true, closedByOther: true, status: "offen" });
+    res = await call(fx.users.board, `/time-entries/${entry.id}/close`, "POST", endAt(entry, 6));
+    expect([res.status, await codeOf(res)]).toEqual([409, "not_running"]);
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.clubId, fx.clubId), eq(auditLog.eventType, "time_entry.close"))).orderBy(desc(auditLog.createdAt)).limit(1);
+    expect(audit).toMatchObject({ actorUserId: fx.users.leaderA.userId, subjectMemberId: member.clubMemberId });
+    expect(audit!.payload).toMatchObject({ entryId: entry.id, minutes: 300 });
+    const notes = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, `${entry.id}#closed_by_other`), eq(messageDeliveries.channel, "in_app")));
+    expect(notes.map((n) => n.clubMemberId)).toEqual([member.clubMemberId]);
+    expect(pushDataFor("time.closed_by_other", `${entry.id}#closed_by_other`, null, fx.clubId, false)).toMatchObject({ type: "time_entry", timeEntryId: entry.id });
+    // The closer does not confirm it; the board does; once the owner edits the times, the closer may confirm again.
+    res = await call(fx.users.leaderA, `/time-entries/${entry.id}/confirm`, "POST");
+    expect([res.status, await codeOf(res)]).toEqual([403, "closed_by_you"]);
+    const again = await stuck(member, 25);
+    expect((await call(fx.users.leaderA, `/time-entries/${again.id}/close`, "POST", endAt(again, 2))).status).toBe(200);
+    expect((await call(member, `/time-entries/${again.id}`, "PATCH", endAt(again, 3))).status).toBe(200);
+    expect((await call(fx.users.leaderA, `/time-entries/${again.id}/confirm`, "POST")).status).toBe(200);
+    expect((await call(fx.users.board, `/time-entries/${entry.id}/confirm`, "POST")).status).toBe(200);
+    for (const id of [foreignEntry!.id, ownStuck.id, fresh.id]) await db.delete(timeEntries).where(eq(timeEntries.id, id));
+    await clear(member);
   });
 });

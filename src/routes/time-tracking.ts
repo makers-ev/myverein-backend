@@ -20,6 +20,7 @@ import { buildCsv } from "../lib/member-csv.js";
 import { buildXlsx, type XlsxCell } from "../lib/xlsx.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
 import { assertEntryWindow, berlinDayStart, isCorrection, isOverdue, maxEndOf, mayTrackTime, assertNoOverlap, runningEnd, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
+import { notifyTimeEntry } from "../lib/time-notify.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -345,30 +346,76 @@ timeEntryRoutes.delete("/:id", async (c) => {
   return c.body(null, 204);
 });
 
-/** Confirm or reject (never one's own entry). */
+/**
+ * Confirm or reject (never one's own entry). Wave 16 T3: a RUNNING entry older than 16 h may be rejected -- it is ended at
+ * `startedAt + 16 h` so it no longer blocks the person; confirming a running entry stays 409 `running`. Whoever closed someone else's
+ * entry does not confirm it too (403 `closed_by_you`): the times they chose need a second person or the owner's edit.
+ */
 function decide(status: "bestaetigt" | "abgelehnt") {
   return async (c: Context<ClubEnv>) => {
     const clubId = c.get("clubId");
     const id = c.req.param("id") ?? "";
     if (!isUuid(id)) throw new NotFoundError("Time entry not found");
     const roles = c.get("clubRoleTypes");
+    const userId = c.get("user").id;
     const scope = await timeScopeOf(clubId, roles, c.get("membership").id);
     const own = await ownClubMemberRow(clubId, c.get("membership").id);
+    let endedRunning = false;
     const row = await db.transaction(async (tx) => {
       const [entry] = await tx.select().from(timeEntries).where(and(eq(timeEntries.id, id), eq(timeEntries.clubId, clubId))).for("update");
       if (!entry || !inScope(scope, entry.clubMemberId)) throw new NotFoundError("Time entry not found");
       if (own && entry.clubMemberId === own.id) throw new ForbiddenError("Nobody decides about their own entry", { details: { code: "no_self_decision" } });
-      if (entry.endedAt === null) throw new ConflictError("The entry is still running", { details: { code: "running" } });
       if (entry.status !== "offen") throw new ConflictError("The entry was already decided", { details: { code: "entry_decided" } });
-      const [updated] = await tx.update(timeEntries).set({ status, confirmedBy: c.get("user").id, confirmedAt: new Date() }).where(eq(timeEntries.id, entry.id)).returning();
-      await writeAudit(tx, { eventType: status === "bestaetigt" ? "time_entry.confirm" : "time_entry.reject", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId } });
+      const now = new Date();
+      endedRunning = entry.endedAt === null && status === "abgelehnt" && isOverdue(entry, now);
+      if (entry.endedAt === null && !endedRunning) throw new ConflictError("The entry is still running", { details: { code: "running" } });
+      if (status === "bestaetigt" && entry.closedBy !== null && entry.closedBy === userId) throw new ForbiddenError("You set the end of this entry; somebody else confirms it", { details: { code: "closed_by_you" } });
+      const ending = endedRunning ? { endedAt: maxEndOf(entry.startedAt, now), closedBy: userId, closedByOther: true } : {};
+      const [updated] = await tx.update(timeEntries).set({ status, confirmedBy: userId, confirmedAt: now, ...ending }).where(eq(timeEntries.id, entry.id)).returning();
+      await writeAudit(tx, { eventType: status === "bestaetigt" ? "time_entry.confirm" : "time_entry.reject", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId, endedRunning } });
       return updated!;
     });
+    if (endedRunning) await notifyTimeEntry("closed_by_other", row);
     return c.json({ data: shapeEntry(row) });
   };
 }
 timeEntryRoutes.post("/:id/confirm", needsPermission("time:write"), decide("bestaetigt"));
 timeEntryRoutes.post("/:id/reject", needsPermission("time:write"), decide("abgelehnt"));
+
+/**
+ * Wave 16 T3: a board member / department lead (`time:write`, same scope as confirming) ends someone else's entry that has been
+ * running for more than 16 h, with an explicit end (`startedAt < endedAt <= startedAt + 16 h`). Never one's own entry (use clock-out).
+ * The entry stays `offen`, is flagged `corrected` + `closedByOther`, audited with the actor, and the person is notified.
+ */
+timeEntryRoutes.post("/:id/close", needsPermission("time:write"), zValidator("json", z.object({ endedAt: isoInstant }), hook), async (c) => {
+  const clubId = c.get("clubId");
+  const id = c.req.param("id") ?? "";
+  if (!isUuid(id)) throw new NotFoundError("Time entry not found");
+  const { endedAt: rawEnd } = c.req.valid("json");
+  const userId = c.get("user").id;
+  const scope = await timeScopeOf(clubId, c.get("clubRoleTypes"), c.get("membership").id);
+  const own = await ownClubMemberRow(clubId, c.get("membership").id);
+  const row = await db.transaction(async (tx) => {
+    const [peek] = await tx.select({ clubMemberId: timeEntries.clubMemberId }).from(timeEntries).where(and(eq(timeEntries.id, id), eq(timeEntries.clubId, clubId)));
+    if (!peek || !inScope(scope, peek.clubMemberId)) throw new NotFoundError("Time entry not found");
+    if (own && peek.clubMemberId === own.id) throw new ForbiddenError("Use clock-out for your own entry", { details: { code: "no_self_decision" } });
+    // Same per-person lock as clock-out / PATCH, so the person and the board cannot end the entry at the same time.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`time:${peek.clubMemberId}`}, 0))`);
+    const [entry] = await tx.select().from(timeEntries).where(eq(timeEntries.id, id)).for("update");
+    if (!entry) throw new NotFoundError("Time entry not found");
+    if (entry.endedAt !== null) throw new ConflictError("The entry is not running", { details: { code: "not_running" } });
+    if (entry.status !== "offen") throw new ConflictError("The entry was already decided", { details: { code: "entry_decided" } });
+    const now = new Date();
+    if (!isOverdue(entry, now)) throw new ConflictError("Only entries running for more than 16 hours can be ended by somebody else", { details: { code: "not_overdue" } });
+    const endedAt = runningEnd(entry.startedAt, new Date(rawEnd), now);
+    await assertNoOverlap(tx, entry.clubMemberId, entry.startedAt, endedAt, entry.id);
+    const [updated] = await tx.update(timeEntries).set({ endedAt, corrected: true, closedBy: userId, closedByOther: true }).where(eq(timeEntries.id, entry.id)).returning();
+    await writeAudit(tx, { eventType: "time_entry.close", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId, minutes: minutesOf(updated!) } });
+    return updated!;
+  });
+  await notifyTimeEntry("closed_by_other", row);
+  return c.json({ data: shapeEntry(row) });
+});
 
 /** Deny by default like `needsTracking`, except for a person with a running entry of their own (ending it must never need a rate). */
 function needsTrackingOrRunning() {
