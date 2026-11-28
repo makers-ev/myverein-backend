@@ -34,6 +34,7 @@ export const AUDIT_EVENTS = {
   "admin.user_remove": spec(["userId"]),
   "attendance.export": spec(["clubId", "rows", "scope"]),
   "audit_log.export": spec(["clubId", "filters", "rows"]),
+  "availability.sensitive_read": spec(["calendarId", "clubId", "count", "eventId"]),
   "ballot.cancel": spec(["clubId", "previousStatus", "reason"]),
   "ballot.close": spec(["by", "clubId", "eligible", "participants"]),
   "ballot.count": spec(["clubId", "outcome"]),

@@ -156,7 +156,8 @@ describe("seed:demo", () => {
     expect(first.time_entries_confirmed).toBeGreaterThan(first.time_entries_open! + first.time_entries_rejected!);
     expect(first.time_entries_open).toBeGreaterThanOrEqual(1);
     expect(first.time_entries_rejected).toBe(1);
-    expect(first.time_entries_running).toBe(1);
+    expect(first.time_entries_running).toBe(2);
+    expect(first.time_entries_stuck).toBe(1);
     expect(first.sponsors).toBe(5);
     expect(first.sponsors_public).toBe(4);
     expect(first.sponsor_contacts).toBeGreaterThanOrEqual(4);

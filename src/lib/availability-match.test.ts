@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { computeAvailability, type AvailabilityInput } from "./availability-match.js";
+import { computeAvailability, windowAvailability, type AvailabilityInput } from "./availability-match.js";
 
 describe("computeAvailability", () => {
   it("all members available via a matching regular slot", () => {
@@ -106,5 +106,28 @@ describe("computeAvailability", () => {
         { memberId: "right", available: true },
       ]);
     });
+  });
+});
+
+describe("windowAvailability (Wave 16 T6)", () => {
+  const monday18 = new Date(2026, 11, 7, 18, 0);
+  const monday1929 = new Date(2026, 11, 7, 19, 29);
+  const base = { memberId: "m", slots: [{ weekday: 0, startTime: "17:00", endTime: "21:00" }], exceptions: [] as { date: string; isAvailable: boolean }[] };
+
+  it("needs the whole window inside a slot", () => {
+    expect(windowAvailability(monday18, monday1929, base)).toBe("verfuegbar");
+    expect(windowAvailability(monday18, new Date(2026, 11, 7, 21, 30), base)).toBe("nicht_verfuegbar");
+  });
+
+  it("lets a holiday on any day of the window win, and an explicit free day without pattern count", () => {
+    expect(windowAvailability(monday18, monday1929, { ...base, exceptions: [{ date: "2026-12-07", isAvailable: false }] })).toBe("nicht_verfuegbar");
+    expect(windowAvailability(monday18, new Date(2026, 11, 9, 18, 0), { ...base, exceptions: [{ date: "2026-12-08", isAvailable: false }] })).toBe("nicht_verfuegbar");
+    expect(windowAvailability(monday18, monday1929, { memberId: "m", slots: [], exceptions: [{ date: "2026-12-07", isAvailable: true }] })).toBe("verfuegbar");
+  });
+
+  it("never reads missing data as not available", () => {
+    expect(windowAvailability(monday18, monday1929, { memberId: "m", slots: [], exceptions: [] })).toBe("unbekannt");
+    // Only a holiday on another day: nothing said about this one.
+    expect(windowAvailability(monday18, monday1929, { memberId: "m", slots: [], exceptions: [{ date: "2026-12-24", isAvailable: false }] })).toBe("unbekannt");
   });
 });
