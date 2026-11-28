@@ -9,15 +9,17 @@ import { writeAudit } from "../lib/audit.js";
 import { availabilityHints, MAX_WINDOW_DAYS } from "../lib/availability-hints.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { ForbiddenError, NotFoundError, ValidationError } from "../lib/errors.js";
-import { loadClubEvent, ownDepartmentIds } from "../lib/event-access.js";
+import { hasClubWidePermission, loadClubEvent, ownDepartmentIds } from "../lib/event-access.js";
 import type { ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 
 /**
  * `GET /events/availability-hints` (Wave 16 T6): "Wer hat Zeit?" while creating or editing a calendar event. Mounted inside
  * `eventRoutes` (session + club guard already ran) BEFORE `GET /events/:id`. Deny by default:
- * - `calendars:write` (who manages events): counters and the names of the people who are NOT available (D2);
- * - trainer / department lead with `attendance:write` for a department calendar of their own department: counters only;
+ * - names of the people who are NOT available (D2) only for callers who manage THIS calendar: a board role with `calendars:write`
+ *   (club-wide), or a department lead (`calendars:write`, department-scoped) for a calendar of their own department;
+ * - counters only: a department lead for any other calendar (club calendar, other departments), and a trainer with `attendance:write`
+ *   for a calendar of their own department;
  * - everybody else 403 (checked before anything is looked up).
  * Only a hint (D4); a read with names is audited as `availability.sensitive_read` (ids and counts only).
  */
@@ -52,11 +54,11 @@ eventAvailabilityHintRoutes.get(
 
     const calendar = await db.query.calendars.findFirst({ where: and(eq(calendars.id, q.calendarId), eq(calendars.clubId, clubId)) });
     if (!calendar) throw new NotFoundError("Calendar not found");
-    const withNames = hasClubPermission(roles, "calendars:write");
-    if (!withNames) {
-      const own = calendar.departmentId !== null && (await ownDepartmentIds(c.get("membership").id, roles)).includes(calendar.departmentId);
-      if (!own) throw new ForbiddenError("Availability hints are only shown for calendars of your own departments");
-    }
+    // Names only where the caller really manages the calendar: board roles club-wide, a department lead only for the own department.
+    const mayPlan = hasClubPermission(roles, "calendars:write");
+    const ownDepartment = calendar.departmentId !== null && (await ownDepartmentIds(c.get("membership").id, roles)).includes(calendar.departmentId);
+    const withNames = hasClubWidePermission(roles, "calendars:write") || (mayPlan && ownDepartment);
+    if (!mayPlan && !ownDepartment) throw new ForbiddenError("Availability hints are only shown for calendars of your own departments");
     if (q.eventId) {
       const { event } = await loadClubEvent(q.eventId, clubId);
       // Counters-only callers stay inside their calendar; managers may move an event to another calendar.

@@ -91,6 +91,36 @@ describe("GET /events/availability-hints", () => {
     expect((await hints(fx.users.trainerA, { ...SUMMER, calendarId: fx.calA, eventId: foreignEvent.id })).status).toBe(404);
   });
 
+  it("names the unavailable only for calendars the caller manages: department lead = own department, else counters only", async () => {
+    const rights: Array<[TestUser, string, number, boolean | null]> = [
+      [fx.users.board, fx.calA, 200, true],
+      [fx.users.board, fx.calB, 200, true],
+      [fx.users.board, fx.calClub, 200, true],
+      [fx.users.leaderA, fx.calA, 200, true],
+      [fx.users.leaderA, fx.calB, 200, false],
+      [fx.users.leaderA, fx.calClub, 200, false],
+      [fx.users.trainerA, fx.calA, 200, false],
+      [fx.users.trainerA, fx.calB, 403, null],
+      [fx.users.trainerA, fx.calClub, 403, null],
+      [fx.users.member1, fx.calA, 403, null],
+      [fx.users.member1, fx.calClub, 403, null],
+    ];
+    for (const [who, calendarId, status, names] of rights) {
+      const res = await hints(who, { ...WINTER, calendarId });
+      expect(res.status, `${who.clubMemberId} ${calendarId}`).toBe(status);
+      if (names === null) continue;
+      const data = (await fx.json(res)).data;
+      expect(data.includesNames).toBe(names);
+      if (!names) expect(data.unavailablePeople).toBeNull();
+    }
+    // Moving an event into the own department's calendar is planning there (names); counters only for the other calendar.
+    const eventB = await fx.addEvent({ calendarId: fx.calB });
+    expect((await hints(fx.users.leaderA, { ...WINTER, calendarId: fx.calA, eventId: eventB.id })).status).toBe(200);
+    expect((await hints(fx.users.leaderA, { ...WINTER, calendarId: fx.calB, eventId: eventB.id })).status).toBe(200);
+    // Counters-only callers stay inside the event's calendar.
+    expect((await hints(fx.users.leaderA, { ...WINTER, calendarId: fx.calClub, eventId: eventB.id })).status).toBe(404);
+  });
+
   it("validates the window", async () => {
     const codeOf = async (res: Response) => (await fx.json(res)).error.details?.code;
     expect((await hints(fx.users.board, { calendarId: fx.calA })).status).toBe(422);
