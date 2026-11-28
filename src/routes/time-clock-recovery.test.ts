@@ -258,4 +258,14 @@ describe("a forgotten clock-in is never a dead end", () => {
     await db.delete(timeEntries).where(eq(timeEntries.id, entry!.id));
     await clear(member);
   });
+
+  it("stops a normal clock-out without an overlap check, as before (manual entry ending 4 min ahead)", async () => {
+    const me = fx.users.trainerA;
+    await clear(me);
+    const manual = await call(me, "/time-entries", "POST", { startedAt: hoursAgo(1).toISOString(), endedAt: new Date(Date.now() + 4 * 60_000).toISOString() });
+    expect(manual.status).toBe(201);
+    expect((await call(me, "/time-entries/clock-in", "POST", {})).status).toBe(201);
+    expect((await call(me, "/time-entries/clock-out", "POST")).status).toBe(200);
+    await clear(me);
+  });
 });

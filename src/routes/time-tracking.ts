@@ -205,7 +205,8 @@ timeEntryRoutes.post("/clock-out", async (c) => {
     }
     const endedAt = given ? runningEnd(running.startedAt, given, now) : now;
     const corrected = given !== null && isCorrection(given, now);
-    await assertNoOverlap(tx, own.id, running.startedAt, endedAt, running.id);
+    // Only an explicit end is checked for overlaps; a plain stop "now" stays as before Wave 16 (a manual entry may end up to 5 min ahead).
+    if (given) await assertNoOverlap(tx, own.id, running.startedAt, endedAt, running.id);
     const [done] = await tx.update(timeEntries).set({ endedAt, corrected }).where(eq(timeEntries.id, running.id)).returning();
     await writeAudit(tx, { eventType: "time_entry.clock_out", subjectId: own.id, payload: { clubId, entryId: running.id, clubMemberId: own.id, corrected } });
     return done!;
