@@ -244,7 +244,7 @@ export const AUDIT_EVENTS = {
   "time_entry.clock_in": spec(["clubId", "clubMemberId", "entryId"], "subject"),
   "time_entry.clock_out": spec(["clubId", "clubMemberId", "corrected", "entryId"], "subject"),
   "time_entry.close": spec(["clubId", "clubMemberId", "entryId", "minutes"], "subject"),
-  "time_entry.confirm": spec(["clubId", "clubMemberId", "endedRunning", "entryId"], "subject"),
+  "time_entry.confirm": spec(["clubId", "clubMemberId", "endedRunning", "entryId", "soleConfirmer"], "subject"),
   "time_entry.create": spec(["clubId", "clubMemberId", "entryId", "source"], "subject"),
   "time_entry.delete": spec(["clubId", "clubMemberId", "entryId"], "subject"),
   "time_entry.reject": spec(["clubId", "clubMemberId", "endedRunning", "entryId"], "subject"),

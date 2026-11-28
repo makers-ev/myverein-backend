@@ -1,4 +1,6 @@
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+
+import { member } from "../auth/auth-schema.js";
 
 import { db } from "../db/client.js";
 import { clubMemberDepartments, clubMembers } from "../db/schema/club-members.js";
@@ -6,8 +8,8 @@ import { clubRoles } from "../db/schema/club-roles.js";
 import { events } from "../db/schema/events.js";
 import { rateCards, timeEntries, type RateCardRow, type TimeEntryRow } from "../db/schema/event-extras.js";
 import type { DbExecutor } from "./club-members.js";
-import { hasClubPermission } from "./club-permissions.js";
-import { hasClubWidePermission, ownDepartmentIds } from "./event-access.js";
+import { CLUB_ROLE_TYPES, hasClubPermission } from "./club-permissions.js";
+import { DEPARTMENT_SCOPED_ROLES, hasClubWidePermission, ownDepartmentIds } from "./event-access.js";
 import { ConflictError, ForbiddenError, ValidationError } from "./errors.js";
 import { todayBerlin } from "./member-lifecycle.js";
 
@@ -84,6 +86,33 @@ export async function timeScopeOf(clubId: string, roleTypes: readonly string[], 
 }
 
 export const inScope = (scope: TimeScope, clubMemberId: string): boolean => scope.clubMemberIds === null || scope.clubMemberIds.has(clubMemberId);
+
+/**
+ * Wave 16 review: could anybody besides `excludeAccountId` (the closer) confirm entries of `clubMemberId`? Holders of a club-wide role
+ * with `time:write` (roles in term), or of a department-scoped one for a department the person currently belongs to; never the person.
+ */
+export async function hasOtherConfirmer(clubId: string, clubMemberId: string, excludeAccountId: string): Promise<boolean> {
+  const today = todayBerlin();
+  const writers = CLUB_ROLE_TYPES.filter((r) => hasClubPermission([r], "time:write"));
+  const scoped = writers.filter((r) => (DEPARTMENT_SCOPED_ROLES as readonly string[]).includes(r));
+  const wide = writers.filter((r) => !scoped.includes(r));
+  const [owner] = await db.select({ memberId: clubMembers.memberId }).from(clubMembers).where(eq(clubMembers.id, clubMemberId));
+  const departments = (
+    await db
+      .select({ id: clubMemberDepartments.departmentId })
+      .from(clubMemberDepartments)
+      .where(and(eq(clubMemberDepartments.clubMemberId, clubMemberId), lte(clubMemberDepartments.since, today), or(isNull(clubMemberDepartments.until), gte(clubMemberDepartments.until, today))))
+  ).map((d) => d.id);
+  const reach = [wide.length > 0 ? inArray(clubRoles.roleType, wide) : undefined, scoped.length > 0 && departments.length > 0 ? and(inArray(clubRoles.roleType, scoped), inArray(clubRoles.departmentId, departments)) : undefined].filter((x) => x !== undefined);
+  if (reach.length === 0) return false;
+  const [other] = await db
+    .select({ id: clubRoles.id })
+    .from(clubRoles)
+    .innerJoin(member, eq(member.id, clubRoles.memberId))
+    .where(and(eq(member.organizationId, clubId), ne(member.id, excludeAccountId), owner?.memberId ? ne(member.id, owner.memberId) : undefined, or(isNull(clubRoles.termEndsAt), gte(clubRoles.termEndsAt, today)), or(...reach)))
+    .limit(1);
+  return other !== undefined;
+}
 
 export const minutesOf = (entry: Pick<TimeEntryRow, "startedAt" | "endedAt">): number | null => (entry.endedAt ? Math.max(0, Math.round((entry.endedAt.getTime() - entry.startedAt.getTime()) / 60_000)) : null);
 

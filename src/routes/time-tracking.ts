@@ -19,7 +19,7 @@ import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibi
 import { buildCsv } from "../lib/member-csv.js";
 import { buildXlsx, type XlsxCell } from "../lib/xlsx.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
-import { assertEntryWindow, berlinDayStart, isCorrection, isOverdue, maxEndOf, mayTrackTime, assertNoOverlap, runningEnd, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
+import { assertEntryWindow, berlinDayStart, hasOtherConfirmer, isCorrection, isOverdue, maxEndOf, mayTrackTime, assertNoOverlap, runningEnd, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
 import { notifyTimeEntry } from "../lib/time-notify.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -61,7 +61,8 @@ async function requireTrackingOf(c: Context<ClubEnv>): Promise<void> {
   await requireTracking(c.get("clubId"), own?.id ?? null, roles);
 }
 
-function shapeEntry(row: TimeEntryRow, extra: { displayName?: string | null; eventTitle?: string | null } = {}) {
+/** `viewer` = the caller's user id: `closedByYou` is only true for the person who ended someone else's entry (UI explains "Bestätigen"). */
+function shapeEntry(row: TimeEntryRow, viewer: string | null, extra: { displayName?: string | null; eventTitle?: string | null } = {}) {
   return {
     id: row.id,
     clubMemberId: row.clubMemberId,
@@ -79,6 +80,7 @@ function shapeEntry(row: TimeEntryRow, extra: { displayName?: string | null; eve
     corrected: row.corrected,
     autoClosed: row.autoClosed,
     closedByOther: row.closedByOther,
+    closedByYou: viewer !== null && row.closedBy === viewer,
     overdue: isOverdue(row),
     maxEndedAt: row.endedAt === null ? maxEndOf(row.startedAt) : null,
   };
@@ -146,7 +148,7 @@ timeEntryRoutes.get("/", zValidator("query", listQuery, hook), async (c) => {
     .where(and(eq(timeEntries.clubId, clubId), gte(timeEntries.startedAt, berlinDayStart(from)), lt(timeEntries.startedAt, berlinDayStart(addDays(to, 1))), q.status ? eq(timeEntries.status, q.status) : undefined, memberFilter))
     .orderBy(desc(timeEntries.startedAt))
     .limit(500);
-  return c.json({ data: rows.map((r) => shapeEntry(r.entry, { displayName: r.name, eventTitle: r.eventTitle })) });
+  return c.json({ data: rows.map((r) => shapeEntry(r.entry, c.get("user").id, { displayName: r.name, eventTitle: r.eventTitle })) });
 });
 
 /** The running entry of the caller, if any (for the stamp button). */
@@ -154,7 +156,7 @@ timeEntryRoutes.get("/current", async (c) => {
   // No rate check: a running entry must stay visible (and stoppable) even after the rate lapsed.
   const own = await ownMember(c);
   const [row] = await db.select({ entry: timeEntries, eventTitle: events.title }).from(timeEntries).leftJoin(events, eq(events.id, timeEntries.eventId)).where(and(eq(timeEntries.clubMemberId, own.id), isNull(timeEntries.endedAt)));
-  return c.json({ data: row ? shapeEntry(row.entry, { eventTitle: row.eventTitle }) : null });
+  return c.json({ data: row ? shapeEntry(row.entry, c.get("user").id, { eventTitle: row.eventTitle }) : null });
 });
 
 async function visibleEventOrNull(c: Context<ClubEnv>, eventId: string | undefined): Promise<void> {
@@ -178,7 +180,7 @@ timeEntryRoutes.post("/clock-in", needsTracking(), zValidator("json", clockInSch
     await writeAudit(tx, { eventType: "time_entry.clock_in", subjectId: own.id, payload: { clubId, entryId: created!.id, clubMemberId: own.id } });
     return created!;
   });
-  return c.json({ data: shapeEntry(row) }, 201);
+  return c.json({ data: shapeEntry(row, c.get("user").id) }, 201);
 });
 
 /**
@@ -208,7 +210,7 @@ timeEntryRoutes.post("/clock-out", async (c) => {
     await writeAudit(tx, { eventType: "time_entry.clock_out", subjectId: own.id, payload: { clubId, entryId: running.id, clubMemberId: own.id, corrected } });
     return done!;
   });
-  return c.json({ data: shapeEntry(row) });
+  return c.json({ data: shapeEntry(row, c.get("user").id) });
 });
 
 const manualSchema = z.object({ startedAt: z.string().datetime({ offset: true }), endedAt: z.string().datetime({ offset: true }), eventId: z.uuid().optional() });
@@ -229,7 +231,7 @@ timeEntryRoutes.post("/", needsTracking(), zValidator("json", manualSchema, hook
     await writeAudit(tx, { eventType: "time_entry.create", subjectId: own.id, payload: { clubId, entryId: created!.id, clubMemberId: own.id, source: "manuell" } });
     return created!;
   });
-  return c.json({ data: shapeEntry(row) }, 201);
+  return c.json({ data: shapeEntry(row, c.get("user").id) }, 201);
 });
 
 /** Events the caller supervised or attended as trainer, with a list, that ended and have no time entry yet: PROPOSALS only. */
@@ -288,7 +290,7 @@ timeEntryRoutes.post("/from-event", needsTracking(), zValidator("json", z.object
     await writeAudit(tx, { eventType: "time_entry.create", subjectId: own.id, payload: { clubId, entryId: created!.id, clubMemberId: own.id, source: "aus_termin" } });
     return created!;
   });
-  return c.json({ data: shapeEntry(row, { eventTitle: proposal.title }) }, 201);
+  return c.json({ data: shapeEntry(row, c.get("user").id, { eventTitle: proposal.title }) }, 201);
 });
 
 async function ownOpenEntry(c: Context<ClubEnv>, tx: Pick<typeof db, "select">, lock = false) {
@@ -305,11 +307,12 @@ async function ownOpenEntry(c: Context<ClubEnv>, tx: Pick<typeof db, "select">, 
 const patchSchema = manualSchema.partial().omit({ eventId: true }).refine((v) => Object.keys(v).length > 0, { message: "Nothing to update" });
 
 /**
- * Own open entry. Finished: start/end as before (needs the right to track). Wave 16 T2: a RUNNING entry can be ended here by sending
- * `endedAt` (the rules of clock-out apply, no rate check, so nothing is stranded); without `endedAt` it stays 409 `running`.
+ * Own open entry. Finished: start/end as before. Wave 16 T2: a RUNNING entry can be ended here by sending `endedAt` (the rules of
+ * clock-out apply); without `endedAt` it stays 409 `running`. Correcting one's own open entry never needs a current rate (review: a
+ * lapsed rate must not strand an entry the board closed and wants corrected).
  * An owner edit lifts the "closed by someone else" marker (the person now vouches for the times; `closed_by_other` stays as history).
  */
-timeEntryRoutes.patch("/:id", needsTrackingOrRunning(), zValidator("json", patchSchema, hook), async (c) => {
+timeEntryRoutes.patch("/:id", needsTrackingOrOwnOpen(), zValidator("json", patchSchema, hook), async (c) => {
   const body = c.req.valid("json");
   const clubId = c.get("clubId");
   const own = await ownMember(c);
@@ -319,7 +322,6 @@ timeEntryRoutes.patch("/:id", needsTrackingOrRunning(), zValidator("json", patch
     const entry = await ownOpenEntry(c, tx, true);
     const running = entry.endedAt === null;
     if (running && !body.endedAt) throw new ConflictError("Stop the running entry first", { details: { code: "running" } });
-    if (!running || body.startedAt) await requireTrackingOf(c);
     const now = new Date();
     const startedAt = body.startedAt ? new Date(body.startedAt) : entry.startedAt;
     let endedAt: Date;
@@ -334,7 +336,7 @@ timeEntryRoutes.patch("/:id", needsTrackingOrRunning(), zValidator("json", patch
     await writeAudit(tx, { eventType: "time_entry.update", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId, corrected, endedRunning: running } });
     return updated!;
   });
-  return c.json({ data: shapeEntry(row) });
+  return c.json({ data: shapeEntry(row, c.get("user").id) });
 });
 
 /** Own open entry, finished or RUNNING: deleting a running entry is the documented way out ("Eintrag verwerfen", Wave 16 T2). */
@@ -351,7 +353,8 @@ timeEntryRoutes.delete("/:id", async (c) => {
 /**
  * Confirm or reject (never one's own entry). Wave 16 T3: a RUNNING entry older than 16 h may be rejected -- it is ended at
  * `startedAt + 16 h` so it no longer blocks the person; confirming a running entry stays 409 `running`. Whoever closed someone else's
- * entry does not confirm it too (403 `closed_by_you`): the times they chose need a second person or the owner's edit.
+ * entry does not confirm it too (403 `closed_by_you`): the times they chose need a second person or the owner's edit -- unless no other
+ * `time:write` holder could confirm it (then the closer may; audit `soleConfirmer`).
  */
 function decide(status: "bestaetigt" | "abgelehnt") {
   return async (c: Context<ClubEnv>) => {
@@ -363,6 +366,7 @@ function decide(status: "bestaetigt" | "abgelehnt") {
     const scope = await timeScopeOf(clubId, roles, c.get("membership").id);
     const own = await ownClubMemberRow(clubId, c.get("membership").id);
     let endedRunning = false;
+    let soleConfirmer = false;
     const row = await db.transaction(async (tx) => {
       const [entry] = await tx.select().from(timeEntries).where(and(eq(timeEntries.id, id), eq(timeEntries.clubId, clubId))).for("update");
       if (!entry || !inScope(scope, entry.clubMemberId)) throw new NotFoundError("Time entry not found");
@@ -371,14 +375,18 @@ function decide(status: "bestaetigt" | "abgelehnt") {
       const now = new Date();
       endedRunning = entry.endedAt === null && status === "abgelehnt" && isOverdue(entry, now);
       if (entry.endedAt === null && !endedRunning) throw new ConflictError("The entry is still running", { details: { code: "running" } });
-      if (status === "bestaetigt" && entry.closedBy !== null && entry.closedBy === userId) throw new ForbiddenError("You set the end of this entry; somebody else confirms it", { details: { code: "closed_by_you" } });
+      if (status === "bestaetigt" && entry.closedBy !== null && entry.closedBy === userId) {
+        // Somebody else confirms the times the closer chose -- unless nobody else could (small club): then the closer may, audited.
+        soleConfirmer = !(await hasOtherConfirmer(clubId, entry.clubMemberId, c.get("membership").id));
+        if (!soleConfirmer) throw new ForbiddenError("You set the end of this entry; somebody else confirms it", { details: { code: "closed_by_you" } });
+      }
       const ending = endedRunning ? { endedAt: maxEndOf(entry.startedAt, now), closedBy: userId, closedByOther: true } : {};
       const [updated] = await tx.update(timeEntries).set({ status, confirmedBy: userId, confirmedAt: now, ...ending }).where(eq(timeEntries.id, entry.id)).returning();
-      await writeAudit(tx, { eventType: status === "bestaetigt" ? "time_entry.confirm" : "time_entry.reject", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId, endedRunning } });
+      await writeAudit(tx, { eventType: status === "bestaetigt" ? "time_entry.confirm" : "time_entry.reject", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId, endedRunning, ...(soleConfirmer ? { soleConfirmer } : {}) } });
       return updated!;
     });
     if (endedRunning) await notifyTimeEntry("closed_by_other", row);
-    return c.json({ data: shapeEntry(row) });
+    return c.json({ data: shapeEntry(row, c.get("user").id) });
   };
 }
 timeEntryRoutes.post("/:id/confirm", needsPermission("time:write"), decide("bestaetigt"));
@@ -416,19 +424,20 @@ timeEntryRoutes.post("/:id/close", needsPermission("time:write"), zValidator("js
     return updated!;
   });
   await notifyTimeEntry("closed_by_other", row);
-  return c.json({ data: shapeEntry(row) });
+  return c.json({ data: shapeEntry(row, c.get("user").id) });
 });
 
-/** Deny by default like `needsTracking`, except for a person with a running entry of their own (ending it must never need a rate). */
-function needsTrackingOrRunning() {
+/** Deny by default like `needsTracking`, except when the target is an OPEN entry of the caller (running or finished): correcting or ending it never needs a rate. */
+function needsTrackingOrOwnOpen() {
   return async (c: Context<ClubEnv>, next: () => Promise<void>) => {
     try {
       await requireTrackingOf(c);
     } catch (err) {
       const own = err instanceof ForbiddenError ? await ownOrNull(c) : null;
-      if (!own) throw err;
-      const [running] = await db.select({ id: timeEntries.id }).from(timeEntries).where(and(eq(timeEntries.clubMemberId, own.id), isNull(timeEntries.endedAt))).limit(1);
-      if (!running) throw err;
+      const id = c.req.param("id") ?? "";
+      if (!own || !isUuid(id)) throw err;
+      const [mine] = await db.select({ id: timeEntries.id }).from(timeEntries).where(and(eq(timeEntries.id, id), eq(timeEntries.clubMemberId, own.id), eq(timeEntries.status, "offen"))).limit(1);
+      if (!mine) throw err;
     }
     await next();
   };

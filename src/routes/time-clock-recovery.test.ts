@@ -66,7 +66,11 @@ describe("a forgotten clock-in is never a dead end", () => {
       const entry = await stuck(member, hours);
       const close = await call(fx.users.board, `/time-entries/${entry.id}/close`, "POST", { endedAt: new Date(entry.startedAt.getTime() + 4 * HOUR).toISOString() });
       expect(close.status).toBe(200);
-      expect((await fx.json(close)).data).toMatchObject({ running: false, status: "offen", minutes: 240, closedByOther: true });
+      expect((await fx.json(close)).data).toMatchObject({ running: false, status: "offen", minutes: 240, closedByOther: true, closedByYou: true });
+      const ownView = (await fx.json(await call(member, "/time-entries/current"))).data;
+      expect(ownView).toBeNull();
+      const listed = (await fx.json(await call(member, "/time-entries?from=2020-01-01"))).data.find((e: { id: string }) => e.id === entry.id);
+      expect(listed).toMatchObject({ closedByOther: true, closedByYou: false });
       const second = await stuck(member, Math.max(17, hours - 20));
       const reject = await call(fx.users.leaderA, `/time-entries/${second.id}/reject`, "POST");
       expect(reject.status).toBe(200);
@@ -144,14 +148,15 @@ describe("a forgotten clock-in is never a dead end", () => {
     await clear(me);
   });
 
-  it("lets a person whose rate lapsed end or discard a stuck entry, but not move a finished one", async () => {
+  it("lets a person whose rate lapsed end, correct or discard their own open entries", async () => {
     const m = fx.users.member2;
     await clear(m);
     const entry = await stuck(m, 50);
     expect((await call(m, "/time-entries/clock-out", "POST")).status).toBe(409);
     const res = await call(m, `/time-entries/${entry.id}`, "PATCH", { endedAt: new Date(entry.startedAt.getTime() + HOUR).toISOString() });
     expect(res.status).toBe(200);
-    expect((await call(m, `/time-entries/${entry.id}`, "PATCH", { endedAt: new Date(entry.startedAt.getTime() + 2 * HOUR).toISOString() })).status).toBe(403);
+    // Correcting the now finished own open entry needs no current rate either (review: no closed_by_you dead end).
+    expect((await call(m, `/time-entries/${entry.id}`, "PATCH", { endedAt: new Date(entry.startedAt.getTime() + 2 * HOUR).toISOString() })).status).toBe(200);
     const second = await stuck(m, 20);
     expect((await call(m, `/time-entries/${second.id}`, "DELETE")).status).toBe(204);
     // Somebody else's running entry stays invisible.
@@ -230,6 +235,27 @@ describe("a forgotten clock-in is never a dead end", () => {
     expect(csv).toMatch(/Trainer A;[^\r\n]*;2\r\n/);
     const lead = await (await call(fx.users.leaderA, "/time-report?format=csv")).text();
     expect(lead).toMatch(/Trainer A;[^\r\n]*;3;2\r\n/);
+    await clear(member);
+  });
+
+  it("lets the closer confirm when nobody else could (sole confirmer, audited), and lets an owner with a lapsed rate correct it", async () => {
+    // A member of department B (no department lead): only the board reaches them.
+    const loner = await fx.addAccountless("Allein B", { departmentId: fx.deptB });
+    const [entry] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: loner, startedAt: hoursAgo(30), source: "stempeln", status: "offen" }).returning();
+    const closed = await call(fx.users.board, `/time-entries/${entry!.id}/close`, "POST", { endedAt: new Date(entry!.startedAt.getTime() + 2 * HOUR).toISOString() });
+    expect((await fx.json(closed)).data).toMatchObject({ closedByYou: true });
+    const confirm = await call(fx.users.board, `/time-entries/${entry!.id}/confirm`, "POST");
+    expect(confirm.status).toBe(200);
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.clubId, fx.clubId), eq(auditLog.eventType, "time_entry.confirm"))).orderBy(desc(auditLog.createdAt)).limit(1);
+    expect(audit!.payload).toMatchObject({ entryId: entry!.id, soleConfirmer: true });
+    // In department A the lead could confirm: the board as closer is blocked there (closed_by_you), without soleConfirmer.
+    const member = fx.users.trainerA;
+    await clear(member);
+    const second = await stuck(member, 30);
+    expect((await call(fx.users.board, `/time-entries/${second.id}/close`, "POST", { endedAt: new Date(second.startedAt.getTime() + HOUR).toISOString() })).status).toBe(200);
+    const blocked = await call(fx.users.board, `/time-entries/${second.id}/confirm`, "POST");
+    expect([blocked.status, (await fx.json(blocked)).error.details.code]).toEqual([403, "closed_by_you"]);
+    await db.delete(timeEntries).where(eq(timeEntries.id, entry!.id));
     await clear(member);
   });
 });
