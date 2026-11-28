@@ -572,14 +572,18 @@ const eur = (cents: number | null) => (cents === null ? "" : (cents / 100).toFix
 const germanDate = (iso: string | null) => (iso ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : "");
 const dec = (n: number) => String(n).replace(".", ",");
 const REPORT_NOTE = "Berechnungsgrundlage, keine Abrechnung";
+/** Wave 16 (D3): number of entries in the row whose end was entered afterwards or set automatically (empty when none). */
+const MARKED_HEADER = "Korrigiert/automatisch beendet";
+const markedOf = (r: Pick<ReportRow, "correctedEntries" | "autoClosedEntries">): number => r.correctedEntries + r.autoClosedEntries;
 
 function exportHeader(withRates: boolean): string[] {
-  return withRates ? ["Name", "Rolle(n)", "Termin", "Datum", "Stunden", "Satz (EUR/h)", "Betrag (EUR)", "Satz fehlt"] : ["Name", "Rolle(n)", "Termin", "Datum", "Stunden"];
+  return withRates ? ["Name", "Rolle(n)", "Termin", "Datum", "Stunden", "Satz (EUR/h)", "Betrag (EUR)", "Satz fehlt", MARKED_HEADER] : ["Name", "Rolle(n)", "Termin", "Datum", "Stunden", MARKED_HEADER];
 }
 
 function csvRow(r: ReportRow, withRates: boolean): Array<string | number> {
   const base = [r.displayName ?? "", r.roleTypes.join(", "), r.eventTitle ?? "", germanDate(r.eventDate), dec(r.hours)];
-  return withRates ? [...base, eur(r.rateCents), eur(r.amountCents), r.rateMissing ? "ja" : ""] : base;
+  const marked = markedOf(r) > 0 ? String(markedOf(r)) : "";
+  return withRates ? [...base, eur(r.rateCents), eur(r.amountCents), r.rateMissing ? "ja" : "", marked] : [...base, marked];
 }
 
 /**
@@ -600,6 +604,7 @@ timeReportRoutes.get("/", zValidator("query", reportQuery, hook), async (c) => {
       const lines = report.rows.map((r) => csvRow(r, withRates));
       const total: Array<string | number> = ["Summe", "", "", "", dec(report.totals.hours)];
       if (withRates) total.push("", eur(report.totals.amountCents), "");
+      total.push(markedOf(report.totals) > 0 ? String(markedOf(report.totals)) : "");
       return c.body(buildCsv(header, [...lines, total]), 200, { ...headers, "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="stundenbericht.csv"' });
     }
     const bold = (text: string): XlsxCell => ({ text, bold: true });
@@ -611,13 +616,14 @@ timeReportRoutes.get("/", zValidator("query", reportQuery, hook), async (c) => {
       header.map(bold),
       ...report.rows.map((r): XlsxCell[] => {
         const base: XlsxCell[] = [r.displayName, r.roleTypes.join(", "), r.eventTitle, germanDate(r.eventDate), r.hours];
-        return withRates ? [...base, r.rateCents === null ? null : r.rateCents / 100, r.amountCents === null ? null : r.amountCents / 100, r.rateMissing ? "ja" : null] : base;
+        const marked = markedOf(r) > 0 ? markedOf(r) : null;
+        return withRates ? [...base, r.rateCents === null ? null : r.rateCents / 100, r.amountCents === null ? null : r.amountCents / 100, r.rateMissing ? "ja" : null, marked] : [...base, marked];
       }),
       withRates
-        ? [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }, null, report.totals.amountCents === null ? null : { number: report.totals.amountCents / 100, bold: true }]
-        : [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }],
+        ? [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }, null, report.totals.amountCents === null ? null : { number: report.totals.amountCents / 100, bold: true }, null, markedOf(report.totals) > 0 ? { number: markedOf(report.totals), bold: true } : null]
+        : [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }, markedOf(report.totals) > 0 ? { number: markedOf(report.totals), bold: true } : null],
     ];
-    const bytes = buildXlsx("Stundenbericht", sheet, withRates ? [28, 24, 32, 12, 10, 14, 14, 12] : [28, 24, 32, 12, 10]);
+    const bytes = buildXlsx("Stundenbericht", sheet, withRates ? [28, 24, 32, 12, 10, 14, 14, 12, 16] : [28, 24, 32, 12, 10, 16]);
     return c.body(bytes as unknown as ArrayBuffer, 200, { ...headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Content-Disposition": 'attachment; filename="stundenbericht.xlsx"' });
   }
   c.header("Cache-Control", "private, no-store");

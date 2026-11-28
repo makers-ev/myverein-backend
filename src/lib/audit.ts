@@ -239,6 +239,7 @@ export const AUDIT_EVENTS = {
   "rate_card.create": spec(["cardId", "clubId"]),
   "rate_card.delete": spec(["cardId", "clubId"]),
   "rate_card.update": spec(["cardId", "clubId"]),
+  "time_entry.auto_close": spec(["afterHours", "clubId", "clubMemberId", "entryId"], "subject"),
   "time_entry.clock_in": spec(["clubId", "clubMemberId", "entryId"], "subject"),
   "time_entry.clock_out": spec(["clubId", "clubMemberId", "corrected", "entryId"], "subject"),
   "time_entry.close": spec(["clubId", "clubMemberId", "entryId", "minutes"], "subject"),

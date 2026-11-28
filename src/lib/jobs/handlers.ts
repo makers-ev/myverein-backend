@@ -20,6 +20,7 @@ import { registerNotifyJobs } from "../notify/index.js";
 import { installUnsubscribeProvider } from "../notify/unsubscribe-token.js";
 import { handleReminder, handleReminderSweep, REMINDER_JOB_TYPE, REMINDER_SWEEP_INTERVAL_MS, REMINDER_SWEEP_JOB_TYPE } from "../reminders.js";
 import { PUBLIC_MEDIA_SYNC_INTERVAL_MS, PUBLIC_MEDIA_SYNC_JOB_TYPE, syncAllPublicMedia } from "../public-profile.js";
+import { handleTimeSweep, TIME_SWEEP_INTERVAL_MS, TIME_SWEEP_JOB_TYPE } from "../time-sweep.js";
 import { registerJob, registerRecurringJob } from "./registry.js";
 
 /**
@@ -59,6 +60,8 @@ export function registerAllJobs(): void {
   registerJob(TERM_NOTIFY_JOB_TYPE, handleTermNotify);
   registerRecurringJob({ type: SERIES_REFILL_JOB_TYPE, intervalMs: SERIES_REFILL_INTERVAL_MS }, handleSeriesRefill);
   registerRecurringJob({ type: HELPER_REMINDER_JOB_TYPE, intervalMs: HELPER_REMINDER_INTERVAL_MS }, handleHelperReminders);
+  // Wave 16: ends time entries running for TIME_AUTO_CLOSE_HOURS and reminds after 10 h.
+  registerRecurringJob({ type: TIME_SWEEP_JOB_TYPE, intervalMs: TIME_SWEEP_INTERVAL_MS }, handleTimeSweep);
   registerRecurringJob({ type: GUEST_SWEEP_JOB_TYPE, intervalMs: GUEST_SWEEP_INTERVAL_MS }, async () => {
     await sweepUnconfirmedGuests();
   });

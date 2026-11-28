@@ -8,7 +8,7 @@ import { messageDeliveries } from "../db/schema/communication.js";
 import { timeEntries } from "../db/schema/event-extras.js";
 import { pushDataFor } from "../lib/notify/push.js";
 import { createEventFixture, HOUR, type EventFixture, type TestUser } from "./event-test-support.js";
-import { timeEntryRoutes } from "./time-tracking.js";
+import { timeEntryRoutes, timeReportRoutes } from "./time-tracking.js";
 
 /**
  * Wave 16 T0: a clock-in that was forgotten for more than 16 hours (40 h, 328 h as reported) must never be a dead end. Before the fix:
@@ -23,7 +23,7 @@ describe("a forgotten clock-in is never a dead end", () => {
   const clear = (who: TestUser) => db.delete(timeEntries).where(and(eq(timeEntries.clubId, fx.clubId), eq(timeEntries.clubMemberId, who.clubMemberId)));
 
   beforeAll(async () => {
-    fx = await createEventFixture("timerec", [["/time-entries", timeEntryRoutes]]);
+    fx = await createEventFixture("timerec", [["/time-entries", timeEntryRoutes], ["/time-report", timeReportRoutes]]);
     for (const u of [fx.users.trainerA, fx.users.leaderA]) await db.insert(clubMemberDepartments).values({ clubMemberId: u.clubMemberId, departmentId: fx.deptA, since: "2020-01-01" });
   }, 60_000);
   afterAll(async () => fx.cleanup());
@@ -197,6 +197,25 @@ describe("a forgotten clock-in is never a dead end", () => {
     expect((await call(fx.users.leaderA, `/time-entries/${again.id}/confirm`, "POST")).status).toBe(200);
     expect((await call(fx.users.board, `/time-entries/${entry.id}/confirm`, "POST")).status).toBe(200);
     for (const id of [foreignEntry!.id, ownStuck.id, fresh.id]) await db.delete(timeEntries).where(eq(timeEntries.id, id));
+    await clear(member);
+  });
+
+  it("marks corrected and automatically ended entries in the report and its exports (counts only)", async () => {
+    const member = fx.users.trainerA;
+    await clear(member);
+    const confirmedEntry = (h: number, flags: { corrected?: boolean; autoClosed?: boolean }) =>
+      db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: member.clubMemberId, startedAt: hoursAgo(h), endedAt: hoursAgo(h - 1), source: "stempeln", status: "bestaetigt", ...flags });
+    await confirmedEntry(50, { corrected: true });
+    await confirmedEntry(40, { autoClosed: true });
+    await confirmedEntry(30, {});
+    const report = (await fx.json(await call(fx.users.board, "/time-report"))).data;
+    expect(report.rows.find((r: { clubMemberId: string }) => r.clubMemberId === member.clubMemberId)).toMatchObject({ entries: 3, correctedEntries: 1, autoClosedEntries: 1 });
+    expect(report.totals).toMatchObject({ correctedEntries: 1, autoClosedEntries: 1 });
+    const csv = await (await call(fx.users.board, "/time-report?format=csv")).text();
+    expect(csv.split("\r\n")[0]).toMatch(/;Korrigiert\/automatisch beendet$/);
+    expect(csv).toMatch(/Trainer A;[^\r\n]*;2\r\n/);
+    const lead = await (await call(fx.users.leaderA, "/time-report?format=csv")).text();
+    expect(lead).toMatch(/Trainer A;[^\r\n]*;3;2\r\n/);
     await clear(member);
   });
 });

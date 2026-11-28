@@ -165,6 +165,9 @@ export interface ReportRow {
   rateCents: number | null;
   amountCents: number | null;
   rateMissing: boolean;
+  /** Wave 16 (D3): confirmed entries of the row whose end was entered afterwards / that were ended automatically. */
+  correctedEntries: number;
+  autoClosedEntries: number;
 }
 
 export interface ReportOptions {
@@ -201,9 +204,9 @@ function tooLarge(): never {
 }
 
 /** Confirmed entries of a period, filtered (all filters in SQL) and grouped; amounts only when `withRates`. `people` is always the per-person sum. */
-export async function buildReport(clubId: string, opts: ReportOptions): Promise<{ groupBy: ReportGroup; rows: ReportRow[]; people: ReportRow[]; totals: { minutes: number; hours: number; amountCents: number | null } }> {
+export async function buildReport(clubId: string, opts: ReportOptions): Promise<{ groupBy: ReportGroup; rows: ReportRow[]; people: ReportRow[]; totals: { minutes: number; hours: number; amountCents: number | null; correctedEntries: number; autoClosedEntries: number } }> {
   const groupBy = opts.groupBy ?? "person";
-  const empty = { groupBy, rows: [], people: [], totals: { minutes: 0, hours: 0, amountCents: opts.withRates ? 0 : null } };
+  const empty = { groupBy, rows: [], people: [], totals: { minutes: 0, hours: 0, amountCents: opts.withRates ? 0 : null, correctedEntries: 0, autoClosedEntries: 0 } };
   if (opts.scope.clubMemberIds !== null && opts.scope.clubMemberIds.size === 0) return empty;
   const conditions = [
     eq(timeEntries.clubId, clubId),
@@ -241,14 +244,16 @@ export async function buildReport(clubId: string, opts: ReportOptions): Promise<
   type Acc = ReportRow & { rates: Set<number> };
   const make = (key: { memberId: string | null; name: string | null; roles: string[]; eventId: string | null; title: string | null; date: string | null }): Acc => ({
     clubMemberId: key.memberId, displayName: key.name, roleTypes: key.roles, eventId: key.eventId, eventTitle: key.title, eventDate: key.date,
-    entries: 0, minutes: 0, hours: 0, rateCents: null, amountCents: opts.withRates ? 0 : null, rateMissing: false, rates: new Set<number>(),
+    entries: 0, minutes: 0, hours: 0, rateCents: null, amountCents: opts.withRates ? 0 : null, rateMissing: false, correctedEntries: 0, autoClosedEntries: 0, rates: new Set<number>(),
   });
   const grouped = new Map<string, Acc>();
   const perPerson = new Map<string, Acc>();
-  const add = (map: Map<string, Acc>, key: string, init: () => Acc, minutes: number, rate: number | null) => {
+  const add = (map: Map<string, Acc>, key: string, init: () => Acc, minutes: number, rate: number | null, flags: Pick<TimeEntryRow, "corrected" | "autoClosed">) => {
     const acc = map.get(key) ?? init();
     acc.entries += 1;
     acc.minutes += minutes;
+    if (flags.autoClosed) acc.autoClosedEntries += 1;
+    else if (flags.corrected) acc.correctedEntries += 1;
     if (opts.withRates) {
       if (rate === null) acc.rateMissing = true;
       else {
@@ -268,10 +273,10 @@ export async function buildReport(clubId: string, opts: ReportOptions): Promise<
     const person = () => make({ memberId: entry.clubMemberId, name, roles: explicit, eventId: null, title: null, date: null });
     const eventRow = () => make({ memberId: null, name: null, roles: [], eventId: entry.eventId, title, date: eventDate });
     const both = () => make({ memberId: entry.clubMemberId, name, roles: explicit, eventId: entry.eventId, title, date: eventDate });
-    add(perPerson, entry.clubMemberId, person, minutes, rate);
+    add(perPerson, entry.clubMemberId, person, minutes, rate, entry);
     if (groupBy === "person") continue;
-    if (groupBy === "event") add(grouped, entry.eventId ?? "none", eventRow, minutes, rate);
-    else add(grouped, `${entry.clubMemberId}|${entry.eventId ?? "none"}`, both, minutes, rate);
+    if (groupBy === "event") add(grouped, entry.eventId ?? "none", eventRow, minutes, rate, entry);
+    else add(grouped, `${entry.clubMemberId}|${entry.eventId ?? "none"}`, both, minutes, rate, entry);
   }
   const finish = (map: Map<string, Acc>): ReportRow[] =>
     [...map.values()]
@@ -280,7 +285,8 @@ export async function buildReport(clubId: string, opts: ReportOptions): Promise<
   const people = finish(perPerson);
   const out = groupBy === "person" ? people : finish(grouped);
   const minutes = people.reduce((n, p) => n + p.minutes, 0);
-  return { groupBy, rows: out, people, totals: { minutes, hours: round2(minutes / 60), amountCents: opts.withRates ? people.reduce((n, p) => n + (p.amountCents ?? 0), 0) : null } };
+  const sum = (k: "correctedEntries" | "autoClosedEntries") => people.reduce((n, p) => n + p[k], 0);
+  return { groupBy, rows: out, people, totals: { minutes, hours: round2(minutes / 60), amountCents: opts.withRates ? people.reduce((n, p) => n + (p.amountCents ?? 0), 0) : null, correctedEntries: sum("correctedEntries"), autoClosedEntries: sum("autoClosedEntries") } };
 }
 
 /** People (members with confirmed entries in the period, or with an applicable rate today), role types and events for the report selector. Bounded; `truncated` flags a cut list. */
