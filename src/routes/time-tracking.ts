@@ -19,7 +19,7 @@ import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibi
 import { buildCsv } from "../lib/member-csv.js";
 import { buildXlsx, type XlsxCell } from "../lib/xlsx.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
-import { assertEntryWindow, berlinDayStart, hasOtherConfirmer, isCorrection, isOverdue, maxEndOf, mayTrackTime, assertNoOverlap, runningEnd, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
+import { assertEntryWindow, berlinDayStart, hasOtherConfirmer, isCorrection, isOverdue, MAX_ENTRY_HOURS, maxEndOf, mayTrackTime, assertNoOverlap, runningEnd, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
 import { notifyTimeEntry } from "../lib/time-notify.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
@@ -115,9 +115,14 @@ const listQuery = z.object({
   status: z.enum(TIME_STATUSES).optional(),
   scope: z.enum(["mine", "team"]).optional(),
   clubMemberId: z.uuid().optional(),
+  /** `true`: only entries running for more than 16 h (the "stuck" ones), regardless of the period. */
+  overdue: z.enum(["true", "false"]).optional(),
 });
 
-/** Own entries, or - `scope=team` / `clubMemberId` - those of the members the caller may confirm (`time:write`). */
+/**
+ * Own entries, or - `scope=team` / `clubMemberId` - those of the members the caller may confirm (`time:write`). Wave 16 review: entries
+ * running for more than 16 h are always included (listed first), whatever the period, so a stuck entry never drops out of the team view.
+ */
 timeEntryRoutes.get("/", zValidator("query", listQuery, hook), async (c) => {
   const roles = c.get("clubRoleTypes");
   await requireTrackingOf(c);
@@ -139,14 +144,16 @@ timeEntryRoutes.get("/", zValidator("query", listQuery, hook), async (c) => {
       memberFilter = scope.clubMemberIds.size === 0 ? sql`false` : inArray(timeEntries.clubMemberId, [...scope.clubMemberIds]);
     }
   } else memberFilter = eq(timeEntries.clubMemberId, own.id);
+  const stuckBefore = new Date(Date.now() - MAX_ENTRY_HOURS * 3_600_000);
+  const stuck = and(isNull(timeEntries.endedAt), lt(timeEntries.startedAt, stuckBefore));
 
   const rows = await db
     .select({ entry: timeEntries, name: clubMembers.displayName, eventTitle: events.title })
     .from(timeEntries)
     .innerJoin(clubMembers, eq(clubMembers.id, timeEntries.clubMemberId))
     .leftJoin(events, eq(events.id, timeEntries.eventId))
-    .where(and(eq(timeEntries.clubId, clubId), gte(timeEntries.startedAt, berlinDayStart(from)), lt(timeEntries.startedAt, berlinDayStart(addDays(to, 1))), q.status ? eq(timeEntries.status, q.status) : undefined, memberFilter))
-    .orderBy(desc(timeEntries.startedAt))
+    .where(and(eq(timeEntries.clubId, clubId), q.overdue === "true" ? stuck : or(and(gte(timeEntries.startedAt, berlinDayStart(from)), lt(timeEntries.startedAt, berlinDayStart(addDays(to, 1)))), stuck), q.status ? eq(timeEntries.status, q.status) : undefined, memberFilter))
+    .orderBy(sql`(${timeEntries.endedAt} IS NULL AND ${timeEntries.startedAt} < ${stuckBefore}) DESC`, desc(timeEntries.startedAt))
     .limit(500);
   return c.json({ data: rows.map((r) => shapeEntry(r.entry, c.get("user").id, { displayName: r.name, eventTitle: r.eventTitle })) });
 });

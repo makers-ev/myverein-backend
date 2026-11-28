@@ -296,4 +296,21 @@ describe("a forgotten clock-in is never a dead end", () => {
     expect((note!.content as { body: string }).body).toContain("von der Leitung beendet");
     await clear(me);
   });
+
+  it("always lists stuck entries in the team view, first and regardless of the period; overdue=true lists only them", async () => {
+    const member = fx.users.trainerA;
+    await clear(member);
+    const old = await stuck(member, 24 * 45); // started 45 days ago, outside the default 30-day window
+    const [recent] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: member.clubMemberId, startedAt: hoursAgo(50), endedAt: hoursAgo(49), source: "manuell", status: "offen" }).returning();
+    const team = (await fx.json(await call(fx.users.board, "/time-entries?scope=team"))).data;
+    expect(team[0]).toMatchObject({ id: old.id, overdue: true });
+    expect(team.map((e: { id: string }) => e.id)).toContain(recent!.id);
+    const onlyStuck = (await fx.json(await call(fx.users.leaderA, "/time-entries?scope=team&overdue=true"))).data;
+    expect(onlyStuck.map((e: { id: string }) => e.id)).toEqual([old.id]);
+    // Also in the own list, and a status filter still applies.
+    expect((await fx.json(await call(member, "/time-entries"))).data[0]).toMatchObject({ id: old.id });
+    expect((await fx.json(await call(fx.users.board, "/time-entries?scope=team&status=bestaetigt"))).data.map((e: { id: string }) => e.id)).not.toContain(old.id);
+    expect((await call(fx.users.board, "/time-entries?scope=team&overdue=ja")).status).toBe(422);
+    await clear(member);
+  });
 });
