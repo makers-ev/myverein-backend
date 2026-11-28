@@ -102,8 +102,18 @@ export const timeEntries = pgTable(
     confirmedBy: text("confirmed_by").references(() => user.id, { onDelete: "set null" }),
     confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Wave 16: the end was entered afterwards (end time given more than 5 min in the past, or set by the board).
+    corrected: boolean("corrected").notNull().default(false),
+    // Wave 16 T4: ended by the sweep after TIME_AUTO_CLOSE_HOURS with ended_at = started_at + 16 h.
+    autoClosed: boolean("auto_closed").notNull().default(false),
+    // Wave 16 T3: account that ended (or rejected while running) someone else's stuck entry; cleared when the owner edits the times.
+    closedBy: text("closed_by").references(() => user.id, { onDelete: "set null" }),
+    // Wave 16 T3: set when someone else ended the entry (survives the account deletion of the closer, unlike closed_by).
+    closedByOther: boolean("closed_by_other").notNull().default(false),
+    // Wave 16 T5: the "still clocked in after 10 h" reminder was sent (once per entry).
+    longRunReminderAt: timestamp("long_run_reminder_at", { withTimezone: true }),
   },
-  (table) => [index("time_entries_member_started_idx").on(table.clubMemberId, table.startedAt), index("time_entries_club_idx").on(table.clubId)],
+  (table) => [index("time_entries_running_idx").on(table.startedAt).where(sql`${table.endedAt} IS NULL`), index("time_entries_member_started_idx").on(table.clubMemberId, table.startedAt), index("time_entries_club_idx").on(table.clubId)],
 );
 
 /** P2: hourly rate of a person or role for a period (confidential, `time:read_rates`). */

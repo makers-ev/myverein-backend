@@ -1,7 +1,8 @@
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { db } from "../db/client.js";
+import { auditLog } from "../db/schema/audit-log.js";
 import { clubMemberDepartments } from "../db/schema/club-members.js";
 import { timeEntries } from "../db/schema/event-extras.js";
 import { createEventFixture, HOUR, type EventFixture, type TestUser } from "./event-test-support.js";
@@ -72,4 +73,77 @@ describe("a forgotten clock-in is never a dead end", () => {
       await clear(member);
     });
   }
+
+  it("keeps the rules for an explicit end: order, future, 16 h cap at 15:59 / 16:01, overlap; no age limit; audit with corrected", async () => {
+    const me = fx.users.trainerA;
+    await clear(me);
+    const entry = await stuck(me, 30);
+    const end = (h: number) => new Date(entry.startedAt.getTime() + h * HOUR).toISOString();
+    const codeOf = async (res: Response) => (await fx.json(res)).error.details.code;
+    let res = await call(me, "/time-entries/clock-out", "POST", { endedAt: end(-1) });
+    expect([res.status, await codeOf(res)]).toEqual([422, "invalid_time"]);
+    res = await call(me, "/time-entries/clock-out", "POST", { endedAt: end(16 + 1 / 60) });
+    expect([res.status, await codeOf(res)]).toEqual([422, "too_long"]);
+    res = await call(me, "/time-entries/clock-out", "POST", { endedAt: new Date(Date.now() + HOUR).toISOString() });
+    expect([res.status, await codeOf(res)]).toEqual([422, "in_future"]);
+    expect((await call(me, "/time-entries/clock-out", "POST", { endedAt: "gestern" })).status).toBe(422);
+    // A manual entry inside the window (inserted directly: the API refuses it while the clock runs) blocks an end across it.
+    const [other] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: me.clubMemberId, startedAt: new Date(entry.startedAt.getTime() + 2 * HOUR), endedAt: new Date(entry.startedAt.getTime() + 3 * HOUR), source: "manuell", status: "offen" }).returning();
+    res = await call(me, "/time-entries/clock-out", "POST", { endedAt: end(4) });
+    expect([res.status, await codeOf(res)]).toEqual([409, "entry_overlap"]);
+    await db.delete(timeEntries).where(eq(timeEntries.id, other!.id));
+    // Exactly 16 h minus a minute is fine; the entry is flagged and audited as corrected.
+    res = await call(me, "/time-entries/clock-out", "POST", { endedAt: end(16 - 1 / 60) });
+    expect(res.status).toBe(200);
+    expect((await fx.json(res)).data).toMatchObject({ minutes: 16 * 60 - 1, corrected: true, overdue: false, maxEndedAt: null });
+    const [audit] = await db.select().from(auditLog).where(and(eq(auditLog.clubId, fx.clubId), eq(auditLog.eventType, "time_entry.clock_out"))).orderBy(desc(auditLog.createdAt)).limit(1);
+    expect(audit!.payload).toMatchObject({ entryId: entry.id, corrected: true });
+    // A normal clock-out (no body, < 16 h) is not a correction; an end "now" sent by the client is not one either.
+    expect((await call(me, "/time-entries/clock-in", "POST", {})).status).toBe(201);
+    res = await call(me, "/time-entries/clock-out", "POST", { endedAt: new Date(Date.now() + 60_000).toISOString() });
+    expect(res.status).toBe(200);
+    expect((await fx.json(res)).data).toMatchObject({ corrected: false });
+    // More than a year old and still running: still endable (no too_old for ending a running entry).
+    const ancient = await stuck(me, 400 * 24);
+    res = await call(me, `/time-entries/${ancient.id}`, "PATCH", { endedAt: new Date(ancient.startedAt.getTime() + HOUR).toISOString() });
+    expect(res.status).toBe(200);
+    await clear(me);
+  });
+
+  it("shows overdue and maxEndedAt on the running entry, and serializes parallel corrections", async () => {
+    const me = fx.users.trainerA;
+    await clear(me);
+    const fresh = await stuck(me, 15 + 59 / 60);
+    let current = (await fx.json(await call(me, "/time-entries/current"))).data;
+    expect(current).toMatchObject({ id: fresh.id, running: true, overdue: false, corrected: false, autoClosed: false, closedByOther: false });
+    expect(Math.abs(new Date(current.maxEndedAt).getTime() - Date.now())).toBeLessThan(60_000);
+    await clear(me);
+    const entry = await stuck(me, 16 + 1 / 60);
+    current = (await fx.json(await call(me, "/time-entries/current"))).data;
+    expect(current).toMatchObject({ overdue: true });
+    expect(new Date(current.maxEndedAt).getTime()).toBe(entry.startedAt.getTime() + 16 * HOUR);
+    const end = new Date(entry.startedAt.getTime() + HOUR).toISOString();
+    const results = await Promise.all(Array.from({ length: 4 }, () => call(me, "/time-entries/clock-out", "POST", { endedAt: end })));
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409, 409, 409]);
+    await clear(me);
+  });
+
+  it("lets a person whose rate lapsed end or discard a stuck entry, but not move a finished one", async () => {
+    const m = fx.users.member2;
+    await clear(m);
+    const entry = await stuck(m, 50);
+    expect((await call(m, "/time-entries/clock-out", "POST")).status).toBe(409);
+    const res = await call(m, `/time-entries/${entry.id}`, "PATCH", { endedAt: new Date(entry.startedAt.getTime() + HOUR).toISOString() });
+    expect(res.status).toBe(200);
+    expect((await call(m, `/time-entries/${entry.id}`, "PATCH", { endedAt: new Date(entry.startedAt.getTime() + 2 * HOUR).toISOString() })).status).toBe(403);
+    const second = await stuck(m, 20);
+    expect((await call(m, `/time-entries/${second.id}`, "DELETE")).status).toBe(204);
+    // Somebody else's running entry stays invisible.
+    const foreign = await stuck(fx.users.trainerA, 20);
+    // Without a rate and without an own running entry, PATCH is denied before any lookup (deny by default); DELETE finds nothing.
+    expect((await call(m, `/time-entries/${foreign.id}`, "PATCH", { endedAt: new Date().toISOString() })).status).toBe(403);
+    expect((await call(m, `/time-entries/${foreign.id}`, "DELETE")).status).toBe(404);
+    await clear(m);
+    await clear(fx.users.trainerA);
+  });
 });

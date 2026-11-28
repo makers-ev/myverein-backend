@@ -40,7 +40,10 @@ describe("time tracking", () => {
     expect(parallel.map((r) => r.status).filter((s) => s === 409)).toHaveLength(4);
     const current = (await fx.json(await call(fx.users.trainerA, "/time-entries/current"))).data;
     expect(current).toMatchObject({ running: true, source: "stempeln", status: "offen" });
-    expect((await call(fx.users.trainerA, `/time-entries/${current.id}`, "PATCH", { endedAt: new Date().toISOString() })).status).toBe(409);
+    // A running entry is only ended through an end time (Wave 16 T2); moving just its start stays 409 running.
+    const startOnly = await call(fx.users.trainerA, `/time-entries/${current.id}`, "PATCH", { startedAt: new Date(Date.now() - HOUR).toISOString() });
+    expect(startOnly.status).toBe(409);
+    expect((await fx.json(startOnly)).error.details.code).toBe("running");
     const out = await call(fx.users.trainerA, "/time-entries/clock-out", "POST");
     expect(out.status).toBe(200);
     expect((await fx.json(out)).data.running).toBe(false);

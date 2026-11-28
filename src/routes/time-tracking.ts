@@ -19,7 +19,7 @@ import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibi
 import { buildCsv } from "../lib/member-csv.js";
 import { buildXlsx, type XlsxCell } from "../lib/xlsx.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
-import { assertEntryWindow, berlinDayStart, mayTrackTime, assertNoOverlap, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
+import { assertEntryWindow, berlinDayStart, isCorrection, isOverdue, maxEndOf, mayTrackTime, assertNoOverlap, runningEnd, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -74,8 +74,30 @@ function shapeEntry(row: TimeEntryRow, extra: { displayName?: string | null; eve
     source: row.source,
     status: row.status,
     confirmedAt: row.confirmedAt,
+    // Wave 16: how the end came about, and the way out of a running entry.
+    corrected: row.corrected,
+    autoClosed: row.autoClosed,
+    closedByOther: row.closedByOther,
+    overdue: isOverdue(row),
+    maxEndedAt: row.endedAt === null ? maxEndOf(row.startedAt) : null,
   };
 }
+
+/** Optional JSON body (an empty body is fine). */
+async function readJson(c: Context): Promise<Record<string, unknown>> {
+  const text = await c.req.text();
+  if (text.trim() === "") return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    return parsed as Record<string, unknown>;
+  } catch {
+    throw new ValidationError("Invalid JSON body");
+  }
+}
+
+const isoInstant = z.string().datetime({ offset: true });
+const endSchema = z.object({ endedAt: isoInstant.optional() });
 
 // --- Entries -------------------------------------------------------------------------------------------------------------------------
 
@@ -158,18 +180,31 @@ timeEntryRoutes.post("/clock-in", needsTracking(), zValidator("json", clockInSch
   return c.json({ data: shapeEntry(row) }, 201);
 });
 
+/**
+ * Stops the caller's running entry. Within 16 h without a body it ends now (as before). Wave 16 T1: a running entry older than 16 h is
+ * never capped silently -- 409 `needs_end_time` (with `startedAt`, `maxEndedAt`) asks the client for the end, which it resends as
+ * `endedAt` (`startedAt < endedAt <= min(now, startedAt + 16 h)`). The entry stays `offen` until somebody else confirms it.
+ */
 timeEntryRoutes.post("/clock-out", async (c) => {
   // No rate check: a running entry must be stoppable even after the rate lapsed.
   const own = await ownMember(c);
+  const parsed = endSchema.safeParse(await readJson(c));
+  if (!parsed.success) throw new ValidationError("Invalid request body", { details: parsed.error.issues });
+  const given = parsed.data.endedAt ? new Date(parsed.data.endedAt) : null;
   const clubId = c.get("clubId");
   const row = await db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`time:${own.id}`}, 0))`);
     const [running] = await tx.select().from(timeEntries).where(and(eq(timeEntries.clubMemberId, own.id), isNull(timeEntries.endedAt))).for("update");
     if (!running) throw new ConflictError("No time entry is running", { details: { code: "none_running" } });
-    const endedAt = new Date();
-    assertEntryWindow(running.startedAt, endedAt);
-    const [done] = await tx.update(timeEntries).set({ endedAt }).where(eq(timeEntries.id, running.id)).returning();
-    await writeAudit(tx, { eventType: "time_entry.clock_out", subjectId: own.id, payload: { clubId, entryId: running.id, clubMemberId: own.id } });
+    const now = new Date();
+    if (!given && isOverdue(running, now)) {
+      throw new ConflictError("The entry has been running for more than 16 hours. Enter the time it ended.", { details: { code: "needs_end_time", entryId: running.id, startedAt: running.startedAt.toISOString(), maxEndedAt: maxEndOf(running.startedAt, now).toISOString() } });
+    }
+    const endedAt = given ? runningEnd(running.startedAt, given, now) : now;
+    const corrected = given !== null && isCorrection(given, now);
+    await assertNoOverlap(tx, own.id, running.startedAt, endedAt, running.id);
+    const [done] = await tx.update(timeEntries).set({ endedAt, corrected }).where(eq(timeEntries.id, running.id)).returning();
+    await writeAudit(tx, { eventType: "time_entry.clock_out", subjectId: own.id, payload: { clubId, entryId: running.id, clubMemberId: own.id, corrected } });
     return done!;
   });
   return c.json({ data: shapeEntry(row) });
@@ -266,24 +301,40 @@ async function ownOpenEntry(c: Context<ClubEnv>, tx: Pick<typeof db, "select">, 
   return row;
 }
 
-timeEntryRoutes.patch("/:id", needsTracking(), zValidator("json", manualSchema.partial().omit({ eventId: true }).refine((v) => Object.keys(v).length > 0, { message: "Nothing to update" }), hook), async (c) => {
+const patchSchema = manualSchema.partial().omit({ eventId: true }).refine((v) => Object.keys(v).length > 0, { message: "Nothing to update" });
+
+/**
+ * Own open entry. Finished: start/end as before (needs the right to track). Wave 16 T2: a RUNNING entry can be ended here by sending
+ * `endedAt` (the rules of clock-out apply, no rate check, so nothing is stranded); without `endedAt` it stays 409 `running`.
+ * An owner edit lifts the "closed by someone else" marker (the person now vouches for the times; `closed_by_other` stays as history).
+ */
+timeEntryRoutes.patch("/:id", needsTrackingOrRunning(), zValidator("json", patchSchema, hook), async (c) => {
   const body = c.req.valid("json");
   const clubId = c.get("clubId");
   const row = await db.transaction(async (tx) => {
     const entry = await ownOpenEntry(c, tx, true);
-    if (entry.endedAt === null) throw new ConflictError("Stop the running entry first", { details: { code: "running" } });
+    const running = entry.endedAt === null;
+    if (running && !body.endedAt) throw new ConflictError("Stop the running entry first", { details: { code: "running" } });
+    if (!running || body.startedAt) await requireTrackingOf(c);
+    const now = new Date();
     const startedAt = body.startedAt ? new Date(body.startedAt) : entry.startedAt;
-    const endedAt = body.endedAt ? new Date(body.endedAt) : entry.endedAt;
-    assertEntryWindow(startedAt, endedAt);
+    let endedAt: Date;
+    if (running && !body.startedAt) endedAt = runningEnd(startedAt, new Date(body.endedAt!), now);
+    else {
+      endedAt = body.endedAt ? new Date(body.endedAt) : entry.endedAt!;
+      assertEntryWindow(startedAt, endedAt, now);
+    }
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`time:${entry.clubMemberId}`}, 0))`);
     await assertNoOverlap(tx, entry.clubMemberId, startedAt, endedAt, entry.id);
-    const [updated] = await tx.update(timeEntries).set({ startedAt, endedAt }).where(eq(timeEntries.id, entry.id)).returning();
-    await writeAudit(tx, { eventType: "time_entry.update", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId } });
+    const corrected = entry.corrected || (running && isCorrection(endedAt, now));
+    const [updated] = await tx.update(timeEntries).set({ startedAt, endedAt, corrected, closedBy: null }).where(eq(timeEntries.id, entry.id)).returning();
+    await writeAudit(tx, { eventType: "time_entry.update", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId, corrected, endedRunning: running } });
     return updated!;
   });
   return c.json({ data: shapeEntry(row) });
 });
 
+/** Own open entry, finished or RUNNING: deleting a running entry is the documented way out ("Eintrag verwerfen", Wave 16 T2). */
 timeEntryRoutes.delete("/:id", async (c) => {
   const clubId = c.get("clubId");
   await db.transaction(async (tx) => {
@@ -318,6 +369,21 @@ function decide(status: "bestaetigt" | "abgelehnt") {
 }
 timeEntryRoutes.post("/:id/confirm", needsPermission("time:write"), decide("bestaetigt"));
 timeEntryRoutes.post("/:id/reject", needsPermission("time:write"), decide("abgelehnt"));
+
+/** Deny by default like `needsTracking`, except for a person with a running entry of their own (ending it must never need a rate). */
+function needsTrackingOrRunning() {
+  return async (c: Context<ClubEnv>, next: () => Promise<void>) => {
+    try {
+      await requireTrackingOf(c);
+    } catch (err) {
+      const own = err instanceof ForbiddenError ? await ownOrNull(c) : null;
+      if (!own) throw err;
+      const [running] = await db.select({ id: timeEntries.id }).from(timeEntries).where(and(eq(timeEntries.clubMemberId, own.id), isNull(timeEntries.endedAt))).limit(1);
+      if (!running) throw err;
+    }
+    await next();
+  };
+}
 
 function needsTracking() {
   return async (c: Context<ClubEnv>, next: () => Promise<void>) => {

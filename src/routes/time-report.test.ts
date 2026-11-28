@@ -270,11 +270,15 @@ describe("time tracking by rate and the extended report", () => {
     expect(current).toMatchObject({ running: true });
     expect((await call(m, "/time-entries", "POST", { startedAt: hoursAgo(3).toISOString(), endedAt: hoursAgo(2).toISOString() })).status).toBe(403);
     expect((await call(m, "/time-entries/clock-out", "POST")).status).toBe(200);
-    // A second running entry that is older than 16 h cannot be closed (422 too_long), but can be deleted.
+    // A second running entry that is older than 16 h is never capped silently (409 needs_end_time), keeps the 16 h cap for an explicit
+    // end (422 too_long), and can still be deleted (Wave 16).
     const [old] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: m.clubMemberId, startedAt: hoursAgo(40), source: "stempeln", status: "offen" }).returning();
     const stop = await call(m, "/time-entries/clock-out", "POST");
-    expect(stop.status).toBe(422);
-    expect((await fx.json(stop)).error.details.code).toBe("too_long");
+    expect(stop.status).toBe(409);
+    expect((await fx.json(stop)).error.details.code).toBe("needs_end_time");
+    const tooLong = await call(m, "/time-entries/clock-out", "POST", { endedAt: hoursAgo(23).toISOString() });
+    expect(tooLong.status).toBe(422);
+    expect((await fx.json(tooLong)).error.details.code).toBe("too_long");
     expect((await call(m, `/time-entries/${old!.id}`, "DELETE")).status).toBe(204);
     const [mine] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: m.clubMemberId, startedAt: hoursAgo(5), endedAt: hoursAgo(4), source: "manuell", status: "offen" }).returning();
     expect((await call(m, `/time-entries/${mine!.id}`, "DELETE")).status).toBe(204);

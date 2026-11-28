@@ -95,6 +95,31 @@ export function assertEntryWindow(startedAt: Date, endedAt: Date, now = new Date
   if (now.getTime() - startedAt.getTime() > MAX_AGE_DAYS * 86_400_000) throw new ValidationError("The entry is too old to be recorded", { details: { code: "too_old" } });
 }
 
+/** Tolerance for client clocks: an end up to 5 min ahead of the server is stored as "now"; an end more than 5 min in the past is a correction. */
+export const END_SLACK_MS = 5 * 60_000;
+const MAX_ENTRY_MS = MAX_ENTRY_HOURS * 3_600_000;
+
+/** Latest end a running entry may get: `min(now, startedAt + 16 h)`. */
+export const maxEndOf = (startedAt: Date, now = new Date()): Date => new Date(Math.min(now.getTime(), startedAt.getTime() + MAX_ENTRY_MS));
+
+/** Running for more than 16 h: it can no longer be stopped "now" and needs an explicit end (Wave 16). */
+export const isOverdue = (entry: Pick<TimeEntryRow, "startedAt" | "endedAt">, now = new Date()): boolean => entry.endedAt === null && now.getTime() - entry.startedAt.getTime() > MAX_ENTRY_MS;
+
+/** The given end lies clearly in the past (an end time entered afterwards, flagged `corrected`). */
+export const isCorrection = (endedAt: Date, now = new Date()): boolean => endedAt.getTime() < now.getTime() - END_SLACK_MS;
+
+/**
+ * Wave 16 T1: rules for ENDING a running entry with an explicit end: `startedAt < endedAt <= min(now, startedAt + 16 h)` (5 min clock
+ * tolerance, stored as now). Returns the end to store. Unlike `assertEntryWindow` there is no age limit: an entry that has been running
+ * for longer than a year must still be endable, otherwise it would block the person forever.
+ */
+export function runningEnd(startedAt: Date, endedAt: Date, now = new Date()): Date {
+  if (endedAt <= startedAt) throw new ValidationError("endedAt must be after startedAt", { details: { code: "invalid_time" } });
+  if (endedAt.getTime() > now.getTime() + END_SLACK_MS) throw new ValidationError("An entry cannot end in the future", { details: { code: "in_future" } });
+  if (endedAt.getTime() - startedAt.getTime() > MAX_ENTRY_MS) throw new ValidationError(`An entry covers at most ${MAX_ENTRY_HOURS} hours`, { details: { code: "too_long" } });
+  return endedAt > now ? now : endedAt;
+}
+
 /** Another entry of the person overlapping [startedAt, endedAt) (a running entry counts until now). */
 export async function assertNoOverlap(tx: DbExecutor, clubMemberId: string, startedAt: Date, endedAt: Date, exceptId?: string): Promise<void> {
   const rows = await tx.select().from(timeEntries).where(and(eq(timeEntries.clubMemberId, clubMemberId), lte(timeEntries.startedAt, endedAt)));
