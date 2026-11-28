@@ -128,6 +128,20 @@ describe("a forgotten clock-in is never a dead end", () => {
     const results = await Promise.all(Array.from({ length: 4 }, () => call(me, "/time-entries/clock-out", "POST", { endedAt: end })));
     expect(results.map((r) => r.status).sort()).toEqual([200, 409, 409, 409]);
     await clear(me);
+    // Person (clock-out, PATCH) and board (close, reject) at the same time: serialized, no deadlock, no 500, the entry ends.
+    const race = await stuck(me, 30);
+    const raceEnd = { endedAt: new Date(race.startedAt.getTime() + 2 * HOUR).toISOString() };
+    const mixed = await Promise.all([
+      call(me, "/time-entries/clock-out", "POST", raceEnd),
+      call(me, `/time-entries/${race.id}`, "PATCH", raceEnd),
+      call(fx.users.board, `/time-entries/${race.id}/close`, "POST", raceEnd),
+      call(fx.users.leaderA, `/time-entries/${race.id}/reject`, "POST"),
+      call(me, `/time-entries/${race.id}`, "PATCH", raceEnd),
+    ]);
+    const statuses = mixed.map((r) => r.status);
+    expect(statuses.every((st) => st < 500), statuses.join(",")).toBe(true);
+    expect((await db.select().from(timeEntries).where(eq(timeEntries.id, race.id)))[0]!.endedAt).not.toBeNull();
+    await clear(me);
   });
 
   it("lets a person whose rate lapsed end or discard a stuck entry, but not move a finished one", async () => {

@@ -312,7 +312,10 @@ const patchSchema = manualSchema.partial().omit({ eventId: true }).refine((v) =>
 timeEntryRoutes.patch("/:id", needsTrackingOrRunning(), zValidator("json", patchSchema, hook), async (c) => {
   const body = c.req.valid("json");
   const clubId = c.get("clubId");
+  const own = await ownMember(c);
   const row = await db.transaction(async (tx) => {
+    // Per-person advisory lock BEFORE the row lock -- the same order as clock-out, /close and the sweep (no lock-order deadlock).
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`time:${own.id}`}, 0))`);
     const entry = await ownOpenEntry(c, tx, true);
     const running = entry.endedAt === null;
     if (running && !body.endedAt) throw new ConflictError("Stop the running entry first", { details: { code: "running" } });
@@ -325,7 +328,6 @@ timeEntryRoutes.patch("/:id", needsTrackingOrRunning(), zValidator("json", patch
       endedAt = body.endedAt ? new Date(body.endedAt) : entry.endedAt!;
       assertEntryWindow(startedAt, endedAt, now);
     }
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`time:${entry.clubMemberId}`}, 0))`);
     await assertNoOverlap(tx, entry.clubMemberId, startedAt, endedAt, entry.id);
     const corrected = entry.corrected || (running && isCorrection(endedAt, now));
     const [updated] = await tx.update(timeEntries).set({ startedAt, endedAt, corrected, closedBy: null }).where(eq(timeEntries.id, entry.id)).returning();
