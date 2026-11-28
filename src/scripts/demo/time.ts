@@ -182,8 +182,12 @@ export async function seedTimeTracking(ctx: DemoCtx): Promise<void> {
 
   // Lukas has started his clock about 90 minutes ago and has not stopped it (ended_at stays NULL).
   await add("mitglied", new Date(ctx.now.getTime() - 90 * 60_000), null, "stempeln", "offen", null);
+  // Wave 16: Nina forgot to clock out 20 hours ago -- a stuck entry (> 16 h): clock-out asks for the end (needs_end_time), the board can
+  // close it. It stays below TIME_AUTO_CLOSE_HOURS (24), so the sweep only reminds; the 10 h reminder is marked as sent.
+  await add("trainer3", new Date(ctx.now.getTime() - 20 * 3_600_000), null, "stempeln", "offen", null);
+  await db.update(timeEntries).set({ longRunReminderAt: new Date(ctx.now.getTime() - 10 * 3_600_000) }).where(and(eq(timeEntries.clubId, ctx.clubId), eq(timeEntries.clubMemberId, accountOf(ctx, "trainer3").clubMemberId), isNull(timeEntries.endedAt)));
 
-  ctx.log(`${cards.length} Stundensätze (Rollen- und persönliche Sätze, abgelaufen und zukünftig), ${created} Zeiteinträge (bestätigt, offen, abgelehnt, über Mitternacht, eine laufende Uhr)`);
+  ctx.log(`${cards.length} Stundensätze (Rollen- und persönliche Sätze, abgelaufen und zukünftig), ${created} Zeiteinträge (bestätigt, offen, abgelehnt, über Mitternacht, eine laufende Uhr, eine seit 20 Stunden hängende Uhr)`);
 }
 
 /** "Which login for what" of the time tracking demo (printed at the end of the seed). */
@@ -193,7 +197,7 @@ export const TIME_LOGIN_HINTS: ReadonlyArray<{ login: string; use: string }> = [
   { login: "abteilungsleitung@", use: "Stundenbericht nur mit Stunden (keine Beträge), nur Abteilung Fußball (Marco, Ute); bestätigt Zeiten der Abteilung, nicht die eigenen" },
   { login: "abteilungsleitung2@", use: "Stundenbericht nur Stunden der Abteilung Tennis (Lukas, Lena, Monika)" },
   { login: "trainer@", use: "Zeiterfassung mit persönlichem Satz: 20 EUR/h bis vor 31 Tagen, danach 25 EUR/h; Vorschläge aus Terminen" },
-  { login: "trainer3@", use: "Trainerin Schwimmen: Satz der Rolle Trainer (18 EUR/h), offene Zeiten; Abteilung ohne Leitung, nur der Vorstand sieht ihre Stunden" },
+  { login: "trainer3@", use: "Trainerin Schwimmen: Satz der Rolle Trainer (18 EUR/h), offene Zeiten; Abteilung ohne Leitung, nur der Vorstand sieht ihre Stunden. Ihre Stempeluhr hängt seit 20 Stunden: \"Ende nachtragen\" oder \"Verwerfen\"; vorsitz@ kann den Eintrag beenden oder ablehnen" },
   { login: "mitglied@", use: "Zeiterfassung ohne Trainer- oder Leitungsrolle über den Satz für alle Mitglieder (8 EUR/h); die Stempeluhr läuft seit dem Seed" },
   { login: "gast@ / erziehungsberechtigt@", use: "Externe ohne Stundensatz: Zeiterfassung wird mit no_rate abgelehnt (Fall \"kein Satz\")" },
 ];

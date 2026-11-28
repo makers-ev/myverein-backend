@@ -19,7 +19,8 @@ import { getVisibleCalendarIds, isCalendarVisible } from "../lib/calendar-visibi
 import { buildCsv } from "../lib/member-csv.js";
 import { buildXlsx, type XlsxCell } from "../lib/xlsx.js";
 import { todayBerlin } from "../lib/member-lifecycle.js";
-import { assertEntryWindow, berlinDayStart, mayTrackTime, assertNoOverlap, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
+import { assertEntryWindow, berlinDayStart, hasOtherConfirmer, isCorrection, isOverdue, MAX_ENTRY_HOURS, maxEndOf, mayTrackTime, assertNoOverlap, runningEnd, buildReport, inScope, minutesOf, reportPeople, REPORT_GROUPS, requireTracking, timeScopeOf, TIME_STATUSES, type ReportRow } from "../lib/time-tracking.js";
+import { notifyTimeEntry } from "../lib/time-notify.js";
 import { clubGuard, type ClubEnv } from "../middleware/club-guard.js";
 import { rateLimit } from "../middleware/rate-limit.js";
 import { sessionGuard } from "../middleware/session-guard.js";
@@ -60,7 +61,8 @@ async function requireTrackingOf(c: Context<ClubEnv>): Promise<void> {
   await requireTracking(c.get("clubId"), own?.id ?? null, roles);
 }
 
-function shapeEntry(row: TimeEntryRow, extra: { displayName?: string | null; eventTitle?: string | null } = {}) {
+/** `viewer` = the caller's user id: `closedByYou` is only true for the person who ended someone else's entry (UI explains "Bestätigen"). */
+function shapeEntry(row: TimeEntryRow, viewer: string | null, extra: { displayName?: string | null; eventTitle?: string | null } = {}) {
   return {
     id: row.id,
     clubMemberId: row.clubMemberId,
@@ -74,8 +76,31 @@ function shapeEntry(row: TimeEntryRow, extra: { displayName?: string | null; eve
     source: row.source,
     status: row.status,
     confirmedAt: row.confirmedAt,
+    // Wave 16: how the end came about, and the way out of a running entry.
+    corrected: row.corrected,
+    autoClosed: row.autoClosed,
+    closedByOther: row.closedByOther,
+    closedByYou: viewer !== null && row.closedBy === viewer,
+    overdue: isOverdue(row),
+    maxEndedAt: row.endedAt === null ? maxEndOf(row.startedAt) : null,
   };
 }
+
+/** Optional JSON body (an empty body is fine). */
+async function readJson(c: Context): Promise<Record<string, unknown>> {
+  const text = await c.req.text();
+  if (text.trim() === "") return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    return parsed as Record<string, unknown>;
+  } catch {
+    throw new ValidationError("Invalid JSON body");
+  }
+}
+
+const isoInstant = z.string().datetime({ offset: true });
+const endSchema = z.object({ endedAt: isoInstant.optional() });
 
 // --- Entries -------------------------------------------------------------------------------------------------------------------------
 
@@ -90,9 +115,14 @@ const listQuery = z.object({
   status: z.enum(TIME_STATUSES).optional(),
   scope: z.enum(["mine", "team"]).optional(),
   clubMemberId: z.uuid().optional(),
+  /** `true`: only entries running for more than 16 h (the "stuck" ones), regardless of the period. */
+  overdue: z.enum(["true", "false"]).optional(),
 });
 
-/** Own entries, or - `scope=team` / `clubMemberId` - those of the members the caller may confirm (`time:write`). */
+/**
+ * Own entries, or - `scope=team` / `clubMemberId` - those of the members the caller may confirm (`time:write`). Wave 16 review: entries
+ * running for more than 16 h are always included (listed first), whatever the period, so a stuck entry never drops out of the team view.
+ */
 timeEntryRoutes.get("/", zValidator("query", listQuery, hook), async (c) => {
   const roles = c.get("clubRoleTypes");
   await requireTrackingOf(c);
@@ -114,16 +144,18 @@ timeEntryRoutes.get("/", zValidator("query", listQuery, hook), async (c) => {
       memberFilter = scope.clubMemberIds.size === 0 ? sql`false` : inArray(timeEntries.clubMemberId, [...scope.clubMemberIds]);
     }
   } else memberFilter = eq(timeEntries.clubMemberId, own.id);
+  const stuckBefore = new Date(Date.now() - MAX_ENTRY_HOURS * 3_600_000);
+  const stuck = and(isNull(timeEntries.endedAt), lt(timeEntries.startedAt, stuckBefore));
 
   const rows = await db
     .select({ entry: timeEntries, name: clubMembers.displayName, eventTitle: events.title })
     .from(timeEntries)
     .innerJoin(clubMembers, eq(clubMembers.id, timeEntries.clubMemberId))
     .leftJoin(events, eq(events.id, timeEntries.eventId))
-    .where(and(eq(timeEntries.clubId, clubId), gte(timeEntries.startedAt, berlinDayStart(from)), lt(timeEntries.startedAt, berlinDayStart(addDays(to, 1))), q.status ? eq(timeEntries.status, q.status) : undefined, memberFilter))
-    .orderBy(desc(timeEntries.startedAt))
+    .where(and(eq(timeEntries.clubId, clubId), q.overdue === "true" ? stuck : or(and(gte(timeEntries.startedAt, berlinDayStart(from)), lt(timeEntries.startedAt, berlinDayStart(addDays(to, 1)))), stuck), q.status ? eq(timeEntries.status, q.status) : undefined, memberFilter))
+    .orderBy(sql`(${timeEntries.endedAt} IS NULL AND ${timeEntries.startedAt} < ${stuckBefore}) DESC`, desc(timeEntries.startedAt))
     .limit(500);
-  return c.json({ data: rows.map((r) => shapeEntry(r.entry, { displayName: r.name, eventTitle: r.eventTitle })) });
+  return c.json({ data: rows.map((r) => shapeEntry(r.entry, c.get("user").id, { displayName: r.name, eventTitle: r.eventTitle })) });
 });
 
 /** The running entry of the caller, if any (for the stamp button). */
@@ -131,7 +163,7 @@ timeEntryRoutes.get("/current", async (c) => {
   // No rate check: a running entry must stay visible (and stoppable) even after the rate lapsed.
   const own = await ownMember(c);
   const [row] = await db.select({ entry: timeEntries, eventTitle: events.title }).from(timeEntries).leftJoin(events, eq(events.id, timeEntries.eventId)).where(and(eq(timeEntries.clubMemberId, own.id), isNull(timeEntries.endedAt)));
-  return c.json({ data: row ? shapeEntry(row.entry, { eventTitle: row.eventTitle }) : null });
+  return c.json({ data: row ? shapeEntry(row.entry, c.get("user").id, { eventTitle: row.eventTitle }) : null });
 });
 
 async function visibleEventOrNull(c: Context<ClubEnv>, eventId: string | undefined): Promise<void> {
@@ -155,24 +187,40 @@ timeEntryRoutes.post("/clock-in", needsTracking(), zValidator("json", clockInSch
     await writeAudit(tx, { eventType: "time_entry.clock_in", subjectId: own.id, payload: { clubId, entryId: created!.id, clubMemberId: own.id } });
     return created!;
   });
-  return c.json({ data: shapeEntry(row) }, 201);
+  return c.json({ data: shapeEntry(row, c.get("user").id) }, 201);
 });
 
+/**
+ * Stops the caller's running entry. Within 16 h without a body it ends now (as before). Wave 16 T1: a running entry older than 16 h is
+ * never capped silently -- 409 `needs_end_time` (with `startedAt`, `maxEndedAt`) asks the client for the end, which it resends as
+ * `endedAt` (`startedAt < endedAt <= min(now, startedAt + 16 h)`). The entry stays `offen` until somebody else confirms it.
+ */
 timeEntryRoutes.post("/clock-out", async (c) => {
   // No rate check: a running entry must be stoppable even after the rate lapsed.
   const own = await ownMember(c);
+  const raw = await readJson(c);
+  if ("endedAt" in raw && raw.endedAt === null) throw new ValidationError("endedAt must be a date-time, or left out to stop now", { details: { code: "invalid_time" } });
+  const parsed = endSchema.safeParse(raw);
+  if (!parsed.success) throw new ValidationError("Invalid request body", { details: parsed.error.issues });
+  const given = parsed.data.endedAt ? new Date(parsed.data.endedAt) : null;
   const clubId = c.get("clubId");
   const row = await db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`time:${own.id}`}, 0))`);
     const [running] = await tx.select().from(timeEntries).where(and(eq(timeEntries.clubMemberId, own.id), isNull(timeEntries.endedAt))).for("update");
     if (!running) throw new ConflictError("No time entry is running", { details: { code: "none_running" } });
-    const endedAt = new Date();
-    assertEntryWindow(running.startedAt, endedAt);
-    const [done] = await tx.update(timeEntries).set({ endedAt }).where(eq(timeEntries.id, running.id)).returning();
-    await writeAudit(tx, { eventType: "time_entry.clock_out", subjectId: own.id, payload: { clubId, entryId: running.id, clubMemberId: own.id } });
+    const now = new Date();
+    if (!given && isOverdue(running, now)) {
+      throw new ConflictError("The entry has been running for more than 16 hours. Enter the time it ended.", { details: { code: "needs_end_time", entryId: running.id, startedAt: running.startedAt.toISOString(), maxEndedAt: maxEndOf(running.startedAt, now).toISOString() } });
+    }
+    const endedAt = given ? runningEnd(running.startedAt, given, now) : now;
+    const corrected = given !== null && isCorrection(given, now);
+    // Only an explicit end is checked for overlaps; a plain stop "now" stays as before Wave 16 (a manual entry may end up to 5 min ahead).
+    if (given) await assertNoOverlap(tx, own.id, running.startedAt, endedAt, running.id);
+    const [done] = await tx.update(timeEntries).set({ endedAt, corrected }).where(eq(timeEntries.id, running.id)).returning();
+    await writeAudit(tx, { eventType: "time_entry.clock_out", subjectId: own.id, payload: { clubId, entryId: running.id, clubMemberId: own.id, corrected } });
     return done!;
   });
-  return c.json({ data: shapeEntry(row) });
+  return c.json({ data: shapeEntry(row, c.get("user").id) });
 });
 
 const manualSchema = z.object({ startedAt: z.string().datetime({ offset: true }), endedAt: z.string().datetime({ offset: true }), eventId: z.uuid().optional() });
@@ -193,7 +241,7 @@ timeEntryRoutes.post("/", needsTracking(), zValidator("json", manualSchema, hook
     await writeAudit(tx, { eventType: "time_entry.create", subjectId: own.id, payload: { clubId, entryId: created!.id, clubMemberId: own.id, source: "manuell" } });
     return created!;
   });
-  return c.json({ data: shapeEntry(row) }, 201);
+  return c.json({ data: shapeEntry(row, c.get("user").id) }, 201);
 });
 
 /** Events the caller supervised or attended as trainer, with a list, that ended and have no time entry yet: PROPOSALS only. */
@@ -252,7 +300,7 @@ timeEntryRoutes.post("/from-event", needsTracking(), zValidator("json", z.object
     await writeAudit(tx, { eventType: "time_entry.create", subjectId: own.id, payload: { clubId, entryId: created!.id, clubMemberId: own.id, source: "aus_termin" } });
     return created!;
   });
-  return c.json({ data: shapeEntry(row, { eventTitle: proposal.title }) }, 201);
+  return c.json({ data: shapeEntry(row, c.get("user").id, { eventTitle: proposal.title }) }, 201);
 });
 
 async function ownOpenEntry(c: Context<ClubEnv>, tx: Pick<typeof db, "select">, lock = false) {
@@ -266,24 +314,45 @@ async function ownOpenEntry(c: Context<ClubEnv>, tx: Pick<typeof db, "select">, 
   return row;
 }
 
-timeEntryRoutes.patch("/:id", needsTracking(), zValidator("json", manualSchema.partial().omit({ eventId: true }).refine((v) => Object.keys(v).length > 0, { message: "Nothing to update" }), hook), async (c) => {
+const patchSchema = manualSchema.partial().omit({ eventId: true }).refine((v) => Object.keys(v).length > 0, { message: "Nothing to update" });
+
+/**
+ * Own open entry. Finished: start/end as before. Wave 16 T2: a RUNNING entry can be ended here by sending `endedAt` (the rules of
+ * clock-out apply); without `endedAt` it stays 409 `running`. Correcting one's own open entry never needs a current rate (review: a
+ * lapsed rate must not strand an entry the board closed and wants corrected).
+ * An owner edit lifts the "closed by someone else" marker (the person now vouches for the times; `closed_by_other` stays as history).
+ */
+timeEntryRoutes.patch("/:id", needsTrackingOrOwnOpen(), zValidator("json", patchSchema, hook), async (c) => {
   const body = c.req.valid("json");
   const clubId = c.get("clubId");
+  const own = await ownMember(c);
   const row = await db.transaction(async (tx) => {
+    // Per-person advisory lock BEFORE the row lock -- the same order as clock-out, /close and the sweep (no lock-order deadlock).
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`time:${own.id}`}, 0))`);
     const entry = await ownOpenEntry(c, tx, true);
-    if (entry.endedAt === null) throw new ConflictError("Stop the running entry first", { details: { code: "running" } });
+    const running = entry.endedAt === null;
+    if (running && !body.endedAt) throw new ConflictError("Stop the running entry first", { details: { code: "running" } });
+    const now = new Date();
     const startedAt = body.startedAt ? new Date(body.startedAt) : entry.startedAt;
-    const endedAt = body.endedAt ? new Date(body.endedAt) : entry.endedAt;
-    assertEntryWindow(startedAt, endedAt);
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`time:${entry.clubMemberId}`}, 0))`);
+    let endedAt: Date;
+    if (running && !body.startedAt) endedAt = runningEnd(startedAt, new Date(body.endedAt!), now);
+    else {
+      endedAt = body.endedAt ? new Date(body.endedAt) : entry.endedAt!;
+      assertEntryWindow(startedAt, endedAt, now);
+    }
     await assertNoOverlap(tx, entry.clubMemberId, startedAt, endedAt, entry.id);
-    const [updated] = await tx.update(timeEntries).set({ startedAt, endedAt }).where(eq(timeEntries.id, entry.id)).returning();
-    await writeAudit(tx, { eventType: "time_entry.update", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId } });
+    // `corrected`: an end entered afterwards, a moved start when ending, or any change of a stamped entry after clock-out.
+    const startMoved = body.startedAt !== undefined && startedAt.getTime() !== entry.startedAt.getTime();
+    const endMoved = !running && body.endedAt !== undefined && endedAt.getTime() !== entry.endedAt!.getTime();
+    const corrected = entry.corrected || (running && (isCorrection(endedAt, now) || startMoved)) || (!running && entry.source === "stempeln" && (startMoved || endMoved));
+    const [updated] = await tx.update(timeEntries).set({ startedAt, endedAt, corrected, closedBy: null }).where(eq(timeEntries.id, entry.id)).returning();
+    await writeAudit(tx, { eventType: "time_entry.update", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId, corrected, endedRunning: running } });
     return updated!;
   });
-  return c.json({ data: shapeEntry(row) });
+  return c.json({ data: shapeEntry(row, c.get("user").id) });
 });
 
+/** Own open entry, finished or RUNNING: deleting a running entry is the documented way out ("Eintrag verwerfen", Wave 16 T2). */
 timeEntryRoutes.delete("/:id", async (c) => {
   const clubId = c.get("clubId");
   await db.transaction(async (tx) => {
@@ -294,30 +363,98 @@ timeEntryRoutes.delete("/:id", async (c) => {
   return c.body(null, 204);
 });
 
-/** Confirm or reject (never one's own entry). */
+/**
+ * Confirm or reject (never one's own entry). Wave 16 T3: a RUNNING entry older than 16 h may be rejected -- it is ended at
+ * `startedAt + 16 h` so it no longer blocks the person; confirming a running entry stays 409 `running`. Whoever closed someone else's
+ * entry does not confirm it too (403 `closed_by_you`): the times they chose need a second person or the owner's edit -- unless no other
+ * `time:write` holder could confirm it (then the closer may; audit `soleConfirmer`).
+ */
 function decide(status: "bestaetigt" | "abgelehnt") {
   return async (c: Context<ClubEnv>) => {
     const clubId = c.get("clubId");
     const id = c.req.param("id") ?? "";
     if (!isUuid(id)) throw new NotFoundError("Time entry not found");
     const roles = c.get("clubRoleTypes");
+    const userId = c.get("user").id;
     const scope = await timeScopeOf(clubId, roles, c.get("membership").id);
     const own = await ownClubMemberRow(clubId, c.get("membership").id);
+    let endedRunning = false;
+    let soleConfirmer = false;
     const row = await db.transaction(async (tx) => {
       const [entry] = await tx.select().from(timeEntries).where(and(eq(timeEntries.id, id), eq(timeEntries.clubId, clubId))).for("update");
       if (!entry || !inScope(scope, entry.clubMemberId)) throw new NotFoundError("Time entry not found");
       if (own && entry.clubMemberId === own.id) throw new ForbiddenError("Nobody decides about their own entry", { details: { code: "no_self_decision" } });
-      if (entry.endedAt === null) throw new ConflictError("The entry is still running", { details: { code: "running" } });
       if (entry.status !== "offen") throw new ConflictError("The entry was already decided", { details: { code: "entry_decided" } });
-      const [updated] = await tx.update(timeEntries).set({ status, confirmedBy: c.get("user").id, confirmedAt: new Date() }).where(eq(timeEntries.id, entry.id)).returning();
-      await writeAudit(tx, { eventType: status === "bestaetigt" ? "time_entry.confirm" : "time_entry.reject", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId } });
+      const now = new Date();
+      endedRunning = entry.endedAt === null && status === "abgelehnt" && isOverdue(entry, now);
+      if (entry.endedAt === null && !endedRunning) throw new ConflictError("The entry is still running", { details: { code: "running" } });
+      if (status === "bestaetigt" && entry.closedBy !== null && entry.closedBy === userId) {
+        // Somebody else confirms the times the closer chose -- unless nobody else could (small club): then the closer may, audited.
+        soleConfirmer = !(await hasOtherConfirmer(clubId, entry.clubMemberId, c.get("membership").id));
+        if (!soleConfirmer) throw new ForbiddenError("You set the end of this entry; somebody else confirms it", { details: { code: "closed_by_you" } });
+      }
+      const ending = endedRunning ? { endedAt: maxEndOf(entry.startedAt, now), closedBy: userId, closedByOther: true } : {};
+      const [updated] = await tx.update(timeEntries).set({ status, confirmedBy: userId, confirmedAt: now, ...ending }).where(eq(timeEntries.id, entry.id)).returning();
+      await writeAudit(tx, { eventType: status === "bestaetigt" ? "time_entry.confirm" : "time_entry.reject", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId, endedRunning, ...(soleConfirmer ? { soleConfirmer } : {}) } });
       return updated!;
     });
-    return c.json({ data: shapeEntry(row) });
+    if (endedRunning) await notifyTimeEntry("closed_by_other", row);
+    return c.json({ data: shapeEntry(row, c.get("user").id) });
   };
 }
 timeEntryRoutes.post("/:id/confirm", needsPermission("time:write"), decide("bestaetigt"));
 timeEntryRoutes.post("/:id/reject", needsPermission("time:write"), decide("abgelehnt"));
+
+/**
+ * Wave 16 T3: a board member / department lead (`time:write`, same scope as confirming) ends someone else's entry that has been
+ * running for more than 16 h, with an explicit end (`startedAt < endedAt <= startedAt + 16 h`). Never one's own entry (use clock-out).
+ * The entry stays `offen`, is flagged `corrected` + `closedByOther`, audited with the actor, and the person is notified.
+ */
+timeEntryRoutes.post("/:id/close", needsPermission("time:write"), zValidator("json", z.object({ endedAt: isoInstant }), hook), async (c) => {
+  const clubId = c.get("clubId");
+  const id = c.req.param("id") ?? "";
+  if (!isUuid(id)) throw new NotFoundError("Time entry not found");
+  const { endedAt: rawEnd } = c.req.valid("json");
+  const userId = c.get("user").id;
+  const scope = await timeScopeOf(clubId, c.get("clubRoleTypes"), c.get("membership").id);
+  const own = await ownClubMemberRow(clubId, c.get("membership").id);
+  const row = await db.transaction(async (tx) => {
+    const [peek] = await tx.select({ clubMemberId: timeEntries.clubMemberId }).from(timeEntries).where(and(eq(timeEntries.id, id), eq(timeEntries.clubId, clubId)));
+    if (!peek || !inScope(scope, peek.clubMemberId)) throw new NotFoundError("Time entry not found");
+    if (own && peek.clubMemberId === own.id) throw new ForbiddenError("Use clock-out for your own entry", { details: { code: "no_self_decision" } });
+    // Same per-person lock as clock-out / PATCH, so the person and the board cannot end the entry at the same time.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`time:${peek.clubMemberId}`}, 0))`);
+    const [entry] = await tx.select().from(timeEntries).where(eq(timeEntries.id, id)).for("update");
+    if (!entry) throw new NotFoundError("Time entry not found");
+    if (entry.endedAt !== null) throw new ConflictError("The entry is not running", { details: { code: "not_running" } });
+    if (entry.status !== "offen") throw new ConflictError("The entry was already decided", { details: { code: "entry_decided" } });
+    const now = new Date();
+    if (!isOverdue(entry, now)) throw new ConflictError("Only entries running for more than 16 hours can be ended by somebody else", { details: { code: "not_overdue" } });
+    const endedAt = runningEnd(entry.startedAt, new Date(rawEnd), now);
+    await assertNoOverlap(tx, entry.clubMemberId, entry.startedAt, endedAt, entry.id);
+    const [updated] = await tx.update(timeEntries).set({ endedAt, corrected: true, closedBy: userId, closedByOther: true }).where(eq(timeEntries.id, entry.id)).returning();
+    await writeAudit(tx, { eventType: "time_entry.close", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId, minutes: minutesOf(updated!) } });
+    return updated!;
+  });
+  await notifyTimeEntry("closed_by_other", row);
+  return c.json({ data: shapeEntry(row, c.get("user").id) });
+});
+
+/** Deny by default like `needsTracking`, except when the target is an OPEN entry of the caller (running or finished): correcting or ending it never needs a rate. */
+function needsTrackingOrOwnOpen() {
+  return async (c: Context<ClubEnv>, next: () => Promise<void>) => {
+    try {
+      await requireTrackingOf(c);
+    } catch (err) {
+      const own = err instanceof ForbiddenError ? await ownOrNull(c) : null;
+      const id = c.req.param("id") ?? "";
+      if (!own || !isUuid(id)) throw err;
+      const [mine] = await db.select({ id: timeEntries.id }).from(timeEntries).where(and(eq(timeEntries.id, id), eq(timeEntries.clubMemberId, own.id), eq(timeEntries.status, "offen"))).limit(1);
+      if (!mine) throw err;
+    }
+    await next();
+  };
+}
 
 function needsTracking() {
   return async (c: Context<ClubEnv>, next: () => Promise<void>) => {
@@ -459,14 +596,18 @@ const eur = (cents: number | null) => (cents === null ? "" : (cents / 100).toFix
 const germanDate = (iso: string | null) => (iso ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : "");
 const dec = (n: number) => String(n).replace(".", ",");
 const REPORT_NOTE = "Berechnungsgrundlage, keine Abrechnung";
+/** Wave 16 (D3): number of entries in the row whose end was entered afterwards or set automatically (empty when none). */
+const MARKED_HEADER = "Korrigiert/automatisch beendet";
+const markedOf = (r: Pick<ReportRow, "correctedEntries" | "autoClosedEntries">): number => r.correctedEntries + r.autoClosedEntries;
 
 function exportHeader(withRates: boolean): string[] {
-  return withRates ? ["Name", "Rolle(n)", "Termin", "Datum", "Stunden", "Satz (EUR/h)", "Betrag (EUR)", "Satz fehlt"] : ["Name", "Rolle(n)", "Termin", "Datum", "Stunden"];
+  return withRates ? ["Name", "Rolle(n)", "Termin", "Datum", "Stunden", "Satz (EUR/h)", "Betrag (EUR)", "Satz fehlt", MARKED_HEADER] : ["Name", "Rolle(n)", "Termin", "Datum", "Stunden", MARKED_HEADER];
 }
 
 function csvRow(r: ReportRow, withRates: boolean): Array<string | number> {
   const base = [r.displayName ?? "", r.roleTypes.join(", "), r.eventTitle ?? "", germanDate(r.eventDate), dec(r.hours)];
-  return withRates ? [...base, eur(r.rateCents), eur(r.amountCents), r.rateMissing ? "ja" : ""] : base;
+  const marked = markedOf(r) > 0 ? String(markedOf(r)) : "";
+  return withRates ? [...base, eur(r.rateCents), eur(r.amountCents), r.rateMissing ? "ja" : "", marked] : [...base, marked];
 }
 
 /**
@@ -487,6 +628,7 @@ timeReportRoutes.get("/", zValidator("query", reportQuery, hook), async (c) => {
       const lines = report.rows.map((r) => csvRow(r, withRates));
       const total: Array<string | number> = ["Summe", "", "", "", dec(report.totals.hours)];
       if (withRates) total.push("", eur(report.totals.amountCents), "");
+      total.push(markedOf(report.totals) > 0 ? String(markedOf(report.totals)) : "");
       return c.body(buildCsv(header, [...lines, total]), 200, { ...headers, "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": 'attachment; filename="stundenbericht.csv"' });
     }
     const bold = (text: string): XlsxCell => ({ text, bold: true });
@@ -498,13 +640,14 @@ timeReportRoutes.get("/", zValidator("query", reportQuery, hook), async (c) => {
       header.map(bold),
       ...report.rows.map((r): XlsxCell[] => {
         const base: XlsxCell[] = [r.displayName, r.roleTypes.join(", "), r.eventTitle, germanDate(r.eventDate), r.hours];
-        return withRates ? [...base, r.rateCents === null ? null : r.rateCents / 100, r.amountCents === null ? null : r.amountCents / 100, r.rateMissing ? "ja" : null] : base;
+        const marked = markedOf(r) > 0 ? markedOf(r) : null;
+        return withRates ? [...base, r.rateCents === null ? null : r.rateCents / 100, r.amountCents === null ? null : r.amountCents / 100, r.rateMissing ? "ja" : null, marked] : [...base, marked];
       }),
       withRates
-        ? [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }, null, report.totals.amountCents === null ? null : { number: report.totals.amountCents / 100, bold: true }]
-        : [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }],
+        ? [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }, null, report.totals.amountCents === null ? null : { number: report.totals.amountCents / 100, bold: true }, null, markedOf(report.totals) > 0 ? { number: markedOf(report.totals), bold: true } : null]
+        : [bold("Summe"), null, null, null, { number: report.totals.hours, bold: true }, markedOf(report.totals) > 0 ? { number: markedOf(report.totals), bold: true } : null],
     ];
-    const bytes = buildXlsx("Stundenbericht", sheet, withRates ? [28, 24, 32, 12, 10, 14, 14, 12] : [28, 24, 32, 12, 10]);
+    const bytes = buildXlsx("Stundenbericht", sheet, withRates ? [28, 24, 32, 12, 10, 14, 14, 12, 16] : [28, 24, 32, 12, 10, 16]);
     return c.body(bytes as unknown as ArrayBuffer, 200, { ...headers, "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Content-Disposition": 'attachment; filename="stundenbericht.xlsx"' });
   }
   c.header("Cache-Control", "private, no-store");

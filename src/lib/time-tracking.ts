@@ -1,4 +1,6 @@
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+
+import { member } from "../auth/auth-schema.js";
 
 import { db } from "../db/client.js";
 import { clubMemberDepartments, clubMembers } from "../db/schema/club-members.js";
@@ -6,8 +8,8 @@ import { clubRoles } from "../db/schema/club-roles.js";
 import { events } from "../db/schema/events.js";
 import { rateCards, timeEntries, type RateCardRow, type TimeEntryRow } from "../db/schema/event-extras.js";
 import type { DbExecutor } from "./club-members.js";
-import { hasClubPermission } from "./club-permissions.js";
-import { hasClubWidePermission, ownDepartmentIds } from "./event-access.js";
+import { CLUB_ROLE_TYPES, hasClubPermission } from "./club-permissions.js";
+import { DEPARTMENT_SCOPED_ROLES, hasClubWidePermission, ownDepartmentIds } from "./event-access.js";
 import { ConflictError, ForbiddenError, ValidationError } from "./errors.js";
 import { todayBerlin } from "./member-lifecycle.js";
 
@@ -85,6 +87,33 @@ export async function timeScopeOf(clubId: string, roleTypes: readonly string[], 
 
 export const inScope = (scope: TimeScope, clubMemberId: string): boolean => scope.clubMemberIds === null || scope.clubMemberIds.has(clubMemberId);
 
+/**
+ * Wave 16 review: could anybody besides `excludeAccountId` (the closer) confirm entries of `clubMemberId`? Holders of a club-wide role
+ * with `time:write` (roles in term), or of a department-scoped one for a department the person currently belongs to; never the person.
+ */
+export async function hasOtherConfirmer(clubId: string, clubMemberId: string, excludeAccountId: string): Promise<boolean> {
+  const today = todayBerlin();
+  const writers = CLUB_ROLE_TYPES.filter((r) => hasClubPermission([r], "time:write"));
+  const scoped = writers.filter((r) => (DEPARTMENT_SCOPED_ROLES as readonly string[]).includes(r));
+  const wide = writers.filter((r) => !scoped.includes(r));
+  const [owner] = await db.select({ memberId: clubMembers.memberId }).from(clubMembers).where(eq(clubMembers.id, clubMemberId));
+  const departments = (
+    await db
+      .select({ id: clubMemberDepartments.departmentId })
+      .from(clubMemberDepartments)
+      .where(and(eq(clubMemberDepartments.clubMemberId, clubMemberId), lte(clubMemberDepartments.since, today), or(isNull(clubMemberDepartments.until), gte(clubMemberDepartments.until, today))))
+  ).map((d) => d.id);
+  const reach = [wide.length > 0 ? inArray(clubRoles.roleType, wide) : undefined, scoped.length > 0 && departments.length > 0 ? and(inArray(clubRoles.roleType, scoped), inArray(clubRoles.departmentId, departments)) : undefined].filter((x) => x !== undefined);
+  if (reach.length === 0) return false;
+  const [other] = await db
+    .select({ id: clubRoles.id })
+    .from(clubRoles)
+    .innerJoin(member, eq(member.id, clubRoles.memberId))
+    .where(and(eq(member.organizationId, clubId), ne(member.id, excludeAccountId), owner?.memberId ? ne(member.id, owner.memberId) : undefined, or(isNull(clubRoles.termEndsAt), gte(clubRoles.termEndsAt, today)), or(...reach)))
+    .limit(1);
+  return other !== undefined;
+}
+
 export const minutesOf = (entry: Pick<TimeEntryRow, "startedAt" | "endedAt">): number | null => (entry.endedAt ? Math.max(0, Math.round((entry.endedAt.getTime() - entry.startedAt.getTime()) / 60_000)) : null);
 
 /** Time window rules of a finished entry. */
@@ -93,6 +122,31 @@ export function assertEntryWindow(startedAt: Date, endedAt: Date, now = new Date
   if (endedAt.getTime() > now.getTime() + 5 * 60_000) throw new ValidationError("An entry cannot end in the future", { details: { code: "in_future" } });
   if (endedAt.getTime() - startedAt.getTime() > MAX_ENTRY_HOURS * 3_600_000) throw new ValidationError(`An entry covers at most ${MAX_ENTRY_HOURS} hours`, { details: { code: "too_long" } });
   if (now.getTime() - startedAt.getTime() > MAX_AGE_DAYS * 86_400_000) throw new ValidationError("The entry is too old to be recorded", { details: { code: "too_old" } });
+}
+
+/** Tolerance for client clocks: an end up to 5 min ahead of the server is stored as "now"; an end more than 5 min in the past is a correction. */
+export const END_SLACK_MS = 5 * 60_000;
+const MAX_ENTRY_MS = MAX_ENTRY_HOURS * 3_600_000;
+
+/** Latest end a running entry may get: `min(now, startedAt + 16 h)`. */
+export const maxEndOf = (startedAt: Date, now = new Date()): Date => new Date(Math.min(now.getTime(), startedAt.getTime() + MAX_ENTRY_MS));
+
+/** Running for more than 16 h: it can no longer be stopped "now" and needs an explicit end (Wave 16). */
+export const isOverdue = (entry: Pick<TimeEntryRow, "startedAt" | "endedAt">, now = new Date()): boolean => entry.endedAt === null && now.getTime() - entry.startedAt.getTime() > MAX_ENTRY_MS;
+
+/** The given end lies clearly in the past (an end time entered afterwards, flagged `corrected`). */
+export const isCorrection = (endedAt: Date, now = new Date()): boolean => endedAt.getTime() < now.getTime() - END_SLACK_MS;
+
+/**
+ * Wave 16 T1: rules for ENDING a running entry with an explicit end: `startedAt < endedAt <= min(now, startedAt + 16 h)` (5 min clock
+ * tolerance, stored as now). Returns the end to store. Unlike `assertEntryWindow` there is no age limit: an entry that has been running
+ * for longer than a year must still be endable, otherwise it would block the person forever.
+ */
+export function runningEnd(startedAt: Date, endedAt: Date, now = new Date()): Date {
+  if (endedAt <= startedAt) throw new ValidationError("endedAt must be after startedAt", { details: { code: "invalid_time" } });
+  if (endedAt.getTime() > now.getTime() + END_SLACK_MS) throw new ValidationError("An entry cannot end in the future", { details: { code: "in_future" } });
+  if (endedAt.getTime() - startedAt.getTime() > MAX_ENTRY_MS) throw new ValidationError(`An entry covers at most ${MAX_ENTRY_HOURS} hours`, { details: { code: "too_long" } });
+  return endedAt > now ? now : endedAt;
 }
 
 /** Another entry of the person overlapping [startedAt, endedAt) (a running entry counts until now). */
@@ -140,6 +194,9 @@ export interface ReportRow {
   rateCents: number | null;
   amountCents: number | null;
   rateMissing: boolean;
+  /** Wave 16 (D3): confirmed entries of the row whose end was entered afterwards / that were ended automatically. */
+  correctedEntries: number;
+  autoClosedEntries: number;
 }
 
 export interface ReportOptions {
@@ -176,9 +233,9 @@ function tooLarge(): never {
 }
 
 /** Confirmed entries of a period, filtered (all filters in SQL) and grouped; amounts only when `withRates`. `people` is always the per-person sum. */
-export async function buildReport(clubId: string, opts: ReportOptions): Promise<{ groupBy: ReportGroup; rows: ReportRow[]; people: ReportRow[]; totals: { minutes: number; hours: number; amountCents: number | null } }> {
+export async function buildReport(clubId: string, opts: ReportOptions): Promise<{ groupBy: ReportGroup; rows: ReportRow[]; people: ReportRow[]; totals: { minutes: number; hours: number; amountCents: number | null; correctedEntries: number; autoClosedEntries: number } }> {
   const groupBy = opts.groupBy ?? "person";
-  const empty = { groupBy, rows: [], people: [], totals: { minutes: 0, hours: 0, amountCents: opts.withRates ? 0 : null } };
+  const empty = { groupBy, rows: [], people: [], totals: { minutes: 0, hours: 0, amountCents: opts.withRates ? 0 : null, correctedEntries: 0, autoClosedEntries: 0 } };
   if (opts.scope.clubMemberIds !== null && opts.scope.clubMemberIds.size === 0) return empty;
   const conditions = [
     eq(timeEntries.clubId, clubId),
@@ -216,14 +273,16 @@ export async function buildReport(clubId: string, opts: ReportOptions): Promise<
   type Acc = ReportRow & { rates: Set<number> };
   const make = (key: { memberId: string | null; name: string | null; roles: string[]; eventId: string | null; title: string | null; date: string | null }): Acc => ({
     clubMemberId: key.memberId, displayName: key.name, roleTypes: key.roles, eventId: key.eventId, eventTitle: key.title, eventDate: key.date,
-    entries: 0, minutes: 0, hours: 0, rateCents: null, amountCents: opts.withRates ? 0 : null, rateMissing: false, rates: new Set<number>(),
+    entries: 0, minutes: 0, hours: 0, rateCents: null, amountCents: opts.withRates ? 0 : null, rateMissing: false, correctedEntries: 0, autoClosedEntries: 0, rates: new Set<number>(),
   });
   const grouped = new Map<string, Acc>();
   const perPerson = new Map<string, Acc>();
-  const add = (map: Map<string, Acc>, key: string, init: () => Acc, minutes: number, rate: number | null) => {
+  const add = (map: Map<string, Acc>, key: string, init: () => Acc, minutes: number, rate: number | null, flags: Pick<TimeEntryRow, "corrected" | "autoClosed">) => {
     const acc = map.get(key) ?? init();
     acc.entries += 1;
     acc.minutes += minutes;
+    if (flags.autoClosed) acc.autoClosedEntries += 1;
+    else if (flags.corrected) acc.correctedEntries += 1;
     if (opts.withRates) {
       if (rate === null) acc.rateMissing = true;
       else {
@@ -243,10 +302,10 @@ export async function buildReport(clubId: string, opts: ReportOptions): Promise<
     const person = () => make({ memberId: entry.clubMemberId, name, roles: explicit, eventId: null, title: null, date: null });
     const eventRow = () => make({ memberId: null, name: null, roles: [], eventId: entry.eventId, title, date: eventDate });
     const both = () => make({ memberId: entry.clubMemberId, name, roles: explicit, eventId: entry.eventId, title, date: eventDate });
-    add(perPerson, entry.clubMemberId, person, minutes, rate);
+    add(perPerson, entry.clubMemberId, person, minutes, rate, entry);
     if (groupBy === "person") continue;
-    if (groupBy === "event") add(grouped, entry.eventId ?? "none", eventRow, minutes, rate);
-    else add(grouped, `${entry.clubMemberId}|${entry.eventId ?? "none"}`, both, minutes, rate);
+    if (groupBy === "event") add(grouped, entry.eventId ?? "none", eventRow, minutes, rate, entry);
+    else add(grouped, `${entry.clubMemberId}|${entry.eventId ?? "none"}`, both, minutes, rate, entry);
   }
   const finish = (map: Map<string, Acc>): ReportRow[] =>
     [...map.values()]
@@ -255,7 +314,8 @@ export async function buildReport(clubId: string, opts: ReportOptions): Promise<
   const people = finish(perPerson);
   const out = groupBy === "person" ? people : finish(grouped);
   const minutes = people.reduce((n, p) => n + p.minutes, 0);
-  return { groupBy, rows: out, people, totals: { minutes, hours: round2(minutes / 60), amountCents: opts.withRates ? people.reduce((n, p) => n + (p.amountCents ?? 0), 0) : null } };
+  const sum = (k: "correctedEntries" | "autoClosedEntries") => people.reduce((n, p) => n + p[k], 0);
+  return { groupBy, rows: out, people, totals: { minutes, hours: round2(minutes / 60), amountCents: opts.withRates ? people.reduce((n, p) => n + (p.amountCents ?? 0), 0) : null, correctedEntries: sum("correctedEntries"), autoClosedEntries: sum("autoClosedEntries") } };
 }
 
 /** People (members with confirmed entries in the period, or with an applicable rate today), role types and events for the report selector. Bounded; `truncated` flags a cut list. */

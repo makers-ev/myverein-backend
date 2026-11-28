@@ -55,3 +55,34 @@ function isMemberAvailable(candidate: Date, input: AvailabilityInput): boolean {
 export function computeAvailability(candidate: Date, members: AvailabilityInput[]): { memberId: string; available: boolean }[] {
   return members.map((m) => ({ memberId: m.memberId, available: isMemberAvailable(candidate, m) }));
 }
+
+export type WindowAvailability = "verfuegbar" | "nicht_verfuegbar" | "unbekannt";
+
+/** Local calendar dates (`YYYY-MM-DD`) from `start` to `end` inclusive (wall-clock dates as `computeAvailability` reads them), at most 31. */
+function datesBetween(start: Date, end: Date): string[] {
+  const out: string[] = [];
+  const day = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const last = toDateString(end);
+  while (out.length < 31) {
+    const d = toDateString(day);
+    out.push(d);
+    if (d >= last) break;
+    day.setDate(day.getDate() + 1);
+  }
+  return out;
+}
+
+/**
+ * Wave 16 T6: one person's availability for a time window given as club-local wall-clock instants (`start`, `end` = last minute).
+ * - An exception "nicht verfügbar" (holiday) on any day of the window -> `nicht_verfuegbar`.
+ * - No weekly pattern: `verfuegbar` only if every day of the window has an exception "verfügbar", otherwise `unbekannt`
+ *   (somebody who only entered a holiday has said nothing about other days -- missing data never reads as "not available").
+ * - Otherwise the precedence rules of `computeAvailability` at the start and at the end of the window.
+ */
+export function windowAvailability(start: Date, end: Date, input: AvailabilityInput): WindowAvailability {
+  const dates = datesBetween(start, end);
+  const relevant = input.exceptions.filter((e) => dates.includes(e.date));
+  if (relevant.some((e) => !e.isAvailable)) return "nicht_verfuegbar";
+  if (input.slots.length === 0) return dates.every((d) => relevant.some((e) => e.date === d && e.isAvailable)) ? "verfuegbar" : "unbekannt";
+  return isMemberAvailable(start, input) && isMemberAvailable(end, input) ? "verfuegbar" : "nicht_verfuegbar";
+}

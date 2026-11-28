@@ -103,7 +103,7 @@ describe("time tracking by rate and the extended report", () => {
     const trainer = person.rows.find((r: any) => r.displayName === "Trainer A"); // eslint-disable-line @typescript-eslint/no-explicit-any
     expect(trainer).toMatchObject({ entries: 2, minutes: 180, hours: 3, rateCents: 1500, amountCents: 4500, roleTypes: ["trainer"], eventId: null });
     expect(person.people).toEqual(person.rows);
-    expect(person.totals).toEqual({ minutes: 180 + 30 + 60 + 90, hours: 6, amountCents: 4500 + 0 + 1000 });
+    expect(person.totals).toEqual({ minutes: 180 + 30 + 60 + 90, hours: 6, amountCents: 4500 + 0 + 1000, correctedEntries: 0, autoClosedEntries: 0 });
     const noRate = person.rows.find((r: any) => r.displayName === "Leiter A"); // eslint-disable-line @typescript-eslint/no-explicit-any
     expect(noRate).toMatchObject({ rateMissing: true, amountCents: 0, rateCents: null });
     const byEvent = await get("groupBy=event");
@@ -160,7 +160,7 @@ describe("time tracking by rate and the extended report", () => {
     expect(people.roleTypes).toEqual(["abteilungsleitung", "trainer"]);
     expect(people.events.map((e: any) => e.eventId).sort()).toEqual([e1, e2].sort()); // eslint-disable-line @typescript-eslint/no-explicit-any
     const csv = await (await call(lead, "/time-report?format=csv")).text();
-    expect(csv).toContain("Name;Rolle(n);Termin;Datum;Stunden\r\n");
+    expect(csv).toContain("Name;Rolle(n);Termin;Datum;Stunden;Korrigiert/automatisch beendet\r\n");
     expect(csv).not.toMatch(/Satz|Betrag|Fremdabteilung/);
     const sheet = sheetOf(new Uint8Array(await (await call(lead, "/time-report?format=xlsx")).arrayBuffer()));
     expect(sheet).not.toMatch(/Satz|Betrag|Fremdabteilung/);
@@ -270,11 +270,15 @@ describe("time tracking by rate and the extended report", () => {
     expect(current).toMatchObject({ running: true });
     expect((await call(m, "/time-entries", "POST", { startedAt: hoursAgo(3).toISOString(), endedAt: hoursAgo(2).toISOString() })).status).toBe(403);
     expect((await call(m, "/time-entries/clock-out", "POST")).status).toBe(200);
-    // A second running entry that is older than 16 h cannot be closed (422 too_long), but can be deleted.
+    // A second running entry that is older than 16 h is never capped silently (409 needs_end_time), keeps the 16 h cap for an explicit
+    // end (422 too_long), and can still be deleted (Wave 16).
     const [old] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: m.clubMemberId, startedAt: hoursAgo(40), source: "stempeln", status: "offen" }).returning();
     const stop = await call(m, "/time-entries/clock-out", "POST");
-    expect(stop.status).toBe(422);
-    expect((await fx.json(stop)).error.details.code).toBe("too_long");
+    expect(stop.status).toBe(409);
+    expect((await fx.json(stop)).error.details.code).toBe("needs_end_time");
+    const tooLong = await call(m, "/time-entries/clock-out", "POST", { endedAt: hoursAgo(23).toISOString() });
+    expect(tooLong.status).toBe(422);
+    expect((await fx.json(tooLong)).error.details.code).toBe("too_long");
     expect((await call(m, `/time-entries/${old!.id}`, "DELETE")).status).toBe(204);
     const [mine] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: m.clubMemberId, startedAt: hoursAgo(5), endedAt: hoursAgo(4), source: "manuell", status: "offen" }).returning();
     expect((await call(m, `/time-entries/${mine!.id}`, "DELETE")).status).toBe(204);
@@ -325,7 +329,7 @@ describe("time tracking by rate and the extended report", () => {
     expect(peopleEvents.title).toBe("Termin");
     const csv = await (await call(fx.users.board, "/time-report")).text().then(() => call(fx.users.board, "/time-report?format=csv").then((r) => r.text()));
     expect(csv).toContain("Betrag (EUR);Satz fehlt");
-    expect(csv).toMatch(/Leiter A;[^\r\n]*;ja\r\n/);
+    expect(csv).toMatch(/Leiter A;[^\r\n]*;ja;\r\n/);
     const sheet = sheetOf(new Uint8Array(await (await call(fx.users.board, "/time-report?format=xlsx")).arrayBuffer()));
     expect(sheet).toContain("Satz fehlt");
     expect(sheet).toContain("<t xml:space=\"preserve\">ja</t>");

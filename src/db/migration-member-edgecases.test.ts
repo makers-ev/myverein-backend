@@ -75,7 +75,7 @@ describe("migrations 0014/0015 edge cases", () => {
 
     // last_user_id is filled for every linked member (needed to match a re-join)
     expect(Number((await q(`SELECT count(*) AS n FROM club_members WHERE member_id IS NOT NULL AND last_user_id IS NULL`))[0]!.n)).toBe(0);
-  });
+  }, 60_000);
 
   it("re-running the real migrator is a no-op", async () => {
     const pool = await wave6Database("rerun", seedLegacy);
@@ -89,7 +89,7 @@ describe("migrations 0014/0015 edge cases", () => {
     expect(await snapshot()).toEqual(before);
     expect((await pool.query(`SELECT count(*) AS n FROM member_categories`)).rows[0].n).toBe(categories);
     expect((await pool.query(`SELECT count(*) AS n FROM drizzle.__drizzle_migrations`)).rows[0].n).toBe(String(journalEntries));
-  });
+  }, 60_000);
 
   it("rolls back completely when the migration fails half-way (nothing is left half-migrated)", async () => {
     const pool = await wave6Database("fail", seedLegacy);

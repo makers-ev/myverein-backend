@@ -21,6 +21,7 @@ import { getVisibleCalendarIds } from "../lib/calendar-visibility.js";
 import { hasClubPermission } from "../lib/club-permissions.js";
 import { loadVisibleEvent } from "../lib/event-access.js";
 import { eventAttendanceRoutes } from "./event-attendance.js";
+import { eventAvailabilityHintRoutes } from "./event-availability-hints.js";
 import { eventHelperRoutes } from "./event-helpers.js";
 import { eventParticipantRoutes } from "./event-participants.js";
 import { eventRideRoutes } from "./event-rides.js";
@@ -36,6 +37,8 @@ export const eventRoutes = new Hono<ClubEnv>();
 eventRoutes.use("*", rateLimit({ windowMs: 60_000, max: 60 }));
 eventRoutes.use("*", sessionGuard);
 eventRoutes.use("*", clubGuard);
+// Wave 16 T6: before `GET /:id`, which would otherwise take "availability-hints" for an id.
+eventRoutes.route("/availability-hints", eventAvailabilityHintRoutes);
 
 /** Loads a calendar scoped to `clubId` only -- used by the calendars:write-gated write handlers below (board scope, not the visibility algorithm). */
 async function loadClubCalendar(calendarId: string, clubId: string) {

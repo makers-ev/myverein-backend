@@ -66,7 +66,7 @@ export const eventParticipation: PrivacyContributor = {
       .where(eq(helperSignups.clubMemberId, id))
       .orderBy(asc(helperShifts.startsAt));
     const rides = await ex.select({ event: events.title, seats: eventRides.seats, departurePlace: eventRides.departurePlace, departureAt: eventRides.departureAt }).from(eventRides).innerJoin(events, eq(events.id, eventRides.eventId)).where(eq(eventRides.driverClubMemberId, id));
-    const times = await ex.select({ startedAt: timeEntries.startedAt, endedAt: timeEntries.endedAt, source: timeEntries.source, status: timeEntries.status }).from(timeEntries).where(eq(timeEntries.clubMemberId, id)).orderBy(asc(timeEntries.startedAt));
+    const times = await ex.select({ startedAt: timeEntries.startedAt, endedAt: timeEntries.endedAt, source: timeEntries.source, status: timeEntries.status, corrected: timeEntries.corrected, autoClosed: timeEntries.autoClosed }).from(timeEntries).where(eq(timeEntries.clubMemberId, id)).orderBy(asc(timeEntries.startedAt));
     const feeds = s.accountMemberId ? await ex.select({ label: calendarFeedTokens.label, createdAt: calendarFeedTokens.createdAt, revokedAt: calendarFeedTokens.revokedAt }).from(calendarFeedTokens).where(eq(calendarFeedTokens.memberId, s.accountMemberId)) : [];
     return {
       events: {

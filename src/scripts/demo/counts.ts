@@ -110,6 +110,7 @@ export async function demoCounts(clubId: string): Promise<Record<string, number>
     ["time_entries_open", sql`SELECT count(*) FROM time_entries WHERE club_id = ${clubId} AND status = 'offen' AND ended_at IS NOT NULL`],
     ["time_entries_rejected", sql`SELECT count(*) FROM time_entries WHERE club_id = ${clubId} AND status = 'abgelehnt'`],
     ["time_entries_running", sql`SELECT count(*) FROM time_entries WHERE club_id = ${clubId} AND ended_at IS NULL`],
+    ["time_entries_stuck", sql`SELECT count(*) FROM time_entries WHERE club_id = ${clubId} AND ended_at IS NULL AND started_at < now() - interval '16 hours'`],
     ["time_entries_over_midnight", sql`SELECT count(*) FROM time_entries WHERE club_id = ${clubId} AND ended_at IS NOT NULL AND (started_at AT TIME ZONE 'Europe/Berlin')::date <> (ended_at AT TIME ZONE 'Europe/Berlin')::date`],
     ["time_entries_stempeln", sql`SELECT count(*) FROM time_entries WHERE club_id = ${clubId} AND source = 'stempeln'`],
     ["time_entries_aus_termin", sql`SELECT count(*) FROM time_entries WHERE club_id = ${clubId} AND source = 'aus_termin' AND event_id IS NOT NULL`],

@@ -105,6 +105,10 @@ export function pushDataFor(eventKey: string | null, refId: string | null, annou
   } else if (key.startsWith("meeting.") || key === "reminder.rsvp") {
     data.type = "meeting";
     if (refId) data.meetingId = refId;
+  } else if (key.startsWith("time.")) {
+    // Wave 16: the person's own time entry (still running / ended automatically / ended by the board); the app opens time tracking.
+    data.type = "time_entry";
+    if (refId) data.timeEntryId = refId;
   } else if (key.startsWith("reminder.")) {
     data.type = "reminder";
   }
@@ -137,6 +141,10 @@ const GENERIC_TEXT_BY_KEY: Record<string, string> = {
   "absence.reported": "Neue Abwesenheitsmeldung",
   "absence.changed": "Abwesenheitsmeldung geändert",
   "absence.withdrawn": "Abwesenheitsmeldung zurückgezogen",
+  "time.long_running": "Noch eingestempelt?",
+  "time.auto_closed": "Zeiteintrag beendet – bitte prüfen",
+  "time.auto_discarded": "Zeiteintrag verworfen",
+  "time.closed_by_other": "Zeiteintrag beendet – bitte prüfen",
 };
 
 const GENERIC_TEXT_EN: Record<DeliveryContent["template"], string> = {
@@ -161,6 +169,10 @@ const GENERIC_TEXT_BY_KEY_EN: Record<string, string> = {
   "absence.reported": "New absence report",
   "absence.changed": "Absence report changed",
   "absence.withdrawn": "Absence report withdrawn",
+  "time.long_running": "Still clocked in?",
+  "time.auto_closed": "Time entry ended – please check",
+  "time.auto_discarded": "Time entry discarded",
+  "time.closed_by_other": "Time entry ended – please check",
 };
 
 export function genericPushText(eventKey: string | null, template: DeliveryContent["template"], lang: MailLanguage = "de"): string {
