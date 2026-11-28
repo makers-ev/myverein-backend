@@ -42,7 +42,7 @@ export async function notifyTimeEntry(kind: TimeNotice, entry: Pick<TimeEntryRow
           }
         : {
             title: tr(lang, "Dein Zeiteintrag wurde beendet", "Your time entry was ended"),
-            body: tr(lang, `Dein Eintrag ab ${since} lief zu lange und wurde von der Vereinsleitung beendet${ended ? ` (Ende: ${ended})` : ""}. Bitte prüfe die Zeit in der Zeiterfassung.`, `Your entry from ${since} ran too long and was ended by the club management${ended ? ` (end: ${ended})` : ""}. Please check the time in time tracking.`),
+            body: tr(lang, `Dein Eintrag ab ${since} lief zu lange und wurde von der Leitung beendet${ended ? ` (Ende: ${ended})` : ""}. Bitte prüfe die Zeit in der Zeiterfassung.`, `Your entry from ${since} ran too long and was ended by the management${ended ? ` (end: ${ended})` : ""}. Please check the time in time tracking.`),
             template: "notice" as const,
           };
   return notifySafely({

@@ -191,7 +191,9 @@ timeEntryRoutes.post("/clock-in", needsTracking(), zValidator("json", clockInSch
 timeEntryRoutes.post("/clock-out", async (c) => {
   // No rate check: a running entry must be stoppable even after the rate lapsed.
   const own = await ownMember(c);
-  const parsed = endSchema.safeParse(await readJson(c));
+  const raw = await readJson(c);
+  if ("endedAt" in raw && raw.endedAt === null) throw new ValidationError("endedAt must be a date-time, or left out to stop now", { details: { code: "invalid_time" } });
+  const parsed = endSchema.safeParse(raw);
   if (!parsed.success) throw new ValidationError("Invalid request body", { details: parsed.error.issues });
   const given = parsed.data.endedAt ? new Date(parsed.data.endedAt) : null;
   const clubId = c.get("clubId");
@@ -332,7 +334,10 @@ timeEntryRoutes.patch("/:id", needsTrackingOrOwnOpen(), zValidator("json", patch
       assertEntryWindow(startedAt, endedAt, now);
     }
     await assertNoOverlap(tx, entry.clubMemberId, startedAt, endedAt, entry.id);
-    const corrected = entry.corrected || (running && isCorrection(endedAt, now));
+    // `corrected`: an end entered afterwards, a moved start when ending, or any change of a stamped entry after clock-out.
+    const startMoved = body.startedAt !== undefined && startedAt.getTime() !== entry.startedAt.getTime();
+    const endMoved = !running && body.endedAt !== undefined && endedAt.getTime() !== entry.endedAt!.getTime();
+    const corrected = entry.corrected || (running && (isCorrection(endedAt, now) || startMoved)) || (!running && entry.source === "stempeln" && (startMoved || endMoved));
     const [updated] = await tx.update(timeEntries).set({ startedAt, endedAt, corrected, closedBy: null }).where(eq(timeEntries.id, entry.id)).returning();
     await writeAudit(tx, { eventType: "time_entry.update", subjectId: entry.clubMemberId, payload: { clubId, entryId: entry.id, clubMemberId: entry.clubMemberId, corrected, endedRunning: running } });
     return updated!;

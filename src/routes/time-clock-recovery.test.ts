@@ -268,4 +268,32 @@ describe("a forgotten clock-in is never a dead end", () => {
     expect((await call(me, "/time-entries/clock-out", "POST")).status).toBe(200);
     await clear(me);
   });
+
+  it("flags changes of stamped entries as corrected, refuses endedAt null with a code, and words the board notice neutrally", async () => {
+    const me = fx.users.trainerA;
+    await clear(me);
+    const nullEnd = await call(me, "/time-entries/clock-out", "POST", { endedAt: null });
+    expect([nullEnd.status, (await fx.json(nullEnd)).error.details.code]).toEqual([422, "invalid_time"]);
+    // Stamped, stopped normally: not corrected; moving its end afterwards: corrected.
+    const [stamped] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: me.clubMemberId, startedAt: hoursAgo(5), endedAt: hoursAgo(4), source: "stempeln", status: "offen" }).returning();
+    let res = await call(me, `/time-entries/${stamped!.id}`, "PATCH", { endedAt: hoursAgo(3).toISOString() });
+    expect((await fx.json(res)).data).toMatchObject({ corrected: true });
+    // A manual entry moved: stays uncorrected (it was entered by hand anyway).
+    const [manual] = await db.insert(timeEntries).values({ clubId: fx.clubId, clubMemberId: me.clubMemberId, startedAt: hoursAgo(9), endedAt: hoursAgo(8), source: "manuell", status: "offen" }).returning();
+    res = await call(me, `/time-entries/${manual!.id}`, "PATCH", { endedAt: new Date(hoursAgo(8).getTime() + 30 * 60_000).toISOString() });
+    expect((await fx.json(res)).data).toMatchObject({ corrected: false });
+    // Ending a running entry "now" while moving its start: corrected.
+    await clear(me);
+    const runningNow = await stuck(me, 2);
+    res = await call(me, `/time-entries/${runningNow.id}`, "PATCH", { startedAt: hoursAgo(3).toISOString(), endedAt: new Date().toISOString() });
+    expect(res.status).toBe(200);
+    expect((await fx.json(res)).data).toMatchObject({ corrected: true });
+    // The notice after a close says "von der Leitung", not "Vereinsleitung".
+    await clear(me);
+    const entry = await stuck(me, 20);
+    expect((await call(fx.users.board, `/time-entries/${entry.id}/close`, "POST", { endedAt: new Date(entry.startedAt.getTime() + HOUR).toISOString() })).status).toBe(200);
+    const [note] = await db.select().from(messageDeliveries).where(and(eq(messageDeliveries.refId, `${entry.id}#closed_by_other`), eq(messageDeliveries.channel, "in_app")));
+    expect((note!.content as { body: string }).body).toContain("von der Leitung beendet");
+    await clear(me);
+  });
 });
